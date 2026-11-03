@@ -1,0 +1,128 @@
+#pragma once
+#include "glm/vec4.hpp"
+#include "glm/vec2.hpp"
+#include <glui/glui.h>
+#include <gameplay/effects.h>
+#include <optional>
+
+struct PlayerInventory;
+struct BlocksLoader;
+struct Item;
+struct CraftingTableInventory;
+struct Life;
+struct ProgramData;
+struct LocalPlayer;
+struct BaseBlock;
+struct ChunkSystem;
+struct UndoQueue;
+struct LightSystem;
+struct ClientEntityManager;
+struct ChestBlock;
+
+const int INVENTORY_TAB_DEFAULT = 0;
+const int INVENTORY_TAB_CRAFTING = 1;
+const int INVENTORY_TAB_CHEST = 2;
+const int INVENTORY_TAB_BLOCKS = 3;
+const int INVENTORY_TAB_ITEMS = 4;
+
+
+struct UiENgine
+{
+
+	gl2d::Renderer2D renderer2d;
+	glui::RendererUi menuRenderer;
+
+	void init();
+
+	void loadTextures(std::string path);
+
+	void clearOnlyTextures();
+
+	gl2d::TextureAtlas uiAtlas{6, 1};
+
+
+	gl2d::Font font;
+	gl2d::Texture uiTexture;
+	gl2d::Texture buttonTexture;
+
+	gl2d::Texture coinIconTexture;
+	gl2d::Texture arrowIconTexture;
+	gl2d::Texture bootsIconTexture;
+	gl2d::Texture chestPlateIconTexture;
+	gl2d::Texture helmetIconTexture;
+	gl2d::Texture potionIconTexture;
+
+
+	gl2d::Texture itemsBar;
+	gl2d::Texture itemsHighlighter;
+	gl2d::Texture itemsBarInventory;
+	gl2d::Texture oneInventorySlot;
+	gl2d::Texture arrowUI;
+	gl2d::Texture playerCell;
+
+	glm::vec2 itemsBarSize;
+	glm::vec2 itemsHighlighterSize;
+	glm::vec2 itemsBarInventorySize;
+	glm::vec2 oneInventorySlotSize;
+	glm::vec2 playerCellSize;
+
+	gl2d::Texture background;
+	gl2d::Texture vignete;
+
+	gl2d::Texture effectsTexture[Effects::EffectsNames::Effects_Count] = {};
+
+
+	enum BattleTextures
+	{
+		circle,
+		leftButton,
+		rightButton,
+		leftButtonFrontAttack,
+		rightButtonSwipeAttack,
+		circleSmall,
+
+		battleTexturesCount
+	};
+
+	gl2d::Texture battleTextures[battleTexturesCount];
+
+
+
+	//todo simplify
+	//cursorItemIndex returns -1 if outside the menu to throw items, and -2 if it is nowhere 
+	//if inside crafting, supply craftingTableInventory
+	void renderGameUI(float deltaTime, 
+		int w, int h, int itemSelected, PlayerInventory &inventory,
+		BlocksLoader &blocksLoader, bool insideInventory, int &cursorItemIndex,
+		int &currentInventoryTab, bool isCreative,
+		unsigned short &selectedItem, Life &playerHealth, ProgramData &programData,
+		LocalPlayer &player, int &craftingSlider, int &outCraftingRecepieGlobalIndex,
+		bool showUI, std::uint16_t interactingBlock, ChestBlock *chestBlock
+		);
+
+	bool renderBaseBlockUI(float deltaTime,
+		int w, int h, ProgramData &programData, 
+		BaseBlock &baseBlock, glm::ivec3 blockPos, ChunkSystem &chunkSystem,
+		UndoQueue &undoQueue, LightSystem &lightSystem, ClientEntityManager &clientEntityManager
+		);
+
+};
+
+
+struct Oscilator
+{
+
+	Oscilator() {};
+	Oscilator(float t, int fazes = 2): maxFazeTime(t), maxFazes(fazes) {};
+
+
+	float maxFazeTime  = 0;
+	int maxFazes = 0;
+
+	float currentTimer = 0;
+	int currentFaze = 0;
+
+	void update(float deltaTime);
+
+	void reset();
+};

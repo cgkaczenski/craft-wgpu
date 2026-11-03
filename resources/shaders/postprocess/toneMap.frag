@@ -1,0 +1,645 @@
+#version 330 core
+
+layout(location = 0) out vec4 outColor;
+
+noperspective in vec2 v_texCoords;
+uniform sampler2D u_color;
+uniform int u_tonemapper;
+uniform float u_exposure;
+
+//
+
+//https://github.com/TheRealMJP/BakingLab/blob/master/BakingLab/ACES.hlsl
+/*
+=================================================================================================
+
+  Baking Lab
+  by MJP and David Neubelt
+  http://mynameismjp.wordpress.com/
+
+  All code licensed under the MIT license
+
+=================================================================================================
+ The code in this file was originally written by Stephen Hill (@self_shadow), who deserves all
+ credit for coming up with this fit and implementing it. Buy him a beer next time you see him. :)
+*/
+
+// sRGB => XYZ => D65_2_D60 => AP1 => RRT_SAT
+mat3x3 ACESInputMat = mat3x3
+(
+	0.59719, 0.35458, 0.04823,
+	0.07600, 0.90834, 0.01566,
+	0.02840, 0.13383, 0.83777
+);
+
+// ODT_SAT => XYZ => D60_2_D65 => sRGB
+mat3x3 ACESOutputMat = mat3x3
+(
+	 1.60475, -0.53108, -0.07367,
+	-0.10208,  1.10813, -0.00605,
+	-0.00327, -0.07276,  1.07602
+);
+
+vec3 RRTAndODTFit(vec3 v)
+{
+	vec3 a = v * (v + 0.0245786f) - 0.000090537f;
+	vec3 b = v * (0.983729f * v + 0.4329510f) + 0.238081f;
+	return a / b;
+}
+
+vec3 ACESFitted(vec3 color)
+{
+	color = transpose(ACESInputMat) * color;
+	// Apply RRT and ODT
+	color = RRTAndODTFit(color);
+	color = transpose(ACESOutputMat) * color;
+	color = clamp(color, 0, 1);
+	return color;
+}
+
+vec3 ACESFilmSimple(vec3 x)
+{
+	float a = 2.51f;
+	float b = 0.03f;
+	float c = 2.43f;
+	float d = 0.59f;
+	float e = 0.14f;
+	return clamp((x*(a*x+b))/(x*(c*x+d)+e), 0, 1);
+
+}
+//
+
+
+// https://advances.realtimerendering.com/s2021/jpatry_advances2021/index.html
+// https://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.40.9608&rep=rep1&type=pdf
+vec4 rgb_to_lmsr(vec3 c)
+{
+	const mat4x3 m = mat4x3(
+		0.31670331, 0.70299344, 0.08120592, 
+		0.10129085, 0.72118661, 0.12041039, 
+		0.01451538, 0.05643031, 0.53416779, 
+		0.01724063, 0.60147464, 0.40056206);
+	return c * m;
+}
+vec3 lms_to_rgb(vec3 c)
+{
+	const mat3 m = mat3(
+		 4.57829597, -4.48749114,  0.31554848, 
+		-0.63342362,  2.03236026, -0.36183302, 
+		-0.05749394, -0.09275939,  1.90172089);
+	return c * m;
+}
+
+// https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2630540/pdf/nihms80286.pdf
+vec3 purkineShift(vec3 c)
+{
+	const vec3 m = vec3(0.63721, 0.39242, 1.6064);
+	const float K = 45.0;
+	const float S = 10.0;
+	const float k3 = 0.6;
+	const float k5 = 0.2;
+	const float k6 = 0.29;
+	const float rw = 0.139;
+	const float p = 0.6189;
+	
+	vec4 lmsr = rgb_to_lmsr(c);
+	
+	vec3 g = vec3(1.0) / sqrt(vec3(1.0) + (vec3(0.33) / m) * (lmsr.xyz + vec3(k5, k5, k6) * lmsr.w));
+	
+	float rc_gr = (K / S) * ((1.0 + rw * k3) * g.y / m.y - (k3 + rw) * g.x / m.x) * k5 * lmsr.w;
+	float rc_by = (K / S) * (k6 * g.z / m.z - k3 * (p * k5 * g.x / m.x + (1.0 - p) * k5 * g.y / m.y)) * lmsr.w;
+	float rc_lm = K * (p * g.x / m.x + (1.0 - p) * g.y / m.y) * k5 * lmsr.w;
+	
+	vec3 lms_gain = vec3(-0.5 * rc_gr + 0.5 * rc_lm, 0.5 * rc_gr + 0.5 * rc_lm, rc_by + rc_lm);
+	vec3 rgb_gain = lms_to_rgb(lms_gain);
+	
+	return c + rgb_gain;
+}
+
+float luminance(vec3 c)
+{
+	return dot(c, vec3(0.2126390059, 0.7151686788, 0.0721923154));
+}
+
+vec3 linear_to_srgb(vec3 c)
+{
+	const float yb = pow(0.055 * 2.4 / ((2.4 - 1.0) * (1.0 + 0.055)), 2.4);
+	const float rs = pow((2.4 - 1.0) / 0.055, 2.4 - 1.0) * pow((1.0 + 0.055) / 2.4, 2.4);
+	return vec3(
+		(c.x >= yb) ? ((1.0 + 0.055) * pow(c.x, 1.0 / 2.4) - 0.055) : (c.x * rs),
+		(c.y >= yb) ? ((1.0 + 0.055) * pow(c.y, 1.0 / 2.4) - 0.055) : (c.y * rs),
+		(c.z >= yb) ? ((1.0 + 0.055) * pow(c.z, 1.0 / 2.4) - 0.055) : (c.z * rs));
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//^aces^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/////////////////////////////////////////////////////////////////////////////////////////
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//agx
+//https://www.shadertoy.com/view/cd3XWr
+//https://www.shadertoy.com/view/dlcfRX
+/////////////////////////////////////////////////////////////////////////////////////////
+
+#define AGX_LOOK 2
+
+vec3 toLinearAXG(vec3 sRGB) {
+  bvec3 cutoff = lessThan(sRGB, vec3(0.04045));
+  vec3 higher = pow((sRGB + vec3(0.055))/vec3(1.055), vec3(2.4));
+  vec3 lower = sRGB/vec3(12.92);
+  
+  return mix(higher, lower, cutoff);
+}
+
+float toLinearAXG(float sRGB) {
+
+  bool cutoff = (sRGB < 0.04045f);
+
+  float higher = pow((sRGB + float(0.055))/float(1.055), float(2.4));
+  float lower = sRGB/float(12.92);
+  
+  return mix(higher, lower, cutoff);
+}
+
+vec3 AGX(vec3 col)
+{	
+	col = mat3(.842, .0423, .0424, .0784, .878, .0784, .0792, .0792, .879) * col;
+	// Log2 space encoding
+	col = clamp((log2(col) + 12.47393) / 16.5, vec3(0), vec3(1));
+	// Apply sigmoid function approximation
+	col = .5 + .5 * sin(((-3.11 * col + 6.42) * col - .378) * col - 1.44);
+	// AgX look (optional)
+	#if AGX_LOOK == 1
+	// Golden
+	col = mix(vec3(dot(col, vec3(.216,.7152,.0722))), col * vec3(1.,.9,.5), .8);
+	#elif AGX_LOOK == 2
+	// Punchy
+	col = mix(vec3(dot(col, vec3(.216,.7152,.0722))), pow(col,vec3(1.35)), 1.4);
+	#endif
+	
+	return col;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//^agx^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//ZCAM
+//https://www.shadertoy.com/view/dlGBDD
+//VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV
+/////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+// eotf_pq parameters
+const float Zcam_Lp = 10000.0;
+const float Zcam_m1 = 2610.0 / 16384.0;
+const float Zcam_m2 = 1.7 * 2523.0 / 32.0;
+const float Zcam_c1 = 107.0 / 128.0;
+const float Zcam_c2 = 2413.0 / 128.0;
+const float Zcam_c3 = 2392.0 / 128.0;
+
+vec3 eotf_pq(vec3 x)
+{
+	x = sign(x) * pow(abs(x), vec3(1.0 / Zcam_m2));
+	x = sign(x) * pow((abs(x) - Zcam_c1) / (Zcam_c2 - Zcam_c3 * abs(x)), vec3(1.0 / Zcam_m1)) * Zcam_Lp;
+	return x;
+}
+
+vec3 eotf_pq_inverse(vec3 x)
+{
+	x /= Zcam_Lp;
+	x = sign(x) * pow(abs(x), vec3(Zcam_m1));
+	x = sign(x) * pow((Zcam_c1 + Zcam_c2 * abs(x)) / (1.0 + Zcam_c3 * abs(x)), vec3(Zcam_m2));
+	return x;
+}
+
+// XYZ <-> ICh parameters
+const float Zcam_W = 140.0;
+const float Zcam_b = 1.15;
+const float Zcam_g = 0.66;
+
+vec3 XYZ_to_ICh(vec3 XYZ)
+{
+	XYZ *= Zcam_W;
+	XYZ.xy = vec2(Zcam_b, Zcam_g) * XYZ.xy - (vec2(Zcam_b, Zcam_g) - 1.0) * XYZ.zx;
+	
+	const mat3 XYZ_to_LMS = transpose(mat3(
+		 0.41479,   0.579999, 0.014648,
+		-0.20151,   1.12065,  0.0531008,
+		-0.0166008, 0.2648,   0.66848));
+	
+	vec3 LMS = XYZ_to_LMS * XYZ;
+	LMS = eotf_pq_inverse(LMS);
+	
+	const mat3 LMS_to_Iab = transpose(mat3(
+		0.0,       1.0,      0.0,
+		3.524,    -4.06671,  0.542708,
+		0.199076,  1.0968,  -1.29588));
+	
+	vec3 Iab = LMS_to_Iab * LMS;
+	
+	float I = eotf_pq(vec3(Iab.x)).x / Zcam_W;
+	float C = length(Iab.yz);
+	float h = atan(Iab.z, Iab.y);
+	return vec3(I, C, h);
+}
+
+vec3 ICh_to_XYZ(vec3 ICh)
+{
+	vec3 Iab;
+	Iab.x = eotf_pq_inverse(vec3(ICh.x * Zcam_W)).x;
+	Iab.y = ICh.y * cos(ICh.z);
+	Iab.z = ICh.y * sin(ICh.z);
+	
+	const mat3 Iab_to_LMS = transpose(mat3(
+		1.0, 0.2772,  0.1161,
+		1.0, 0.0,     0.0,
+		1.0, 0.0426, -0.7538));
+	
+	vec3 LMS = Iab_to_LMS * Iab;
+	LMS = eotf_pq(LMS);
+	
+	const mat3 LMS_to_XYZ = transpose(mat3(
+		 1.92423, -1.00479,  0.03765,
+		 0.35032,  0.72648, -0.06538,
+		-0.09098, -0.31273,  1.52277));
+	
+	vec3 XYZ = LMS_to_XYZ * LMS;
+	XYZ.x = (XYZ.x + (Zcam_b - 1.0) * XYZ.z) / Zcam_b;
+	XYZ.y = (XYZ.y + (Zcam_g - 1.0) * XYZ.x) / Zcam_g;
+	return XYZ / Zcam_W;
+}
+
+const mat3 XYZ_to_sRGB = transpose(mat3(
+	 3.2404542, -1.5371385, -0.4985314,
+	-0.9692660,  1.8760108,  0.0415560,
+	 0.0556434, -0.2040259,  1.0572252));
+
+const mat3 sRGB_to_XYZ = transpose(mat3(
+	0.4124564, 0.3575761, 0.1804375,
+	0.2126729, 0.7151522, 0.0721750,
+	0.0193339, 0.1191920, 0.9503041));
+
+bool in_sRGB_gamut(vec3 ICh)
+{
+	vec3 sRGB = XYZ_to_sRGB * ICh_to_XYZ(ICh);
+	return all(greaterThanEqual(sRGB, vec3(0.0))) && all(lessThanEqual(sRGB, vec3(1.0)));
+}
+
+vec3 Zcam_tonemap(vec3 sRGB)
+{	
+	vec3 ICh = XYZ_to_ICh(sRGB_to_XYZ * sRGB);
+	
+	const float s0 = 0.71;
+	const float s1 = 1.04;
+	const float p = 1.40;
+	const float t0 = 0.01;
+	float n = s1 * pow(ICh.x / (ICh.x + s0), p);
+	ICh.x = clamp(n * n / (n + t0), 0.0, 1.0);
+	
+	if (!in_sRGB_gamut(ICh))
+	{
+		float C = ICh.y;
+		ICh.y -= 0.5 * C;
+		
+		for (float i = 0.25; i >= 1.0 / 256.0; i *= 0.5)
+		{
+			ICh.y += (in_sRGB_gamut(ICh) ? i : -i) * C;
+		}
+	}
+	
+	return XYZ_to_sRGB * ICh_to_XYZ(ICh);
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////
+//^ZCAM^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+//https://www.shadertoy.com/view/4tXcWr
+//srgb
+vec3 fromLinearSRGB(vec3 linearRGB)
+{
+	bvec3 cutoff = lessThan(linearRGB, vec3(0.0031308));
+	vec3 higher = vec3(1.055)*pow(linearRGB, vec3(1.0/2.4)) - vec3(0.055);
+	vec3 lower = linearRGB * vec3(12.92);
+
+	return mix(higher, lower, cutoff);
+}
+
+float fromLinearSRGB(float linearRGB)
+{
+	bool cutoff = linearRGB < float(0.0031308);
+	float higher = float(1.055)*pow(linearRGB, float(1.0/2.4)) - float(0.055);
+	float lower = linearRGB * float(12.92);
+
+	return mix(higher, lower, cutoff);
+}
+
+vec3 toLinearSRGB(vec3 sRGB)
+{
+	bvec3 cutoff = lessThan(sRGB, vec3(0.04045));
+	vec3 higher = pow((sRGB + vec3(0.055))/vec3(1.055), vec3(2.4));
+	vec3 lower = sRGB/vec3(12.92);
+	return mix(higher, lower, cutoff);
+}
+
+float toLinearSRGB(float sRGB)
+{
+	bool cutoff = sRGB < float(0.04045);
+	float higher = pow((sRGB + float(0.055))/float(1.055), float(2.4));
+	float lower = sRGB/float(12.92);
+	return mix(higher, lower, cutoff);
+}
+
+vec3 fromLinearDCIP3(vec3 linearRGB)
+{
+	return pow(linearRGB, vec3(1.0 / 2.6));
+}
+
+float toLinear(float a)
+{
+
+	if(u_tonemapper == 0)
+	{
+		//return pow(a, float(2.2));
+		return toLinearSRGB(a);
+	}else if(u_tonemapper == 1)
+	{
+		return toLinearAXG(a);
+	}else if(u_tonemapper == 2)
+	{
+		return toLinearSRGB(a);
+	}
+
+}
+
+vec3 toLinear(vec3 a)
+{
+	return vec3(toLinear(a.r),toLinear(a.g),toLinear(a.b));
+}
+
+
+
+//uncharted
+vec3 Uncharted2Tonemap(vec3 x) {
+	float Brightness = 0.28;
+	x*= Brightness;
+	float A = 0.28;
+	float B = 0.29;		
+	float C = 0.10;
+	float D = 0.2;
+	float E = 0.025;
+	float F = 0.35;
+	return ((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F))-E/F;
+}
+
+vec3 unchartedTonemapping(vec3 color)
+{
+
+	float gamma = 2.2;
+	vec3 curr = Uncharted2Tonemap(color*4.7);
+	//color = pow(curr/Uncharted2Tonemap(vec3(15.2)),vec3(1.0/gamma));
+	color = curr/Uncharted2Tonemap(vec3(15.2));
+	//color = pow(curr,vec3(1.0/gamma));
+	
+	return color;
+}
+
+
+
+//https://github.com/dmnsgn/glsl-tone-map
+// Filmic Tonemapping Operators http://filmicworlds.com/blog/filmic-tonemapping-operators/
+vec3 filmic(vec3 x) {
+  vec3 X = max(vec3(0.0), x - 0.004);
+  vec3 result = (X * (6.2 * X + 0.5)) / (X * (6.2 * X + 1.7) + 0.06);
+  return pow(result, vec3(2.2));
+}
+
+
+
+
+
+vec3 ACESDesaturate(vec3 x)
+{
+	const mat3 ACESInputMat = transpose(mat3(
+		0.59719, 0.35458, 0.04823,
+		0.07600, 0.90834, 0.01566,
+		0.02840, 0.13383, 0.83777
+	));
+
+	const mat3 ACESOutputMat = transpose(mat3(
+		1.60475, -0.53108, -0.07367,
+		-0.10208,  1.10813, -0.00605,
+		-0.00327, -0.07276,  1.07602
+	));
+
+	x = ACESInputMat * x; // Convert to ACES-like space
+
+	// Tonemap
+	x = x * (x + 0.024) / (x * (0.9836) + 0.107);
+	
+	x = ACESOutputMat * x; // Convert back
+
+	// Desaturate based on luminance
+	float luma = dot(x, vec3(0.2126, 0.7152, 0.0722));
+	x = mix(x, vec3(luma), smoothstep(0.8, 1.0, luma)); // Desaturate highlights
+
+	return clamp(x, 0.0, 1.0);
+}
+
+
+// https://github.com/KhronosGroup/ToneMapping
+// https://github.com/KhronosGroup/ToneMapping/tree/main/PBR_Neutral
+// Input color is non-negative and resides in the Linear Rec. 709 color space.
+// Output color is also Linear Rec. 709, but in the [0, 1] range.
+vec3 PBRNeutralToneMapping( vec3 color ) {
+  const float startCompression = 0.8 - 0.04;
+  const float desaturation = 0.15;
+
+  float x = min(color.r, min(color.g, color.b));
+  float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+  color -= offset;
+
+  float peak = max(color.r, max(color.g, color.b));
+  if (peak < startCompression) return color;
+
+  const float d = 1. - startCompression;
+  float newPeak = 1. - d * d / (peak + d - startCompression);
+  color *= newPeak / peak;
+
+  float g = 1. - 1. / (desaturation * (peak - newPeak) + 1.);
+  return mix(color, newPeak * vec3(1, 1, 1), g);
+}
+
+//https://github.com/dmnsgn/glsl-tone-map/blob/main/lottes.glsl
+// Lottes 2016, "Advanced Techniques and Optimization of HDR Color Pipelines"
+vec3 lottes(vec3 x) {
+  x *= vec3(0.9); //I reduced the light a little
+  const vec3 a = vec3(1.6);
+  const vec3 d = vec3(0.977);
+  const vec3 hdrMax = vec3(8.0);
+  const vec3 midIn = vec3(0.18);
+  const vec3 midOut = vec3(0.267);
+
+  const vec3 b =
+	  (-pow(midIn, a) + pow(hdrMax, a) * midOut) /
+	  ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+  const vec3 c =
+	  (pow(hdrMax, a * d) * pow(midIn, a) - pow(hdrMax, a) * pow(midIn, a * d) * midOut) /
+	  ((pow(hdrMax, a * d) - pow(midIn, a * d)) * midOut);
+
+  return pow(x, a) / (pow(x, a * d) * b + c);
+}
+
+
+vec3 tonemapFunction(vec3 c)
+{
+	if(u_tonemapper == 0)
+	{
+		return ACESFitted(c);
+	}else if(u_tonemapper == 1)
+	{
+		return AGX(c);
+	}else if(u_tonemapper == 2)
+	{
+		return Zcam_tonemap(c);
+	}else if(u_tonemapper == 3)
+	{
+		return unchartedTonemapping(c);
+	}else if(u_tonemapper == 4)
+	{
+		//playground
+		//return lottes(c);
+		return PBRNeutralToneMapping(c);
+	}
+}
+
+
+
+//(to screen)
+vec3 toGammaSpace(vec3 a)
+{
+
+	if(u_tonemapper == 0)
+	{
+		//return pow(a, vec3(1.f/2.2));
+		return fromLinearSRGB(a);
+	}else if(u_tonemapper == 1)
+	{
+		return a;
+	}else if(u_tonemapper == 2)
+	{
+		return fromLinearSRGB(a);
+	}else if(u_tonemapper == 3)
+	{
+		return fromLinearSRGB(a);
+	}else if(u_tonemapper == 4)
+	{
+		//return pow(a, vec3(1.f/2.2));
+		return fromLinearSRGB(a);
+	}
+
+
+}
+
+
+/* Gradient noise from Jorge Jimenez's presentation: */
+/* http://www.iryoku.com/next-generation-post-processing-in-call-of-duty-advanced-warfare */
+float gradientNoise(in vec2 uv)
+{
+	return fract(52.9829189 * fract(dot(uv, vec2(0.06711056, 0.00583715))));
+}
+
+
+uniform float u_saturation = 1;
+uniform float u_vibrance = 1;
+uniform float u_gamma = 1;
+uniform float u_shadowBoost = 0;
+uniform float u_highlightBoost = 0;
+uniform float u_vignette = 0.15;
+uniform vec3 u_lift = vec3(0.0);
+uniform vec3 u_gain = vec3(1.0);
+
+vec3 adjustColor(vec3 color, float saturation, float vibrance, float gamma, 
+				 float shadowBoost, float highlightBoost, vec3 lift, vec3 gain) {
+	// Convert to Luma (perceived brightness)
+	float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+
+	// Saturation adjustment
+	color = mix(vec3(luma), color, saturation);
+
+	// Vibrance adjustment (protects already saturated areas)
+	float satStrength = 1.0 - smoothstep(0.0, 1.0, max(color.r, max(color.g, color.b)));
+	color = mix(color, mix(vec3(luma), color, vibrance), satStrength);
+
+	// Shadows & Highlights adjustment
+	float shadowMask = smoothstep(0.0, 0.5, luma);
+	float highlightMask = smoothstep(0.5, 1.0, luma);
+	color *= mix(vec3(1.0), vec3(1.0 + shadowBoost), shadowMask);
+	color *= mix(vec3(1.0), vec3(1.0 + highlightBoost), highlightMask);
+
+	// Lift (shifts blacks) and Gain (scales highlights)
+	color = (color + lift) * gain;
+
+	// Gamma applied to control brightness curve
+	color = pow(max(color, 0.0), vec3(gamma));
+
+	return color;
+}
+
+float screen(float base, float blend)
+{
+	return 1.0 - (1.0 - base) * (1.0 - blend);
+}
+
+
+
+//https://www.shadertoy.com/view/lsKSWR
+vec3 applyVignette(vec3 color, float intensity) {
+	// Get normalized screen coordinates (0 to 1)
+	vec2 uv = gl_FragCoord.xy / textureSize(u_color, 0);
+	
+	uv *= 1.0 - uv.yx; // vec2(1.0) - uv.yx; -> 1.0 - uv.yx
+	
+	float vig = uv.x * uv.y * 15.0; // Base vignette strength
+	vig = pow(vig, mix(0.25, 1.0, intensity)); // Adjust falloff with intensity
+
+	return mix(color, color * vig, intensity);
+}
+
+
+void main()
+{
+
+	//gamma correction + HDR
+	
+	vec3 out_color = texture(u_color, v_texCoords).rgb;
+	out_color.rgb *= u_exposure;
+	
+	//vec3 purkine = purkineShift(out_color.rgb);
+	//out_color.rgb = mix(out_color.rgb, purkine, 0.05);
+	
+	out_color.rgb = adjustColor(out_color.rgb, u_saturation, u_vibrance, 
+		u_gamma, u_shadowBoost, u_highlightBoost, u_lift, u_gain);
+
+	out_color.rgb = tonemapFunction(out_color.rgb);
+	out_color.rgb = toGammaSpace(out_color.rgb);
+	
+
+	float strength = 1;
+	out_color.rgb += (strength * 1.0 / 255.0) * gradientNoise(gl_FragCoord.xy) - (strength * 0.5 / 255.0);
+	out_color = clamp(out_color, vec3(0), vec3(1));
+
+	out_color.rgb = applyVignette(out_color.rgb, u_vignette);
+
+	outColor = vec4(out_color, 1);
+}
+

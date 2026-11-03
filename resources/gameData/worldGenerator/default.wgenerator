@@ -1,0 +1,507 @@
+seed: 1234;
+continentalnessNoise:
+	{
+	scale: 0.171000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.016000;
+	octaves: 4;
+	perturbFractalOctaves: 1;
+	power: 1.100000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.077798,0.094771;
+		0.182373,0.104575;
+		0.216676,0.225363;
+		0.270597,0.320871;
+		0.334032,0.335521;
+		0.371118,0.429330;
+		0.412632,0.434435;
+		0.438776,0.504800;
+		0.555771,0.533446;
+		0.568843,0.658497;
+		0.637471,0.689542;
+		0.711001,0.707515;
+		0.720409,0.776961;
+		0.777598,0.898692;
+		0.836422,1.000000;
+		0.912129,0.921875;
+		1.000000,0.908497;
+		}
+	}
+continentalnessNoise2:
+	{
+	scale: 0.100000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.015000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.100000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.125817,0.094771;
+		0.196078,0.212417;
+		0.245098,0.303921;
+		0.356209,0.361928;
+		0.433007,0.462418;
+		0.477124,0.671568;
+		0.549223,0.776143;
+		0.608047,1.000000;
+		0.655433,0.783472;
+		0.710988,0.676049;
+		0.737132,0.546358;
+		0.821544,0.449649;
+		0.855216,0.368615;
+		1.000000,0.338235;
+		}
+	}
+continentalnessPickNoise:
+	{
+	scale: 0.050000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.015000;
+	octaves: 4;
+	perturbFractalOctaves: 0;
+	power: 0.900000;
+	spline:
+		{
+		0.000000,0.013072;
+		0.163398,0.000000;
+		0.433006,0.053921;
+		0.589052,0.946078;
+		0.854166,1.000000;
+		1.000000,1.000000;
+		}
+	}
+swampNoise:
+	{
+	scale: 0.040000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.246000;
+	octaves: 5;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.084968,0.000000;
+		0.178104,0.383169;
+		0.404412,0.416666;
+		0.438318,1.000000;
+		0.533088,1.000000;
+		0.568728,0.478758;
+		0.822763,0.491829;
+		0.906096,1.000000;
+		1.000000,1.000000;
+		}
+	}
+stoneSpikesNoise:
+	{
+	scale: 2.360000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.013000;
+	octaves: 4;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.372549,0.000000;
+		0.516340,0.000000;
+		0.640523,0.513072;
+		0.738563,0.756536;
+		0.782680,0.758170;
+		0.877451,1.000000;
+		0.901144,1.000000;
+		1.000000,0.691176;
+		}
+	}
+stoneSpikesMask:
+	{
+	scale: 0.110000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.011000;
+	octaves: 4;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.696079,0.000000;
+		0.727124,0.243464;
+		0.770016,0.241830;
+		0.796160,0.491830;
+		0.843239,0.493464;
+		0.893025,1.000000;
+		1.000000,1.000000;
+		}
+	}
+swampMask:
+	{
+	scale: 0.150000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.010000;
+	octaves: 4;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.718954,0.000000;
+		0.740196,0.202614;
+		0.795752,1.000000;
+		1.000000,1.000000;
+		}
+	}
+iceNoise:
+	{
+	scale: 0.570000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.015000;
+	octaves: 8;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.245098,0.000000;
+		0.253268,1.000000;
+		0.428921,1.000000;
+		0.428921,0.000000;
+		0.665441,0.000000;
+		0.665441,1.000000;
+		1.000000,1.000000;
+		}
+	}
+peaksAndValies:
+	{
+	scale: 0.280000;
+	type: PerlinFractal;
+	celularReturnType: Distance;
+	frequency: 0.060000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.100000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.137255,0.069445;
+		0.343137,0.468547;
+		0.672385,0.533293;
+		0.823120,0.952614;
+		1.000000,1.000000;
+		}
+	}
+peaksAndValiesContributionSpline:
+	{
+	0.000000,0.000000;
+	0.408497,0.000000;
+	0.444445,0.514705;
+	0.473857,0.516340;
+	0.498367,0.000000;
+	0.607844,0.008170;
+	0.713847,0.134804;
+	0.753624,0.092729;
+	0.849034,0.162377;
+	1.000000,0.114379;
+	}
+randomHills:
+	{
+	scale: 0.270000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.015000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.100000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.674837,0.000000;
+		0.721405,0.156863;
+		0.767565,0.215686;
+		0.789011,0.316993;
+		0.856924,0.372549;
+		0.885978,0.540849;
+		0.923381,0.634804;
+		0.969861,0.961193;
+		1.000000,1.000000;
+		}
+	}
+wierdness:
+	{
+	scale: 0.360000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.006000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.100000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.254902,0.006536;
+		0.298203,0.093138;
+		0.391747,0.134804;
+		0.483251,0.142156;
+		0.505513,0.313724;
+		0.632099,0.330066;
+		0.708895,0.635621;
+		1.000000,1.000000;
+		}
+	}
+vegetationNoise:
+	{
+	scale: 0.350000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.015000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		1.000000,1.000000;
+		}
+	}
+stonetDnoise:
+	{
+	scale: 1.691000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.007000;
+	octaves: 4;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.078045,0.000000;
+		0.083190,0.123928;
+		0.233491,0.125429;
+		0.235206,0.314858;
+		0.383844,0.318664;
+		0.383844,0.427101;
+		0.553080,0.427865;
+		0.553080,0.578427;
+		0.680485,0.581666;
+		0.680485,0.718792;
+		0.812798,0.718744;
+		0.822351,0.871379;
+		0.911130,0.880755;
+		0.912891,1.000000;
+		1.000000,1.000000;
+		}
+	}
+riversNoise:
+	{
+	scale: 0.141000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.018000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.400000;
+	spline:
+		{
+		0.000000,1.000000;
+		0.364378,1.000000;
+		0.447712,0.862745;
+		0.454248,0.053922;
+		0.470588,0.000000;
+		0.490196,0.058823;
+		0.509804,0.867647;
+		0.613561,1.000000;
+		1.000000,1.000000;
+		}
+	}
+roadsNoise:
+	{
+	scale: 0.060000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.028000;
+	octaves: 2;
+	perturbFractalOctaves: 0;
+	power: 0.300000;
+	spline:
+		{
+		0.000000,1.000000;
+		0.751635,1.000000;
+		0.758171,0.526144;
+		0.761439,0.156046;
+		0.763073,0.003268;
+		0.766341,0.148488;
+		0.767975,0.523591;
+		0.776145,1.000000;
+		1.000000,1.000000;
+		}
+	}
+stonePatches:
+	{
+	scale: 0.001000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.026000;
+	octaves: 4;
+	perturbFractalOctaves: 0;
+	power: 1.400000;
+	spline:
+		{
+		0.000000,1.000000;
+		0.066994,0.000000;
+		0.508170,0.000000;
+		0.742647,0.983660;
+		1.000000,1.000000;
+		}
+	}
+randomSand:
+	{
+	scale: 13.650000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.015000;
+	octaves: 2;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.000000,1.000000;
+		0.024509,0.000000;
+		0.977942,0.000000;
+		0.979984,1.000000;
+		0.998366,1.000000;
+		1.000000,0.000000;
+		1.000000,0.000000;
+		}
+	}
+hillsDrop:
+	{
+	scale: 0.080000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.012000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 0.330000;
+	spline:
+		{
+		0.000000,1.000000;
+		0.764706,1.000000;
+		0.771242,0.464052;
+		0.777778,0.262255;
+		0.784315,0.000000;
+		0.792485,0.261233;
+		0.803002,0.456597;
+		0.807904,1.000000;
+		1.000000,1.000000;
+		}
+	}
+treesAmountNoise:
+	{
+	scale: 0.130000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.015000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.900000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.089869,0.000000;
+		0.960784,1.000000;
+		1.000000,1.000000;
+		}
+	}
+treesTypeNoise:
+	{
+	scale: 0.131000;
+	type: Cellular;
+	celularReturnType: CellValue;
+	frequency: 0.015000;
+	octaves: 0;
+	perturbFractalOctaves: 0;
+	power: 1.050000;
+	spline:
+		{
+		0.000000,0.000000;
+		1.000000,1.000000;
+		}
+	}
+cavesNoise:
+	{
+	scale: 0.900000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.014000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.000000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.287582,0.000000;
+		0.287582,0.441177;
+		0.315360,0.998366;
+		1.000000,1.000000;
+		}
+	}
+lakesNoise:
+	{
+	scale: 1.000000;
+	type: SimplexFractal;
+	celularReturnType: Distance;
+	frequency: 0.009000;
+	octaves: 3;
+	perturbFractalOctaves: 0;
+	power: 1.300000;
+	spline:
+		{
+		0.000000,0.000000;
+		0.753268,0.000000;
+		0.753268,0.196078;
+		0.782680,0.606209;
+		1.000000,1.000000;
+		}
+	}
+spagettiNoise:
+	{
+	scale: 0.911000;
+	type: CubicFractal;
+	celularReturnType: Distance;
+	frequency: 0.025000;
+	octaves: 2;
+	perturbFractalOctaves: 0;
+	power: 0.810000;
+	spline:
+		{
+		0.000000,1.000000;
+		0.326797,1.000000;
+		0.343137,1.000000;
+		0.395425,0.998366;
+		0.563726,1.000000;
+		0.581700,0.000000;
+		0.599674,0.000000;
+		0.599674,1.000000;
+		0.891544,1.000000;
+		1.000000,1.000000;
+		}
+	}
+regionsHeightSpline: 	{
+	0.000000,1.000000;
+	0.129085,1.000000;
+	0.852941,0.000000;
+	1.000000,0.000000;
+	}

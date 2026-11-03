@@ -1,0 +1,12 @@
+/out
+bin/
+build/
+/.vs
+.idea/
+CMakeSettings.json
+/ourcmake
+resources/saves/
+resources/saves2/
+errorLogs.txt
+resources/worlds/
+playerSettings/
