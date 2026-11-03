@@ -122,7 +122,10 @@ add_subdirectory(thirdparty/zstd-1.5.5/build/cmake)
 # Standalone OpenGL tools. Not ported.
 if(NOT RENDERER_WEBGPU)
 	add_subdirectory(noiseTool)
-	add_subdirectory(PBRTool)
+	# PBRTool uses Win32 file dialogs (PBRGameLayer.cpp).
+	if(WIN32)
+		add_subdirectory(PBRTool)
+	endif()
 endif()
 
 

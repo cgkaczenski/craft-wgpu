@@ -32,6 +32,17 @@ static const char *backendName(wgpu::BackendType type)
 	}
 }
 
+static const char *adapterTypeName(wgpu::AdapterType type)
+{
+	switch (type)
+	{
+	case wgpu::AdapterType::DiscreteGPU: return "Discrete GPU";
+	case wgpu::AdapterType::IntegratedGPU: return "Integrated GPU";
+	case wgpu::AdapterType::CPU: return "CPU";
+	default: return "Unknown";
+	}
+}
+
 struct FeatureEntry
 {
 	WGPUFeatureName feature;
@@ -109,6 +120,9 @@ static void printAdapterReport()
 		std::cout << "Architecture: " << wgpu::StringView(info.architecture) << "\n";
 		std::cout << "Device:       " << wgpu::StringView(info.device) << "\n";
 		std::cout << "Description:  " << wgpu::StringView(info.description) << "\n";
+		std::cout << "Type:         " << adapterTypeName(info.adapterType) << "\n";
+		std::cout << "IDs:          vendor 0x" << std::hex << info.vendorID
+			<< ", device 0x" << info.deviceID << std::dec << "\n";
 		info.freeMembers();
 	}
 	else
@@ -155,6 +169,11 @@ static void printAdapterReport()
 
 bool init()
 {
+	// wgpuGetVersion() (wgpu.h) packs major.minor.patch.build into one byte each.
+	uint32_t v = wgpuGetVersion();
+	std::cout << "WebGPU: wgpu-native " << ((v >> 24) & 0xff) << "." << ((v >> 16) & 0xff)
+		<< "." << ((v >> 8) & 0xff) << "." << (v & 0xff) << "\n";
+
 	instance = wgpu::createInstance();
 	if (!instance)
 	{
