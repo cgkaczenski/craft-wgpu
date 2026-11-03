@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <string>
 
 namespace wgpuContext
 {
@@ -108,6 +109,13 @@ static const FeatureEntry features[] =
 #undef STANDARD
 #undef NATIVE
 
+// wgpu-native v24 leaves some adapter limits at WGPU_LIMIT_U32_UNDEFINED
+// (seen with maxColorAttachments). That means "not reported", not "unlimited".
+static std::string limitText(uint32_t value)
+{
+	return value == WGPU_LIMIT_U32_UNDEFINED ? "not reported" : std::to_string(value);
+}
+
 static void printAdapterReport()
 {
 	std::cout << "\n=== WebGPU adapter ===\n";
@@ -149,8 +157,8 @@ static void printAdapterReport()
 	if (adapter.getLimits(&limits) == wgpu::Status::Success)
 	{
 		std::cout << "\nLimits the port depends on:\n";
-		std::cout << "  maxColorAttachments              " << limits.maxColorAttachments << " (fboMain uses 5)\n";
-		std::cout << "  maxColorAttachmentBytesPerSample " << limits.maxColorAttachmentBytesPerSample << " (G-buffer budget, milestone 11)\n";
+		std::cout << "  maxColorAttachments              " << limitText(limits.maxColorAttachments) << " (fboMain uses 5)\n";
+		std::cout << "  maxColorAttachmentBytesPerSample " << limitText(limits.maxColorAttachmentBytesPerSample) << " (G-buffer budget, milestone 11)\n";
 		std::cout << "  maxTextureDimension2D            " << limits.maxTextureDimension2D << "\n";
 		std::cout << "  maxTextureArrayLayers            " << limits.maxTextureArrayLayers << " (block textures per array, milestone 7)\n";
 		std::cout << "  maxSampledTexturesPerShaderStage " << limits.maxSampledTexturesPerShaderStage << "\n";
