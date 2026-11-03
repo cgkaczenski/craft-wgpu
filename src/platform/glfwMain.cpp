@@ -472,15 +472,20 @@ int main()
 
 	permaAssertComment(glfwInit(), "err initializing glfw");
 	//glfwWindowHint(GLFW_SAMPLES, 4);
+#if RENDERER_WEBGPU
+	// No OpenGL context: WebGPU owns the window's drawable (a CAMetalLayer on macOS).
+	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+#else
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-#ifdef __APPLE__
+	#ifdef __APPLE__
 	// macOS implements OpenGL 4.1. Core profiles also require forward compatibility.
 	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-#else
+	#else
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+	#endif
 #endif
 
 	int w = 500;
@@ -499,8 +504,10 @@ int main()
 		glfwSetWindowPos(wind, mx + 80, my + 80);
 	}
 #endif
+#if !RENDERER_WEBGPU
 	glfwMakeContextCurrent(wind);
 	//glfwSwapInterval(1);
+#endif
 
 	glfwSetKeyCallback(wind, keyCallback);
 	glfwSetMouseButtonCallback(wind, mouseCallback);
@@ -509,6 +516,30 @@ int main()
 	glfwSetCursorPosCallback(wind, cursorPositionCallback);
 	glfwSetCharCallback(wind, characterCallback);
 	glfwSetScrollCallback(wind, scrollCallback);
+
+#if RENDERER_WEBGPU
+	// Milestone 1b: WebGPU clears the window and nothing else runs. gl2d, ImGui,
+	// audio and the game need OpenGL until milestones 2-4 port them.
+	{
+		if (!wgpuContext::init(wind))
+		{
+			std::cout << "WebGPU initialization failed.\n";
+			wgpuContext::shutdown();
+			glfwTerminate();
+			return 1;
+		}
+
+		while (!glfwWindowShouldClose(wind))
+		{
+			glfwPollEvents();
+			wgpuContext::clearAndPresent(0.4f, 0.65f, 0.95f); // sky blue
+		}
+
+		wgpuContext::shutdown();
+		glfwTerminate();
+		return 0;
+	}
+#endif
 
 	permaAssertComment(gladLoadGL(), "err initializing glad");
 	std::cout << "OpenGL " << glGetString(GL_VERSION) << "\n";
@@ -532,17 +563,6 @@ int main()
 
 	//enableReportGlErrors();
 
-#pragma endregion
-
-#pragma region webgpu
-#if RENDERER_WEBGPU
-	// Milestone 1a: adapter report only. The game still draws with OpenGL
-	// until the device and surface replace the GL context (milestone 1b).
-	if (!wgpuContext::init())
-	{
-		std::cout << "WebGPU initialization failed.\n";
-	}
-#endif
 #pragma endregion
 
 #pragma region gl2d

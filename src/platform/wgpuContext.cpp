@@ -7,6 +7,10 @@
 
 #include "wgpuContext.h"
 
+#define GLFW_INCLUDE_NONE
+#include <GLFW/glfw3.h>
+#include <glfw3webgpu.h>
+
 #include <cstdint>
 #include <iostream>
 #include <string>
@@ -14,8 +18,16 @@
 namespace wgpuContext
 {
 
+static GLFWwindow *window = nullptr;
 static wgpu::Instance instance = nullptr;
+static wgpu::Surface surface = nullptr;
 static wgpu::Adapter adapter = nullptr;
+static wgpu::Device device = nullptr;
+static wgpu::Queue queue = nullptr;
+
+static wgpu::TextureFormat surfaceFormat = wgpu::TextureFormat::Undefined;
+static int configuredWidth = 0;
+static int configuredHeight = 0;
 
 static const char *backendName(wgpu::BackendType type)
 {
@@ -175,8 +187,62 @@ static void printAdapterReport()
 	std::cout << "======================\n\n";
 }
 
-bool init()
+static const char *errorTypeName(WGPUErrorType type)
 {
+	switch (type)
+	{
+	case WGPUErrorType_Validation: return "Validation";
+	case WGPUErrorType_OutOfMemory: return "OutOfMemory";
+	case WGPUErrorType_Internal: return "Internal";
+	default: return "Unknown";
+	}
+}
+
+// The swapchain is plain unorm, not sRGB: like the OpenGL path (no
+// GL_FRAMEBUFFER_SRGB), shaders write gamma-encoded values themselves
+// (postprocess/toneMap.frag), and gl2d colors are already sRGB.
+static wgpu::TextureFormat chooseSurfaceFormat()
+{
+	wgpu::SurfaceCapabilities caps = wgpu::Default;
+	if (surface.getCapabilities(adapter, &caps) != wgpu::Status::Success || caps.formatCount == 0)
+	{
+		std::cout << "WebGPU: could not read surface capabilities.\n";
+		return wgpu::TextureFormat::Undefined;
+	}
+
+	wgpu::TextureFormat chosen = caps.formats[0];
+	for (size_t i = 0; i < caps.formatCount; i++)
+	{
+		if (caps.formats[i] == wgpu::TextureFormat::BGRA8Unorm) { chosen = caps.formats[i]; break; }
+		if (caps.formats[i] == wgpu::TextureFormat::RGBA8Unorm) { chosen = caps.formats[i]; }
+	}
+
+	caps.freeMembers();
+	return chosen;
+}
+
+// (Re)configures the swapchain at the framebuffer size, which is in pixels
+// (twice the window size on Retina displays).
+static void configureSurface(int width, int height)
+{
+	wgpu::SurfaceConfiguration config = wgpu::Default;
+	config.device = device;
+	config.format = surfaceFormat;
+	config.usage = wgpu::TextureUsage::RenderAttachment;
+	config.width = static_cast<uint32_t>(width);
+	config.height = static_cast<uint32_t>(height);
+	config.alphaMode = wgpu::CompositeAlphaMode::Auto;
+	config.presentMode = wgpu::PresentMode::Fifo; // vsync; the only mode every surface supports
+	surface.configure(config);
+
+	configuredWidth = width;
+	configuredHeight = height;
+}
+
+bool init(GLFWwindow *glfwWindow)
+{
+	window = glfwWindow;
+
 	// wgpuGetVersion() (wgpu.h) packs major.minor.patch.build into one byte each.
 	uint32_t v = wgpuGetVersion();
 	std::cout << "WebGPU: wgpu-native " << ((v >> 24) & 0xff) << "." << ((v >> 16) & 0xff)
@@ -189,9 +255,18 @@ bool init()
 		return false;
 	}
 
-	// No surface yet (milestone 1b), so the adapter isn't tied to the window.
+	// On macOS this attaches a CAMetalLayer to the window's content view.
+	surface = glfwCreateWindowWGPUSurface(instance, window);
+	if (!surface)
+	{
+		std::cout << "WebGPU: could not create a surface for the window.\n";
+		return false;
+	}
+	pinMetalLayerToSRGB(window);
+
 	wgpu::RequestAdapterOptions options = wgpu::Default;
 	options.powerPreference = wgpu::PowerPreference::HighPerformance;
+	options.compatibleSurface = surface;
 
 	// wgpu-native answers synchronously; the wrapper waits for the callback.
 	adapter = instance.requestAdapter(options);
@@ -202,8 +277,137 @@ bool init()
 	}
 
 	printAdapterReport();
+
+	// No optional features or raised limits yet; later milestones add the ones
+	// in the report (texture binding arrays, multi-draw indirect, ...).
+	wgpu::DeviceDescriptor deviceDesc = wgpu::Default;
+	deviceDesc.label = wgpu::StringView("ourCraft device");
+	deviceDesc.defaultQueue.label = wgpu::StringView("ourCraft queue");
+
+	deviceDesc.deviceLostCallbackInfo.mode = wgpu::CallbackMode::AllowSpontaneous;
+	deviceDesc.deviceLostCallbackInfo.callback = [](WGPUDevice const *, WGPUDeviceLostReason reason,
+		WGPUStringView message, void *, void *)
+	{
+		// Destroyed is the normal shutdown path; anything else is a real loss.
+		if (reason == WGPUDeviceLostReason_Destroyed) { return; }
+		std::cout << "WebGPU device lost (reason " << reason << "): " << wgpu::StringView(message) << "\n";
+	};
+
+	// Validation errors land here instead of crashing. Keep this on: it is how
+	// most WebGPU mistakes show up.
+	deviceDesc.uncapturedErrorCallbackInfo.callback = [](WGPUDevice const *, WGPUErrorType type,
+		WGPUStringView message, void *, void *)
+	{
+		std::cout << "WebGPU " << errorTypeName(type) << " error: " << wgpu::StringView(message) << "\n";
+	};
+
+	device = adapter.requestDevice(deviceDesc);
+	if (!device)
+	{
+		std::cout << "WebGPU: could not create a device.\n";
+		return false;
+	}
+	queue = device.getQueue();
+
+	surfaceFormat = chooseSurfaceFormat();
+	if (surfaceFormat == wgpu::TextureFormat::Undefined) { return false; }
+
+	int width = 0, height = 0;
+	glfwGetFramebufferSize(window, &width, &height);
+	configureSurface(width, height);
+
+	std::cout << "WebGPU: surface configured, format 0x" << std::hex
+		<< static_cast<uint32_t>(surfaceFormat) << std::dec
+		<< ", " << width << "x" << height << "\n";
+
 	return true;
 }
+
+void clearAndPresent(float r, float g, float b)
+{
+	int width = 0, height = 0;
+	glfwGetFramebufferSize(window, &width, &height);
+
+	// Minimized: there is nothing to draw into, and a 0x0 configure is invalid.
+	if (width == 0 || height == 0) { return; }
+
+	if (width != configuredWidth || height != configuredHeight)
+	{
+		configureSurface(width, height);
+	}
+
+	wgpu::SurfaceTexture surfaceTexture;
+	surface.getCurrentTexture(&surfaceTexture);
+
+	switch (surfaceTexture.status)
+	{
+	case wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal:
+	case wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal:
+		break;
+
+	case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
+	case wgpu::SurfaceGetCurrentTextureStatus::Outdated:
+	case wgpu::SurfaceGetCurrentTextureStatus::Lost:
+		// The window changed under us. Reconfigure and skip this frame.
+		if (surfaceTexture.texture) { wgpuTextureRelease(surfaceTexture.texture); }
+		configureSurface(width, height);
+		return;
+
+	default:
+		std::cout << "WebGPU: could not get the surface texture (status "
+			<< surfaceTexture.status << ").\n";
+		if (surfaceTexture.texture) { wgpuTextureRelease(surfaceTexture.texture); }
+		return;
+	}
+
+	wgpu::Texture texture = surfaceTexture.texture;
+	wgpu::TextureView view = texture.createView();
+
+	wgpu::CommandEncoder encoder = device.createCommandEncoder();
+
+	wgpu::RenderPassColorAttachment colorAttachment = wgpu::Default;
+	colorAttachment.view = view;
+	colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED; // 2D target, not a 3D texture slice
+	colorAttachment.loadOp = wgpu::LoadOp::Clear;
+	colorAttachment.storeOp = wgpu::StoreOp::Store;
+	colorAttachment.clearValue = WGPUColor{r, g, b, 1.0};
+
+	wgpu::RenderPassDescriptor passDesc = wgpu::Default;
+	passDesc.label = wgpu::StringView("clear pass");
+	passDesc.colorAttachmentCount = 1;
+	passDesc.colorAttachments = &colorAttachment;
+
+	// An empty pass: the clear happens when the pass begins (loadOp = Clear).
+	wgpu::RenderPassEncoder pass = encoder.beginRenderPass(passDesc);
+	pass.end();
+	pass.release();
+
+	wgpu::CommandBuffer commands = encoder.finish();
+	encoder.release();
+
+	queue.submit(1, &commands);
+	commands.release();
+
+	surface.present();
+
+	view.release();
+	texture.release();
+}
+
+void shutdown()
+{
+	if (surface && configuredWidth) { surface.unconfigure(); }
+	if (queue) { queue.release(); queue = nullptr; }
+	if (device) { device.release(); device = nullptr; }
+	if (adapter) { adapter.release(); adapter = nullptr; }
+	if (surface) { surface.release(); surface = nullptr; }
+	if (instance) { instance.release(); instance = nullptr; }
+	configuredWidth = configuredHeight = 0;
+}
+
+#ifndef __APPLE__
+void pinMetalLayerToSRGB(GLFWwindow *) {}
+#endif
 
 }
 

@@ -22,6 +22,11 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 project(ourCraft)
 
+if(APPLE)
+	# For src/platform/wgpuMetalLayer.mm on the WebGPU path.
+	enable_language(OBJCXX)
+endif()
+
 
 # AVX2 is x86-only. Apple Silicon and other ARM targets use NEON inside FastNoise.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686|X86")
@@ -180,6 +185,11 @@ target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw glad stb_image st
 if(RENDERER_WEBGPU)
 	target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RENDERER_WEBGPU=1)
 	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu)
+	if(APPLE)
+		# Pins the CAMetalLayer colorspace to sRGB (Objective-C++).
+		target_sources("${CMAKE_PROJECT_NAME}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/wgpuMetalLayer.mm")
+		target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE "-framework Cocoa" "-framework QuartzCore")
+	endif()
 	# Copies the wgpu-native .dylib/.so/.dll next to the executable.
 	target_copy_webgpu_binaries("${CMAKE_PROJECT_NAME}")
 endif()
