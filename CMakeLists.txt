@@ -39,6 +39,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686|X86")
 endif()
 
 
+# WebGPU render port (docs/roadmap.md). OFF keeps the OpenGL renderer.
+option(RENDERER_WEBGPU "Use the WebGPU renderer (wgpu-native) instead of OpenGL" OFF)
+
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -67,7 +70,39 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
 
 
-add_subdirectory(thirdparty/glfw-3.3.7)
+if(RENDERER_WEBGPU)
+	include(FetchContent)
+
+	# glfw3webgpu v1.3 calls glfwGetPlatform(), which needs GLFW 3.4.
+	# The OpenGL path keeps the vendored 3.3.7.
+	FetchContent_Declare(glfw
+		GIT_REPOSITORY https://github.com/glfw/glfw.git
+		GIT_TAG 3.4
+		GIT_SHALLOW TRUE
+	)
+
+	# Fetches precompiled wgpu-native (v24.0.3.1) and provides the 'webgpu'
+	# target, including the WebGPU-Cpp wrapper <webgpu/webgpu.hpp>.
+	set(WEBGPU_BACKEND "WGPU" CACHE STRING "" FORCE)
+	FetchContent_Declare(webgpu
+		GIT_REPOSITORY https://github.com/eliemichel/WebGPU-distribution.git
+		GIT_TAG v0.3.0-gamma
+		GIT_SHALLOW TRUE # older branches carry binaries; a full clone is huge
+	)
+
+	FetchContent_Declare(glfw3webgpu
+		GIT_REPOSITORY https://github.com/eliemichel/glfw3webgpu.git
+		GIT_TAG v1.3.0-alpha
+		GIT_SHALLOW TRUE
+	)
+
+	FetchContent_MakeAvailable(glfw webgpu glfw3webgpu)
+else()
+	add_subdirectory(thirdparty/glfw-3.3.7)
+endif()
+
+# glad stays on both paths until milestones 2-4 move gl2d, glui, ImGui and the
+# renderer off OpenGL.
 add_subdirectory(thirdparty/glad)
 add_subdirectory(thirdparty/stb_image)
 add_subdirectory(thirdparty/stb_truetype)
@@ -84,8 +119,11 @@ add_subdirectory(thirdparty/magic_enum-0.9.3)
 add_subdirectory(thirdparty/safeSave)
 add_subdirectory(thirdparty/profilerLib)
 add_subdirectory(thirdparty/zstd-1.5.5/build/cmake)
-add_subdirectory(noiseTool)
-add_subdirectory(PBRTool)
+# Standalone OpenGL tools. Not ported.
+if(NOT RENDERER_WEBGPU)
+	add_subdirectory(noiseTool)
+	add_subdirectory(PBRTool)
+endif()
 
 
 # MY_SOURCES is a list of all the source files for my game 
@@ -135,5 +173,12 @@ target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw glad stb_image st
 	gl2d raudio imgui fastNoiseSIMD FastNoise2 enet glui
 	magic_enum safeSave profilerLib
 	libzstd_static assimp)
+
+if(RENDERER_WEBGPU)
+	target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RENDERER_WEBGPU=1)
+	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu)
+	# Copies the wgpu-native .dylib/.so/.dll next to the executable.
+	target_copy_webgpu_binaries("${CMAKE_PROJECT_NAME}")
+endif()
 
 

@@ -16,6 +16,10 @@
 #include <profilerLib/include/profilerLib.h>
 #include <errorReporting.h>
 
+#if RENDERER_WEBGPU
+	#include "wgpuContext.h"
+#endif
+
 
 #ifdef _WIN32
 #define GPU_ENGINE 1
@@ -528,6 +532,17 @@ int main()
 
 	//enableReportGlErrors();
 
+#pragma endregion
+
+#pragma region webgpu
+#if RENDERER_WEBGPU
+	// Milestone 1a: adapter report only. The game still draws with OpenGL
+	// until the device and surface replace the GL context (milestone 1b).
+	if (!wgpuContext::init())
+	{
+		std::cout << "WebGPU initialization failed.\n";
+	}
+#endif
 #pragma endregion
 
 #pragma region gl2d
