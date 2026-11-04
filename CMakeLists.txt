@@ -26,6 +26,10 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 project(ourCraft)
 
+# So clangd can resolve includes such as "rendering/frustumCulling.h"
+# (headers live under include/gameLayer/, which is an include directory).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 
 # AVX2 is x86-only. Apple Silicon and other ARM targets use NEON inside FastNoise.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686|X86")
