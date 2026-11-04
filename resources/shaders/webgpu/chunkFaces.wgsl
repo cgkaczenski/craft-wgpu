@@ -35,6 +35,10 @@
 // Group 1 holds the copies the peel reads: depth and color, read texel by
 // texel at the fragment's own pixel, as GL samples them at the pixel center.
 //
+// Decals (milestone 10a): the block-breaking crack. vs_main again, on the
+// six faces of the block being broken, with the `zBias` override pulling
+// them toward the camera, and fs_decal sampling one frame of crack.png.
+//
 // Conventions (docs/roadmap.md): positions camera-relative, depth 0..1.
 // No animation yet (grass, leaves sway and water waves in defaultShader.vert)
 // and no lighting: albedo times the orientation shade.
@@ -49,7 +53,8 @@ struct Uniforms {
     // GL's u_waterColor, in output (sRGB) space: this world is unlit and
     // writes texture colors as they are, where GL mixes in linear space.
     waterColor: vec4f,
-    // x near plane, y far plane: to turn depth back into distance.
+    // x near plane, y far plane: to turn depth back into distance. z the
+    // crack frame, 0-10, for fs_decal (written when a decal is drawn).
     planes: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -65,7 +70,14 @@ struct Uniforms {
 @group(1) @binding(0) var peelDepth: texture_depth_2d;
 @group(1) @binding(1) var peelColor: texture_2d<f32>;
 
+// The decal's crack.png: 10 frames side by side (milestone 10a).
+@group(1) @binding(2) var crackTexture: texture_2d<f32>;
+
 override passMode: u32 = 1u;
+
+// zpass.vert's u_zBias, added to clip z. GL's depth is (z/w + 1)/2 and this
+// one is z/w, so half the bias moves the depth by the same amount.
+override zBias: f32 = 0.0;
 
 struct FaceInput {
     @location(0) orientationAndTexture: vec2i,
@@ -147,6 +159,7 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
 
     var out: VertexOutput;
     out.position = u.viewProjection * vec4f(relative, 1.0);
+    out.position.z += zBias * 0.5;
     out.uv = vec2f(vertexUV[uvBase], vertexUV[uvBase + 1u]);
     out.layer = textureLayers[textureIndex]; // the albedo slot
     out.shade = shade;
@@ -230,4 +243,15 @@ fn fs_blend(in: VertexOutput) -> @location(0) vec4f {
     let depthMix = 0.4 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0);
     color = mix(color, u.waterColor.rgb * 0.7, depthMix);
     return vec4f(color, pow(mixFactor, 0.7));
+}
+
+// The crack (decal.frag): frame planes.z of the strip, opaque where drawn.
+// crack.png is a wgpu2d texture, stored top row first, where GL's gl2d
+// stored it bottom row first (stbi flip on load): v is flipped to match.
+@fragment
+fn fs_decal(in: VertexOutput) -> @location(0) vec4f {
+    let uv = vec2f((in.uv.x + u.planes.z) / 10.0, 1.0 - in.uv.y);
+    let c = textureSample(crackTexture, blockSampler, uv);
+    if (c.a < 0.01) { discard; }
+    return vec4f(c.rgb, 1.0);
 }

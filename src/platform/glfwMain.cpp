@@ -235,16 +235,18 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // camera in game; the game re-centres the cursor at half the framebuffer
 // size each frame, so the offset from there is the turn), key@E, key@Space,
 // key@LShift or key@F9 (pressed, then released the same way), hold@W,N (held
-// for N frames: walking) and quit (closes the window, so shutdown runs). Feeds the callbacks below; the mouse position is overridden from
+// for N frames: walking; hold@Mouse,N holds the left button) and quit (closes
+// the window, so shutdown runs). Feeds the callbacks below; the mouse position is overridden from
 // the first click on, without moving the real cursor.
 static glm::ivec2 scriptedMouse = {0, 0};
 static bool scriptedMouseActive = false; // set by the first click@ or move@ (coordinates may be negative)
 
-// A key named in a script: one letter, Space or LShift. -1 if unknown.
+// A key named in a script: one letter or digit, Space or LShift. -1 if unknown.
 static int scriptedKey(const char *name)
 {
 	const std::string n = name;
 	if (n.size() == 1 && std::isalpha((unsigned char)n[0])) { return GLFW_KEY_A + (std::toupper((unsigned char)n[0]) - 'A'); }
+	if (n.size() == 1 && std::isdigit((unsigned char)n[0])) { return GLFW_KEY_0 + (n[0] - '0'); }
 	if (n == "Space") { return GLFW_KEY_SPACE; }
 	if (n == "LShift") { return GLFW_KEY_LEFT_SHIFT; }
 	return -1;
@@ -307,7 +309,7 @@ static void playScriptedInput(GLFWwindow *window)
 			scriptedMouseActive = true;
 			std::cout << "input: frame " << frame << " move " << x << "," << y << "\n";
 		}
-		else if (char name[16] = {}; std::sscanf(step.c_str(), "%d:key@%15[A-Za-z]", &frame, name) == 2
+		else if (char name[16] = {}; std::sscanf(step.c_str(), "%d:key@%15[A-Za-z0-9]", &frame, name) == 2
 			&& frame == frameIndex && scriptedKey(name) >= 0)
 		{
 			int key = scriptedKey(name);
@@ -315,7 +317,15 @@ static void playScriptedInput(GLFWwindow *window)
 			releases.push_back({frame + 1, key});
 			std::cout << "input: frame " << frame << " key " << name << "\n";
 		}
-		else if (int frames = 0; std::sscanf(step.c_str(), "%d:hold@%15[A-Za-z],%d", &frame, name, &frames) == 3
+		else if (int frames = 0; std::sscanf(step.c_str(), "%d:hold@%15[A-Za-z0-9],%d", &frame, name, &frames) == 3
+			&& frame == frameIndex && std::string(name) == "Mouse" && frames > 0)
+		{
+			// The left button held at the scripted mouse: breaking a block.
+			mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
+			releases.push_back({frame + frames, -1});
+			std::cout << "input: frame " << frame << " hold Mouse for " << frames << " frames\n";
+		}
+		else if (int frames = 0; std::sscanf(step.c_str(), "%d:hold@%15[A-Za-z0-9],%d", &frame, name, &frames) == 3
 			&& frame == frameIndex && scriptedKey(name) >= 0 && frames > 0)
 		{
 			// Like key@, but released `frames` frames later: walks the player.

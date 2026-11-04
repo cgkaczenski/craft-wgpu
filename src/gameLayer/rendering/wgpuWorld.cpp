@@ -27,6 +27,9 @@
 //   that surface; copy color and depth; final pass: every transparent face,
 //   blended, water reading the copies (what is under it, and how deep).
 // Transparent faces live in the same arena, a second range per chunk.
+// Milestone 10a adds the dropped block items (instanced cubes in the opaque
+// pass), the block-breaking crack decal and GyzmosRenderer's lines (the
+// block-selection outline), each in a pass of its own after the world.
 
 #include "rendering/wgpuWorld.h"
 #include "rendering/camera.h"
@@ -41,6 +44,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdlib>
 #include <string>
 #include <cstdint>
@@ -136,6 +140,29 @@ namespace
 		PipelineLayout transparentPipelineLayout = nullptr;
 		BindGroupLayout peelBindGroupLayout = nullptr;
 		BindGroup peelBindGroup = nullptr; // the two copies below; remade with them
+
+		// Milestone 10a: dropped block cubes, the crack decal, gizmo lines.
+		RenderPipeline cubePipeline = nullptr;
+		RenderPipeline decalPipeline = nullptr;
+		RenderPipeline linePipeline = nullptr;
+		PipelineLayout cubePipelineLayout = nullptr;
+		PipelineLayout decalPipelineLayout = nullptr;
+		BindGroupLayout cubeBindGroupLayout = nullptr;
+		BindGroupLayout decalBindGroupLayout = nullptr;
+
+		std::vector<float> cubeGeometry; // 36 vertices x 8 floats
+		bool cubeGeometryDirty = false;
+		Buffer cubeVertexBuffer = nullptr;
+		Buffer cubeInstanceBuffer = nullptr;
+		uint64_t cubeInstanceCapacity = 0; // in cubes
+		BindGroup cubeBindGroup = nullptr;  // the two buffers above
+
+		Buffer decalFaceBuffer = nullptr;
+		BindGroup decalBindGroup = nullptr;
+		uint32_t decalTextureId = 0;        // the texture decalBindGroup names
+
+		Buffer lineBuffer = nullptr;
+		uint64_t lineCapacity = 0;          // in points
 		BindGroup bindGroup = nullptr; // everything below; remade when any of it changes
 		Buffer uniformBuffer = nullptr;
 
@@ -371,6 +398,45 @@ namespace
 		w.peelBindGroupLayout = wgpuDevice().createBindGroupLayout(peelLayoutDesc);
 		if (!w.peelBindGroupLayout) { return false; }
 
+		// Group 1 of the cube pipeline: the cube's vertices and the cubes.
+		BindGroupLayoutEntry cubeEntries[2];
+		for (uint32_t i = 0; i < 2; i++)
+		{
+			cubeEntries[i] = Default;
+			cubeEntries[i].binding = i;
+			cubeEntries[i].visibility = ShaderStage::Vertex;
+			cubeEntries[i].buffer.type = BufferBindingType::ReadOnlyStorage;
+			cubeEntries[i].buffer.hasDynamicOffset = false;
+			cubeEntries[i].buffer.minBindingSize = 0;
+			cubeEntries[i].sampler.type = SamplerBindingType::BindingNotUsed;
+			cubeEntries[i].texture.sampleType = TextureSampleType::BindingNotUsed;
+			cubeEntries[i].storageTexture.access = StorageTextureAccess::BindingNotUsed;
+		}
+		BindGroupLayoutDescriptor cubeLayoutDesc = Default;
+		cubeLayoutDesc.label = StringView("world cube bind group layout");
+		cubeLayoutDesc.entryCount = 2;
+		cubeLayoutDesc.entries = cubeEntries;
+		w.cubeBindGroupLayout = wgpuDevice().createBindGroupLayout(cubeLayoutDesc);
+		if (!w.cubeBindGroupLayout) { return false; }
+
+		// Group 1 of the decal pipeline: the crack texture, at binding 2
+		// (chunkFaces.wgsl's group 1 also declares the peel's 0 and 1).
+		BindGroupLayoutEntry decalEntry = Default;
+		decalEntry.binding = 2;
+		decalEntry.visibility = ShaderStage::Fragment;
+		decalEntry.buffer.type = BufferBindingType::BindingNotUsed;
+		decalEntry.sampler.type = SamplerBindingType::BindingNotUsed;
+		decalEntry.storageTexture.access = StorageTextureAccess::BindingNotUsed;
+		decalEntry.texture.sampleType = TextureSampleType::Float;
+		decalEntry.texture.viewDimension = TextureViewDimension::_2D;
+		decalEntry.texture.multisampled = false;
+		BindGroupLayoutDescriptor decalLayoutDesc = Default;
+		decalLayoutDesc.label = StringView("world decal bind group layout");
+		decalLayoutDesc.entryCount = 1;
+		decalLayoutDesc.entries = &decalEntry;
+		w.decalBindGroupLayout = wgpuDevice().createBindGroupLayout(decalLayoutDesc);
+		if (!w.decalBindGroupLayout) { return false; }
+
 		BufferDescriptor bufferDesc = Default;
 		bufferDesc.label = StringView("world uniforms");
 		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
@@ -393,6 +459,7 @@ namespace
 		CompareFunction depthCompare = CompareFunction::Less;
 		CullMode cull = CullMode::Back;
 		int passMode = -1;        // the WGSL `passMode` override, -1 to leave it
+		float zBias = 0.f;        // the WGSL `zBias` override (vertex stage)
 	};
 
 	RenderPipeline createFacePipeline(ShaderModule module, const FacePipelineDesc &p)
@@ -421,8 +488,11 @@ namespace
 		desc.layout = p.layout;
 		desc.vertex.module = module;
 		desc.vertex.entryPoint = StringView("vs_main");
-		desc.vertex.constantCount = 0;
-		desc.vertex.constants = nullptr;
+		ConstantEntry biasConstant = Default;
+		biasConstant.key = StringView("zBias");
+		biasConstant.value = (double)p.zBias;
+		desc.vertex.constantCount = p.zBias != 0.f ? 1 : 0;
+		desc.vertex.constants = p.zBias != 0.f ? &biasConstant : nullptr;
 		desc.vertex.bufferCount = 1;
 		desc.vertex.buffers = &faceLayout;
 
@@ -540,10 +610,115 @@ namespace
 		final.passMode = 2;
 		w.finalPlainPipeline = createFacePipeline(module, final);
 
+		// The crack decal: drawn after the world with GL_LEQUAL, culled, and
+		// zpass.vert's bias.
+		BindGroupLayout decalGroups[2] = { w.bindGroupLayout, w.decalBindGroupLayout };
+		w.decalPipelineLayout = createPipelineLayout("world decal pipeline layout", decalGroups, 2);
+		FacePipelineDesc decal;
+		decal.label = "world crack decal";
+		decal.layout = w.decalPipelineLayout;
+		decal.fragmentEntry = "fs_decal";
+		decal.depthCompare = CompareFunction::LessEqual;
+		decal.zBias = -0.000001f;
+		w.decalPipeline = createFacePipeline(module, decal);
+
 		const bool invalid = scope.failed(); // a rejected pipeline can still be non-null
 		module.release();
 		return w.pipeline && w.waterDepthPipeline && w.peelPipeline && w.finalPeelPipeline
-			&& w.finalPlainPipeline && !invalid;
+			&& w.finalPlainPipeline && w.decalPipeline && !invalid;
+	}
+
+	// The dropped block cubes and the gizmo lines (entities.wgsl).
+	bool createEntityPipelines()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/entities.wgsl");
+		if (!module) { return false; }
+
+		ErrorScope scope("world entity pipelines");
+
+		BindGroupLayout cubeGroups[2] = { w.bindGroupLayout, w.cubeBindGroupLayout };
+		w.cubePipelineLayout = createPipelineLayout("world cube pipeline layout", cubeGroups, 2);
+		if (!w.cubePipelineLayout) { module.release(); return false; }
+
+		DepthStencilState depth = Default;
+		depth.format = depthFormat;
+		depth.depthWriteEnabled = OptionalBool::True;
+		depth.depthCompare = CompareFunction::Less;
+		depth.stencilFront.compare = CompareFunction::Always;
+		depth.stencilFront.failOp = StencilOperation::Keep;
+		depth.stencilFront.depthFailOp = StencilOperation::Keep;
+		depth.stencilFront.passOp = StencilOperation::Keep;
+		depth.stencilBack = depth.stencilFront;
+		depth.stencilReadMask = 0;
+		depth.stencilWriteMask = 0;
+		depth.depthBias = 0;
+		depth.depthBiasSlopeScale = 0.f;
+		depth.depthBiasClamp = 0.f;
+
+		ColorTargetState colorTarget = Default;
+		colorTarget.format = wgpuSurfaceFormat();
+		colorTarget.blend = nullptr;
+		colorTarget.writeMask = ColorWriteMask::All;
+
+		FragmentState fragment = Default;
+		fragment.module = module;
+		fragment.constantCount = 0;
+		fragment.constants = nullptr;
+		fragment.targetCount = 1;
+		fragment.targets = &colorTarget;
+
+		// Cubes: no vertex buffers, everything from storage. Back faces culled,
+		// as GL draws entities: every triangle of vertexDataOriginal winds
+		// counter-clockwise seen from outside, so cut-out textures show the
+		// ground through the cube, not its inside.
+		RenderPipelineDescriptor desc = Default;
+		desc.label = StringView("world block cubes");
+		desc.layout = w.cubePipelineLayout;
+		desc.vertex.module = module;
+		desc.vertex.entryPoint = StringView("vs_cube");
+		desc.vertex.constantCount = 0;
+		desc.vertex.constants = nullptr;
+		desc.vertex.bufferCount = 0;
+		desc.vertex.buffers = nullptr;
+		desc.primitive.topology = PrimitiveTopology::TriangleList;
+		desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+		desc.primitive.frontFace = FrontFace::CCW;
+		desc.primitive.cullMode = CullMode::Back;
+		desc.primitive.unclippedDepth = false;
+		desc.depthStencil = &depth;
+		fragment.entryPoint = StringView("fs_cube");
+		desc.fragment = &fragment;
+		desc.multisample.count = 1;
+		desc.multisample.mask = 0xFFFFFFFFu;
+		desc.multisample.alphaToCoverageEnabled = false;
+		w.cubePipeline = wgpuDevice().createRenderPipeline(desc);
+
+		// Lines: camera-relative points, two per segment, GL_LEQUAL. WebGPU
+		// lines are one pixel wide (GL asked for 10, which macOS ignores too).
+		VertexAttribute pointAttribute = Default;
+		pointAttribute.shaderLocation = 0;
+		pointAttribute.format = VertexFormat::Float32x3;
+		pointAttribute.offset = 0;
+		VertexBufferLayout pointLayout = Default;
+		pointLayout.arrayStride = sizeof(glm::vec3);
+		pointLayout.stepMode = VertexStepMode::Vertex;
+		pointLayout.attributeCount = 1;
+		pointLayout.attributes = &pointAttribute;
+
+		desc.label = StringView("world gizmo lines");
+		desc.layout = w.pipelineLayout; // group 0 only
+		desc.vertex.entryPoint = StringView("vs_line");
+		desc.vertex.bufferCount = 1;
+		desc.vertex.buffers = &pointLayout;
+		desc.primitive.topology = PrimitiveTopology::LineList;
+		desc.primitive.cullMode = CullMode::None; // lines have no facing
+		depth.depthCompare = CompareFunction::LessEqual;
+		fragment.entryPoint = StringView("fs_line");
+		w.linePipeline = wgpuDevice().createRenderPipeline(desc);
+
+		const bool invalid = scope.failed();
+		module.release();
+		return w.cubePipeline && w.linePipeline && !invalid;
 	}
 
 	Buffer makeStorageBuffer(const void *data, uint64_t bytes, const char *label)
@@ -1043,6 +1218,76 @@ namespace
 		w.facesInUse += count;
 	}
 
+	// Makes `buffer` hold at least `bytes`, doubling from `capacity`; false if
+	// creation failed. The old buffer is released (draws already recorded
+	// keep it alive until they ran). Returns true when it made a new one in
+	// `remade`, so bind groups naming it can be remade.
+	bool ensureBuffer(Buffer &buffer, uint64_t &capacity, uint64_t needed, uint64_t unitBytes,
+		BufferUsage usage, const char *label, bool &remade)
+	{
+		remade = false;
+		if (buffer && needed <= capacity) { return true; }
+		uint64_t newCapacity = capacity ? capacity : 64;
+		while (newCapacity < needed) { newCapacity *= 2; }
+
+		BufferDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.usage = usage | BufferUsage::CopyDst;
+		desc.size = newCapacity * unitBytes;
+		desc.mappedAtCreation = false;
+		Buffer bigger = wgpuDevice().createBuffer(desc);
+		if (!bigger) { return false; }
+		if (buffer) { buffer.release(); }
+		buffer = bigger;
+		capacity = newCapacity;
+		remade = true;
+		return true;
+	}
+
+	// The cube vertices and this frame's cubes, and the bind group naming
+	// both. False when there is nothing to draw.
+	bool prepareCubes(const std::vector<BlockCube> &cubes)
+	{
+		if (cubes.empty() || w.cubeGeometry.empty()) { return false; }
+
+		bool remade = false;
+		if (w.cubeGeometryDirty || !w.cubeVertexBuffer)
+		{
+			if (w.cubeVertexBuffer) { w.cubeVertexBuffer.release(); w.cubeVertexBuffer = nullptr; }
+			w.cubeVertexBuffer = makeStorageBuffer(w.cubeGeometry.data(),
+				w.cubeGeometry.size() * sizeof(float), "world cube vertices");
+			if (!w.cubeVertexBuffer) { return false; }
+			w.cubeGeometryDirty = false;
+			remade = true;
+		}
+
+		bool grown = false;
+		if (!ensureBuffer(w.cubeInstanceBuffer, w.cubeInstanceCapacity, cubes.size(), sizeof(BlockCube),
+			BufferUsage::Storage, "world block cubes", grown)) { return false; }
+		wgpuQueue().writeBuffer(w.cubeInstanceBuffer, 0, cubes.data(), cubes.size() * sizeof(BlockCube));
+
+		if (remade || grown || !w.cubeBindGroup)
+		{
+			if (w.cubeBindGroup) { w.cubeBindGroup.release(); w.cubeBindGroup = nullptr; }
+			BindGroupEntry entries[2];
+			entries[0] = Default;
+			entries[0].binding = 0;
+			entries[0].buffer = w.cubeVertexBuffer;
+			entries[0].size = w.cubeVertexBuffer.getSize();
+			entries[1] = Default;
+			entries[1].binding = 1;
+			entries[1].buffer = w.cubeInstanceBuffer;
+			entries[1].size = w.cubeInstanceBuffer.getSize();
+			BindGroupDescriptor groupDesc = Default;
+			groupDesc.label = StringView("world cube bind group");
+			groupDesc.layout = w.cubeBindGroupLayout;
+			groupDesc.entryCount = 2;
+			groupDesc.entries = entries;
+			w.cubeBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		}
+		return (bool)w.cubeBindGroup;
+	}
+
 	// The fastest path the device allows, unless OURCRAFT_WORLD_DRAWS asks for
 	// another. Indirect needs IndirectFirstInstance: each chunk's record
 	// points at its range of the arena through firstInstance.
@@ -1094,7 +1339,7 @@ namespace
 		if (w.initialized) { return true; }
 		if (w.failed || !wgpuDevice()) { return false; }
 
-		if (!createLayoutAndUniforms() || !createPipelines())
+		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -1121,6 +1366,12 @@ void setBlockTextures(const std::vector<uint64_t> &handles)
 	w.texturesDirty = true;
 }
 
+void setBlockCubeGeometry(const std::vector<float> &vertices)
+{
+	w.cubeGeometry = vertices;
+	w.cubeGeometryDirty = true;
+}
+
 void setChunkFaces(const Chunk *chunk, const std::vector<int> &faces)
 {
 	if (!wgpuDevice()) { return; }
@@ -1140,7 +1391,8 @@ void removeChunk(const Chunk *chunk)
 	placeFaces(w.transparentChunks, chunk, none);
 }
 
-void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const glm::vec3 &waterColor, bool waterPeel)
+void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std::vector<BlockCube> &blockCubes,
+	const glm::vec3 &waterColor, bool waterPeel)
 {
 	if (!initialize()) { return; }
 	if (!updateResources()) { return; }
@@ -1247,6 +1499,16 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const glm
 			bindFaces(pass, w.pipeline, false);
 			drawRecords(pass, mode, 0, opaqueCount);
 		}
+
+		// Dropped block items: opaque, so before the transparent passes (GL
+		// draws entities between its solid pass and the depth copy).
+		if (prepareCubes(blockCubes))
+		{
+			pass.setPipeline(w.cubePipeline);
+			pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+			pass.setBindGroup(1, w.cubeBindGroup, 0, nullptr);
+			pass.draw(36, (uint32_t)blockCubes.size(), 0, 0);
+		}
 		pass.end();
 		pass.release();
 	}
@@ -1342,6 +1604,73 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const glm
 	}
 }
 
+void renderDecal(const std::vector<int> &faces, int crackFrame, unsigned int crackTexture)
+{
+	if (!w.initialized || !w.bindGroup || !w.depthView) { return; }
+	const uint32_t count = (uint32_t)(faces.size() * sizeof(int) / faceBytes);
+	if (!count) { return; }
+
+	TextureView crackView = wgpuTextureView(crackTexture);
+	if (!crackView) { return; }
+
+	bool grown = false;
+	uint64_t capacity = w.decalFaceBuffer ? w.decalFaceBuffer.getSize() / faceBytes : 0;
+	if (!ensureBuffer(w.decalFaceBuffer, capacity, count, faceBytes, BufferUsage::Vertex,
+		"world decal faces", grown)) { return; }
+	wgpuQueue().writeBuffer(w.decalFaceBuffer, 0, faces.data(), (uint64_t)count * faceBytes);
+
+	if (!w.decalBindGroup || w.decalTextureId != crackTexture)
+	{
+		if (w.decalBindGroup) { w.decalBindGroup.release(); w.decalBindGroup = nullptr; }
+		BindGroupEntry entry = Default;
+		entry.binding = 2;
+		entry.textureView = crackView;
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world decal bind group");
+		groupDesc.layout = w.decalBindGroupLayout;
+		groupDesc.entryCount = 1;
+		groupDesc.entries = &entry;
+		w.decalBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		w.decalTextureId = crackTexture;
+		if (!w.decalBindGroup) { return; }
+	}
+
+	// The frame rides in the uniforms' planes.z, which only fs_decal reads,
+	// so writing it now changes nothing the world's passes see.
+	const float frame = (float)crackFrame;
+	wgpuQueue().writeBuffer(w.uniformBuffer, offsetof(Uniforms, planes) + 2 * sizeof(float), &frame, sizeof(frame));
+
+	RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world decal pass");
+	if (!pass) { return; }
+	pass.setPipeline(w.decalPipeline);
+	pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+	pass.setBindGroup(1, w.decalBindGroup, 0, nullptr);
+	pass.setVertexBuffer(0, w.decalFaceBuffer, 0, (uint64_t)count * faceBytes);
+	pass.draw(4, count, 0, 0);
+	pass.end();
+	pass.release();
+}
+
+void renderLines(const std::vector<glm::vec3> &points)
+{
+	if (!w.initialized || !w.bindGroup || !w.depthView || points.size() < 2) { return; }
+	const uint32_t count = (uint32_t)(points.size() & ~size_t(1)); // whole segments
+
+	bool grown = false;
+	if (!ensureBuffer(w.lineBuffer, w.lineCapacity, count, sizeof(glm::vec3), BufferUsage::Vertex,
+		"world gizmo lines", grown)) { return; }
+	wgpuQueue().writeBuffer(w.lineBuffer, 0, points.data(), (uint64_t)count * sizeof(glm::vec3));
+
+	RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world gizmo pass");
+	if (!pass) { return; }
+	pass.setPipeline(w.linePipeline);
+	pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+	pass.setVertexBuffer(0, w.lineBuffer, 0, (uint64_t)count * sizeof(glm::vec3));
+	pass.draw(count, 1, 0, 0);
+	pass.end();
+	pass.release();
+}
+
 void shutdown()
 {
 	if (w.initialized)
@@ -1367,6 +1696,26 @@ void shutdown()
 		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
 	}
 	if (w.transparentPipelineLayout) { w.transparentPipelineLayout.release(); w.transparentPipelineLayout = nullptr; }
+	for (RenderPipeline *pipeline : { &w.cubePipeline, &w.decalPipeline, &w.linePipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	for (PipelineLayout *layout : { &w.cubePipelineLayout, &w.decalPipelineLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (BindGroup *group : { &w.cubeBindGroup, &w.decalBindGroup })
+	{
+		if (*group) { group->release(); *group = nullptr; }
+	}
+	for (Buffer *buffer : { &w.cubeVertexBuffer, &w.cubeInstanceBuffer, &w.decalFaceBuffer, &w.lineBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
+	for (BindGroupLayout *layout : { &w.cubeBindGroupLayout, &w.decalBindGroupLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
 	if (w.peelBindGroupLayout) { w.peelBindGroupLayout.release(); w.peelBindGroupLayout = nullptr; }
 	if (w.pipelineLayout) { w.pipelineLayout.release(); w.pipelineLayout = nullptr; }
 	if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }

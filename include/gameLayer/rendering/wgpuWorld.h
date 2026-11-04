@@ -10,6 +10,7 @@
 // it without including webgpu.hpp.
 
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -19,6 +20,20 @@ struct Chunk;
 
 namespace wgpuWorld
 {
+	// A dropped block item, drawn as a 0.4-scale cube in the world pass
+	// (milestone 10a). Must match entities.wgsl's Cube: 64 bytes.
+	struct BlockCube
+	{
+		glm::ivec4 positionInt = {};   // xyz; w unused
+		glm::vec4 positionFloat = {};  // xyz the fraction; w brightness (0..1)
+		glm::uvec4 slotsA = {};        // BlocksLoader::gpuIds slots of faces 0-3
+		glm::uvec4 slotsB = {};        // faces 4-5 in xy
+	};
+
+	// The 36 vertices of GL's cube entity, 8 floats each (position, normal,
+	// uv), as Renderer builds them for blockEntityshader.vaoCube.
+	void setBlockCubeGeometry(const std::vector<float> &vertices);
+
 	// The corner table (4 corners x 3 floats per face orientation) and the UV
 	// table (4 corners x 2 floats) that Renderer::recreateBlockGeometryData
 	// builds for OpenGL's u_vertexData and vertexUV.
@@ -44,13 +59,24 @@ namespace wgpuWorld
 
 	// Records the world's passes for this frame: clears color and depth,
 	// draws the opaque faces of `visibleChunks` (the renderer's
-	// frustum-culled list, sorted far to near), then their transparent faces
+	// frustum-culled list, sorted far to near) and the dropped block cubes,
+	// then their transparent faces
 	// blended back to front. With `waterPeel` (GL's waterType 1) water shows
 	// what is under it through a depth peel; without it, water is plain
 	// see-through. `waterColor` is GL's u_waterColor, in linear space. Call
 	// inside an open frame, before the 2D layer draws.
 	void render(Camera &camera, const std::vector<Chunk *> &visibleChunks,
-		const glm::vec3 &waterColor, bool waterPeel);
+		const std::vector<BlockCube> &blockCubes, const glm::vec3 &waterColor, bool waterPeel);
+
+	// The block-breaking crack over a block's faces (Renderer::renderDecal):
+	// `faces` in the chunk face format, `crackFrame` 0-10, `crackTexture` a
+	// wgpu2d texture id. Draws at once, after the world, on its depth. Call
+	// after render in the same frame (it reuses its camera).
+	void renderDecal(const std::vector<int> &faces, int crackFrame, unsigned int crackTexture);
+
+	// Line segments, two camera-relative points each (GyzmosRenderer's cubes
+	// and lines). Draws at once, after the world, on its depth.
+	void renderLines(const std::vector<glm::vec3> &points);
 
 	// Releases every GPU object. Call before wgpuWindow::shutdown.
 	void shutdown();

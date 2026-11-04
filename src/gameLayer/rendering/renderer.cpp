@@ -1933,6 +1933,11 @@ void Renderer::create(ModelsManager &modelsManager)
 		}
 	}
 
+#if RENDERER_WEBGPU
+	// The cube itself (the first 36 vertices), for dropped block items.
+	wgpuWorld::setBlockCubeGeometry(data);
+#endif
+
 
 	auto addModelData = [&](BlockModel &blockModel, int index)
 	{
@@ -2923,7 +2928,42 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	// scaffold.
 	// The water color GL sends as u_waterColor, and whether to peel
 	// (the shading setting that picks GL's two transparency paths).
-	wgpuWorld::render(c, chunkVectorCopy, defaultShader.shadingSettings.waterColor,
+	// Dropped block items, as renderEntities draws them with the block entity
+	// shader: a 0.4 cube 0.2 above the item, its faces' textures, its light.
+	static std::vector<wgpuWorld::BlockCube> blockCubes;
+	blockCubes.clear();
+	for (auto &e : entityManager.droppedItems)
+	{
+		const auto type = e.second.entityBuffered.type;
+		if (!isBlock(type)) { continue; }
+
+		wgpuWorld::BlockCube cube;
+		glm::vec3 entityFloat = {};
+		glm::ivec3 entityInt = {};
+		decomposePosition(e.second.getRubberBandPosition(), entityFloat, entityInt);
+		entityFloat += glm::vec3(0, 0.2, 0);
+
+		int light = skyLightIntensity;
+		if (auto b = chunkSystem.getBlockSafe(e.second.getRubberBandPosition() + glm::dvec3(0, 0.2, 0)))
+		{
+			light = std::max((char)b->getLight(), (char)(b->getSkyLight() - ((char)15 - (char)skyLightIntensity)));
+			light = std::max(light, 0);
+		}
+		if (dontUpdateLightSystem) { light = 15; }
+
+		// blockEntity.vert's v_ambient is pow(x, 2.2) of this, applied to a
+		// linear color; this world writes sRGB, so x itself is the factor.
+		const float brightness = (light / 15.f) * 0.6f * (1.f - 0.25f) + 0.25f;
+
+		cube.positionInt = glm::ivec4(entityInt, 0);
+		cube.positionFloat = glm::vec4(entityFloat, brightness);
+		cube.slotsA = glm::uvec4(getGpuIdIndexForBlock(type, 0), getGpuIdIndexForBlock(type, 1),
+			getGpuIdIndexForBlock(type, 2), getGpuIdIndexForBlock(type, 3));
+		cube.slotsB = glm::uvec4(getGpuIdIndexForBlock(type, 4), getGpuIdIndexForBlock(type, 5), 0, 0);
+		blockCubes.push_back(cube);
+	}
+
+	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0);
 #endif
 
@@ -4438,6 +4478,10 @@ void Renderer::renderDecal(glm::ivec3 position, Camera &c, Block b, ProgramData 
 	
 	
 	int elementCountSize = currentVector.size() / 4; //todo magic number
+
+#if RENDERER_WEBGPU
+	wgpuWorld::renderDecal(currentVector, decalPosition, programData.crackTexture.id);
+#endif
 
 
 #pragma region add data
@@ -5954,6 +5998,42 @@ void GyzmosRenderer::create()
 
 void GyzmosRenderer::render(Camera &c, glm::ivec3 posInt, glm::vec3 posFloat)
 {
+#if RENDERER_WEBGPU
+	// WebGPU has no wireframe polygon mode: each cube triangle's three edges
+	// become line segments, which is what glPolygonMode(GL_LINE) draws
+	// (face diagonals included). Points are camera-relative, integer part
+	// first, as the cube shader does.
+	{
+		static std::vector<glm::vec3> points;
+		points.clear();
+		for (auto &cube : cubes)
+		{
+			const glm::vec3 base = glm::vec3(glm::ivec3(cube.x, cube.y, cube.z) - posInt) - posFloat
+				+ glm::vec3(cube.posFloatX, cube.posFloatY, cube.posFloatZ);
+			const glm::vec3 size = {cube.sizeX, cube.sizeY, cube.sizeZ};
+			auto corner = [&](unsigned int index)
+			{
+				return base + size * glm::vec3(cubePositions[index * 3], cubePositions[index * 3 + 1],
+					cubePositions[index * 3 + 2]);
+			};
+			for (int t = 0; t < 36; t += 3)
+			{
+				for (int e = 0; e < 3; e++)
+				{
+					points.push_back(corner(cubeIndicesData[t + e]));
+					points.push_back(corner(cubeIndicesData[t + (e + 1) % 3]));
+				}
+			}
+		}
+		for (auto &line : lines)
+		{
+			points.push_back(glm::vec3(glm::dvec3(line.a) - c.position));
+			points.push_back(glm::vec3(glm::dvec3(line.b) - c.position));
+		}
+		wgpuWorld::renderLines(points);
+	}
+#endif
+
 
 
 	if (!cubes.empty()) 
