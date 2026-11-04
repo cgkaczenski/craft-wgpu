@@ -133,10 +133,19 @@ void endFrame()
 	// WGPU_SCREENSHOT_FRAME=N saves frame N as screenshot-frameN.png in the
 	// working directory: a way to see what WebGPU drew from a script, with no
 	// screen capture permission involved.
+	// A comma-separated list (N,M,...) saves each of those frames.
 	static long long frameIndex = 0;
 	static const char *shotAt = std::getenv("WGPU_SCREENSHOT_FRAME");
 	++frameIndex;
-	const bool shoot = shotAt && frameIndex == std::atoll(shotAt);
+	bool shoot = false;
+	for (const char *p = shotAt; p && *p; )
+	{
+		char *end = nullptr;
+		const long long frame = std::strtoll(p, &end, 10);
+		if (end == p) { break; }
+		if (frame == frameIndex) { shoot = true; }
+		p = (*end == ',') ? end + 1 : end;
+	}
 
 	// The capture is taken inside wgpuEndFrame, so ask before it.
 	if (shoot) { render::wgpuRequestFrameCapture(); }

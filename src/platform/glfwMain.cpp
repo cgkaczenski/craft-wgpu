@@ -232,10 +232,23 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // a WGPU_SCREENSHOT_FRAME capture can reach a menu with no one at the keyboard.
 // Actions: click@x,y (window points; the press lands on that frame, the
 // release on the next), move@x,y (the mouse moves there, no button: turns the
-// camera in game), key@E or key@F9 (a letter or function key, pressed then
-// released the same way) and quit (closes the window, so shutdown runs). Feeds the callbacks below; the mouse position is overridden from
+// camera in game; the game re-centres the cursor at half the framebuffer
+// size each frame, so the offset from there is the turn), key@E, key@Space,
+// key@LShift or key@F9 (pressed, then released the same way), hold@W,N (held
+// for N frames: walking) and quit (closes the window, so shutdown runs). Feeds the callbacks below; the mouse position is overridden from
 // the first click on, without moving the real cursor.
-static glm::ivec2 scriptedMouse = {-1, -1};
+static glm::ivec2 scriptedMouse = {0, 0};
+static bool scriptedMouseActive = false; // set by the first click@ or move@ (coordinates may be negative)
+
+// A key named in a script: one letter, Space or LShift. -1 if unknown.
+static int scriptedKey(const char *name)
+{
+	const std::string n = name;
+	if (n.size() == 1 && std::isalpha((unsigned char)n[0])) { return GLFW_KEY_A + (std::toupper((unsigned char)n[0]) - 'A'); }
+	if (n == "Space") { return GLFW_KEY_SPACE; }
+	if (n == "LShift") { return GLFW_KEY_LEFT_SHIFT; }
+	return -1;
+}
 
 static void playScriptedInput(GLFWwindow *window)
 {
@@ -264,7 +277,6 @@ static void playScriptedInput(GLFWwindow *window)
 		start = end + 1;
 
 		int frame = 0, x = 0, y = 0, function = 0;
-		char letter = 0;
 		int quitFrame = 0;
 		char quitWord[5] = {};
 		if (std::sscanf(step.c_str(), "%d:%4s", &quitFrame, quitWord) == 2 && std::string(quitWord) == "quit"
@@ -284,6 +296,7 @@ static void playScriptedInput(GLFWwindow *window)
 		else if (std::sscanf(step.c_str(), "%d:click@%d,%d", &frame, &x, &y) == 3 && frame == frameIndex)
 		{
 			scriptedMouse = {x, y};
+			scriptedMouseActive = true;
 			mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
 			releases.push_back({frame + 1, -1});
 			std::cout << "input: frame " << frame << " click " << x << "," << y << "\n";
@@ -291,15 +304,25 @@ static void playScriptedInput(GLFWwindow *window)
 		else if (std::sscanf(step.c_str(), "%d:move@%d,%d", &frame, &x, &y) == 3 && frame == frameIndex)
 		{
 			scriptedMouse = {x, y};
+			scriptedMouseActive = true;
 			std::cout << "input: frame " << frame << " move " << x << "," << y << "\n";
 		}
-		else if (std::sscanf(step.c_str(), "%d:key@%c", &frame, &letter) == 2 && frame == frameIndex
-			&& std::isalpha((unsigned char)letter))
+		else if (char name[16] = {}; std::sscanf(step.c_str(), "%d:key@%15[A-Za-z]", &frame, name) == 2
+			&& frame == frameIndex && scriptedKey(name) >= 0)
 		{
-			int key = GLFW_KEY_A + (std::toupper((unsigned char)letter) - 'A');
+			int key = scriptedKey(name);
 			keyCallback(window, key, 0, GLFW_PRESS, 0);
 			releases.push_back({frame + 1, key});
-			std::cout << "input: frame " << frame << " key " << letter << "\n";
+			std::cout << "input: frame " << frame << " key " << name << "\n";
+		}
+		else if (int frames = 0; std::sscanf(step.c_str(), "%d:hold@%15[A-Za-z],%d", &frame, name, &frames) == 3
+			&& frame == frameIndex && scriptedKey(name) >= 0 && frames > 0)
+		{
+			// Like key@, but released `frames` frames later: walks the player.
+			int key = scriptedKey(name);
+			keyCallback(window, key, 0, GLFW_PRESS, 0);
+			releases.push_back({frame + frames, key});
+			std::cout << "input: frame " << frame << " hold " << name << " for " << frames << " frames\n";
 		}
 	}
 }
@@ -359,7 +382,7 @@ namespace platform
 	void setRelMousePosition(int x, int y)
 	{
 		// A scripted mouse (OURCRAFT_INPUT) follows the warp like a real one.
-		if (scriptedMouse.x >= 0) { scriptedMouse = {x, y}; }
+		if (scriptedMouseActive) { scriptedMouse = {x, y}; }
 		glfwSetCursorPos(wind, x, y);
 	}
 
@@ -375,7 +398,7 @@ namespace platform
 
 	glm::ivec2 getRelMousePosition()
 	{
-		if (scriptedMouse.x >= 0) { return scriptedMouse; }
+		if (scriptedMouseActive) { return scriptedMouse; }
 		double x = 0, y = 0;
 		glfwGetCursorPos(wind, &x, &y);
 		return { x, y };

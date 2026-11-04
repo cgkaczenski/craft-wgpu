@@ -3594,8 +3594,8 @@ ShaderModule wgpuCreateShaderModuleFromFile(const char *path)
 	return createShaderModuleFromFile(path);
 }
 
-RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, float depthClearValue,
-	const char *label)
+RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, bool clearDepth,
+	float depthClearValue, const char *label)
 {
 	// The low-res final-effect target is not supported here: ourCraft sets no
 	// final effect, so the world always goes straight to the surface.
@@ -3623,11 +3623,12 @@ RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, float dep
 	colorAttachment.clearValue.a = g.clearColor.a;
 
 	// Depth only: the stencil ops must stay Undefined for a format with no
-	// stencil aspect. Discard after the pass, since nothing reads it yet.
+	// stencil aspect. Stored, since the world's later passes and copies
+	// read it.
 	RenderPassDepthStencilAttachment depthAttachment = Default;
 	depthAttachment.view = depthView;
-	depthAttachment.depthLoadOp = LoadOp::Clear;
-	depthAttachment.depthStoreOp = StoreOp::Discard;
+	depthAttachment.depthLoadOp = clearDepth ? LoadOp::Clear : LoadOp::Load;
+	depthAttachment.depthStoreOp = StoreOp::Store;
 	depthAttachment.depthClearValue = depthClearValue;
 	depthAttachment.depthReadOnly = false;
 	depthAttachment.stencilLoadOp = LoadOp::Undefined;
@@ -3643,6 +3644,27 @@ RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, float dep
 	passDesc.occlusionQuerySet = nullptr;
 	passDesc.timestampWrites = nullptr;
 	return g.frameEncoder.beginRenderPass(passDesc);
+}
+
+CommandEncoder wgpuFrameEncoder()
+{
+	if (!g.frameOpen) { return nullptr; }
+
+	// Commands recorded on the encoder while a pass is open are an error, so
+	// the 2D pass ends here; the next 2D draw begins a new one that loads.
+	if (g.framePass)
+	{
+		g.framePass.end();
+		g.framePass.release();
+		g.framePass = nullptr;
+	}
+	return g.frameEncoder;
+}
+
+Texture wgpuFrameTexture()
+{
+	if (!g.frameOpen) { return nullptr; }
+	return g.frameTexture;
 }
 
 RenderPassEncoder wgpuCurrentRenderPass()

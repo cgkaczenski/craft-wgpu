@@ -20,6 +20,13 @@
 // from the culled list and written to an indirect buffer each frame, then one
 // multiDrawIndirect (or a loop of drawIndirect). OURCRAFT_WORLD_DRAWS=
 // direct|indirect|multi picks the path, for comparing them.
+// Milestone 9 adds the transparent faces (water, ice, glass) and GL's water
+// depth peel, after the opaque pass:
+//   copy depth -> peel depth; water-only depth pass into the peel depth (it
+//   now holds the nearest water surface); peel pass: transparent faces beyond
+//   that surface; copy color and depth; final pass: every transparent face,
+//   blended, water reading the copies (what is under it, and how deep).
+// Transparent faces live in the same arena, a second range per chunk.
 
 #include "rendering/wgpuWorld.h"
 #include "rendering/camera.h"
@@ -33,6 +40,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <cstdint>
@@ -50,14 +58,16 @@ namespace wgpuWorld
 namespace
 {
 	// Must match the WGSL Uniforms struct in chunkFaces.wgsl: a mat4x4f, then
-	// a vec4i and a vec4f, 96 bytes with no padding.
+	// a vec4i and three vec4f, 128 bytes with no padding.
 	struct Uniforms
 	{
 		glm::mat4 viewProjection;
 		glm::ivec4 positionInt;
 		glm::vec4 positionFloat;
+		glm::vec4 waterColor; // rgb, output (sRGB) space
+		glm::vec4 planes;     // x near, y far
 	};
-	static_assert(sizeof(Uniforms) == 96, "uniform layout must match chunkFaces.wgsl");
+	static_assert(sizeof(Uniforms) == 128, "uniform layout must match chunkFaces.wgsl");
 
 	// One face: short orientation, short texture, ivec3 position.
 	constexpr uint64_t faceBytes = 4 * sizeof(int);
@@ -116,6 +126,16 @@ namespace
 		RenderPipeline pipeline = nullptr;
 		PipelineLayout pipelineLayout = nullptr;
 		BindGroupLayout bindGroupLayout = nullptr;
+
+		// Transparency: the water depth pass, the peel, and the final pass with
+		// and without the peel's information (GL's waterType 1 and 0).
+		RenderPipeline waterDepthPipeline = nullptr;
+		RenderPipeline peelPipeline = nullptr;
+		RenderPipeline finalPeelPipeline = nullptr;
+		RenderPipeline finalPlainPipeline = nullptr;
+		PipelineLayout transparentPipelineLayout = nullptr;
+		BindGroupLayout peelBindGroupLayout = nullptr;
+		BindGroup peelBindGroup = nullptr; // the two copies below; remade with them
 		BindGroup bindGroup = nullptr; // everything below; remade when any of it changes
 		Buffer uniformBuffer = nullptr;
 
@@ -144,10 +164,17 @@ namespace
 		uint64_t arenaFaces = 0;
 		std::map<uint32_t, uint32_t> freeRanges;
 		std::unordered_map<const Chunk *, ChunkRange> chunks;
+		std::unordered_map<const Chunk *, ChunkRange> transparentChunks;
 		uint64_t facesInUse = 0;
 
 		Texture depthTexture = nullptr;
 		TextureView depthView = nullptr;
+
+		// The peel's copies, the size of the surface: GL's fboCoppy.
+		Texture peelDepthTexture = nullptr;
+		TextureView peelDepthView = nullptr;
+		Texture peelColorTexture = nullptr;
+		TextureView peelColorView = nullptr;
 		int depthWidth = 0;
 		int depthHeight = 0;
 
@@ -172,6 +199,7 @@ namespace
 		// The last frame's numbers, printed at shutdown.
 		uint32_t lastDrawCalls = 0;
 		uint64_t lastFacesDrawn = 0;
+		uint64_t lastTransparentFacesDrawn = 0;
 		size_t lastVisibleChunks = 0;
 	};
 
@@ -278,7 +306,7 @@ namespace
 		BindGroupLayoutEntry entries[6];
 		entries[0] = Default;
 		entries[0].binding = 0;
-		entries[0].visibility = ShaderStage::Vertex;
+		entries[0].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
 		entries[0].buffer.type = BufferBindingType::Uniform;
 		entries[0].buffer.hasDynamicOffset = false;
 		entries[0].buffer.minBindingSize = sizeof(Uniforms);
@@ -319,6 +347,30 @@ namespace
 		w.bindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		if (!w.bindGroupLayout) { return false; }
 
+		// Group 1 of the transparent pipelines: the peel's depth and color
+		// copies, read with textureLoad (no sampler).
+		BindGroupLayoutEntry peelEntries[2];
+		for (uint32_t i = 0; i < 2; i++)
+		{
+			peelEntries[i] = Default;
+			peelEntries[i].binding = i;
+			peelEntries[i].visibility = ShaderStage::Fragment;
+			peelEntries[i].buffer.type = BufferBindingType::BindingNotUsed;
+			peelEntries[i].sampler.type = SamplerBindingType::BindingNotUsed;
+			peelEntries[i].storageTexture.access = StorageTextureAccess::BindingNotUsed;
+			peelEntries[i].texture.viewDimension = TextureViewDimension::_2D;
+			peelEntries[i].texture.multisampled = false;
+		}
+		peelEntries[0].texture.sampleType = TextureSampleType::Depth;
+		peelEntries[1].texture.sampleType = TextureSampleType::Float;
+
+		BindGroupLayoutDescriptor peelLayoutDesc = Default;
+		peelLayoutDesc.label = StringView("world peel bind group layout");
+		peelLayoutDesc.entryCount = 2;
+		peelLayoutDesc.entries = peelEntries;
+		w.peelBindGroupLayout = wgpuDevice().createBindGroupLayout(peelLayoutDesc);
+		if (!w.peelBindGroupLayout) { return false; }
+
 		BufferDescriptor bufferDesc = Default;
 		bufferDesc.label = StringView("world uniforms");
 		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
@@ -328,13 +380,23 @@ namespace
 		return (bool)w.uniformBuffer && !scope.failed();
 	}
 
-	bool createPipeline()
+	// One pipeline of the chunk face module. What GL switches between draws
+	// (depth function, blending, culling, color writes) is fixed here, so
+	// each combination the passes need is its own pipeline.
+	struct FacePipelineDesc
 	{
-		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/chunkFaces.wgsl");
-		if (!module) { return false; }
+		const char *label = "";
+		PipelineLayout layout = nullptr;
+		const char *fragmentEntry = "fs_main";
+		bool colorTarget = true;  // false: depth only
+		bool blend = false;       // GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+		CompareFunction depthCompare = CompareFunction::Less;
+		CullMode cull = CullMode::Back;
+		int passMode = -1;        // the WGSL `passMode` override, -1 to leave it
+	};
 
-		ErrorScope scope("world chunk face pipeline");
-
+	RenderPipeline createFacePipeline(ShaderModule module, const FacePipelineDesc &p)
+	{
 		// The face as the vertex stage sees it. Instance step mode: the GPU
 		// moves to the next 16 bytes once per instance, not once per vertex,
 		// so all four corners of a face read the same face.
@@ -355,7 +417,8 @@ namespace
 		faceLayout.attributes = attributes;
 
 		RenderPipelineDescriptor desc = Default;
-		desc.label = StringView("world chunk face pipeline");
+		desc.label = StringView(p.label);
+		desc.layout = p.layout;
 		desc.vertex.module = module;
 		desc.vertex.entryPoint = StringView("vs_main");
 		desc.vertex.constantCount = 0;
@@ -364,17 +427,18 @@ namespace
 		desc.vertex.buffers = &faceLayout;
 
 		// A strip per instance: 4 vertices make the face's two triangles.
-		// Strips never join across instances. Culling as in GL's solid pass.
+		// Strips never join across instances.
 		desc.primitive.topology = PrimitiveTopology::TriangleStrip;
 		desc.primitive.stripIndexFormat = IndexFormat::Undefined; // no index buffer
 		desc.primitive.frontFace = FrontFace::CCW;
-		desc.primitive.cullMode = CullMode::Back;
+		desc.primitive.cullMode = p.cull;
 		desc.primitive.unclippedDepth = false;
 
+		// Depth writes stay on for every pass, as GL's depth mask did.
 		DepthStencilState depth = Default;
 		depth.format = depthFormat;
 		depth.depthWriteEnabled = OptionalBool::True;
-		depth.depthCompare = CompareFunction::Less;
+		depth.depthCompare = p.depthCompare;
 		depth.stencilFront.compare = CompareFunction::Always;
 		depth.stencilFront.failOp = StencilOperation::Keep;
 		depth.stencilFront.depthFailOp = StencilOperation::Keep;
@@ -387,37 +451,99 @@ namespace
 		depth.depthBiasClamp = 0.f;
 		desc.depthStencil = &depth;
 
+		BlendState blend = Default;
+		blend.color.operation = BlendOperation::Add;
+		blend.color.srcFactor = BlendFactor::SrcAlpha;
+		blend.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
+		blend.alpha = blend.color; // glBlendFunci sets both
+
 		ColorTargetState colorTarget = Default;
 		colorTarget.format = wgpuSurfaceFormat();
-		colorTarget.blend = nullptr; // opaque
+		colorTarget.blend = p.blend ? &blend : nullptr;
 		colorTarget.writeMask = ColorWriteMask::All;
+
+		ConstantEntry constant = Default;
+		constant.key = StringView("passMode");
+		constant.value = (double)p.passMode;
 
 		FragmentState fragment = Default;
 		fragment.module = module;
-		fragment.entryPoint = StringView("fs_main");
-		fragment.constantCount = 0;
-		fragment.constants = nullptr;
-		fragment.targetCount = 1;
-		fragment.targets = &colorTarget;
+		fragment.entryPoint = StringView(p.fragmentEntry);
+		fragment.constantCount = p.passMode >= 0 ? 1 : 0;
+		fragment.constants = p.passMode >= 0 ? &constant : nullptr;
+		fragment.targetCount = p.colorTarget ? 1 : 0;
+		fragment.targets = p.colorTarget ? &colorTarget : nullptr;
 		desc.fragment = &fragment;
 
 		desc.multisample.count = 1;
 		desc.multisample.mask = 0xFFFFFFFFu;
 		desc.multisample.alphaToCoverageEnabled = false;
 
-		PipelineLayoutDescriptor layoutDesc = Default;
-		layoutDesc.label = StringView("world pipeline layout");
-		WGPUBindGroupLayout layouts[1] = { w.bindGroupLayout };
-		layoutDesc.bindGroupLayoutCount = 1;
-		layoutDesc.bindGroupLayouts = layouts;
-		w.pipelineLayout = wgpuDevice().createPipelineLayout(layoutDesc);
-		if (!w.pipelineLayout) { module.release(); return false; }
-		desc.layout = w.pipelineLayout;
+		return wgpuDevice().createRenderPipeline(desc);
+	}
 
-		w.pipeline = wgpuDevice().createRenderPipeline(desc);
+	PipelineLayout createPipelineLayout(const char *label, BindGroupLayout *groups, uint32_t count)
+	{
+		WGPUBindGroupLayout layouts[2] = {};
+		for (uint32_t i = 0; i < count; i++) { layouts[i] = groups[i]; }
+		PipelineLayoutDescriptor layoutDesc = Default;
+		layoutDesc.label = StringView(label);
+		layoutDesc.bindGroupLayoutCount = count;
+		layoutDesc.bindGroupLayouts = layouts;
+		return wgpuDevice().createPipelineLayout(layoutDesc);
+	}
+
+	bool createPipelines()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/chunkFaces.wgsl");
+		if (!module) { return false; }
+
+		ErrorScope scope("world chunk face pipelines");
+
+		BindGroupLayout groups[2] = { w.bindGroupLayout, w.peelBindGroupLayout };
+		w.pipelineLayout = createPipelineLayout("world pipeline layout", groups, 1);
+		w.transparentPipelineLayout = createPipelineLayout("world transparent pipeline layout", groups, 2);
+		if (!w.pipelineLayout || !w.transparentPipelineLayout) { module.release(); return false; }
+
+		// The opaque faces: the solid pass.
+		FacePipelineDesc opaque;
+		opaque.label = "world opaque faces";
+		opaque.layout = w.pipelineLayout;
+		w.pipeline = createFacePipeline(module, opaque);
+
+		// Pass 4: water into the peel depth, no color (glColorMask 0).
+		FacePipelineDesc waterDepth;
+		waterDepth.label = "world water depth";
+		waterDepth.layout = w.pipelineLayout;
+		waterDepth.fragmentEntry = "fs_waterDepth";
+		waterDepth.colorTarget = false;
+		w.waterDepthPipeline = createFacePipeline(module, waterDepth);
+
+		// Pass 5: the peel, blended, GL_LESS, culled.
+		FacePipelineDesc peel;
+		peel.label = "world transparent peel";
+		peel.layout = w.transparentPipelineLayout;
+		peel.fragmentEntry = "fs_blend";
+		peel.blend = true;
+		peel.passMode = 0;
+		w.peelPipeline = createFacePipeline(module, peel);
+
+		// Pass 7: everything transparent, GL_LEQUAL, no culling.
+		FacePipelineDesc final = peel;
+		final.label = "world transparent final";
+		final.depthCompare = CompareFunction::LessEqual;
+		final.cull = CullMode::None;
+		final.passMode = 1;
+		w.finalPeelPipeline = createFacePipeline(module, final);
+
+		final.label = "world transparent final, no peel";
+		final.passMode = 2;
+		w.finalPlainPipeline = createFacePipeline(module, final);
+
 		const bool invalid = scope.failed(); // a rejected pipeline can still be non-null
 		module.release();
-		return w.pipeline && !invalid;
+		return w.pipeline && w.waterDepthPipeline && w.peelPipeline && w.finalPeelPipeline
+			&& w.finalPlainPipeline && !invalid;
 	}
 
 	Buffer makeStorageBuffer(const void *data, uint64_t bytes, const char *label)
@@ -741,49 +867,180 @@ namespace
 		return w.bindGroup && !scope.failed();
 	}
 
-	// The depth texture has to match the color attachment's size exactly, so
-	// it follows the surface. RenderAttachment only: nothing samples it yet.
-	bool ensureDepthTexture(int width, int height)
+	Texture createTarget(const char *label, TextureFormat format, TextureUsage usage, int width, int height)
 	{
-		if (w.depthTexture && w.depthWidth == width && w.depthHeight == height) { return true; }
-
-		if (w.depthView) { w.depthView.release(); w.depthView = nullptr; }
-		if (w.depthTexture) { w.depthTexture.destroy(); w.depthTexture.release(); w.depthTexture = nullptr; }
-
-		ErrorScope scope("world depth texture");
-
 		TextureDescriptor desc = Default;
-		desc.label = StringView("world depth");
-		desc.usage = TextureUsage::RenderAttachment;
+		desc.label = StringView(label);
+		desc.usage = usage;
 		desc.dimension = TextureDimension::_2D;
 		desc.size.width = (uint32_t)width;
 		desc.size.height = (uint32_t)height;
 		desc.size.depthOrArrayLayers = 1;
-		desc.format = depthFormat;
+		desc.format = format;
 		desc.mipLevelCount = 1;
 		desc.sampleCount = 1;
 		desc.viewFormatCount = 0;
 		desc.viewFormats = nullptr;
-		w.depthTexture = wgpuDevice().createTexture(desc);
-		if (!w.depthTexture) { return false; }
+		return wgpuDevice().createTexture(desc);
+	}
 
+	TextureView createTargetView(Texture texture, const char *label, TextureFormat format,
+		TextureAspect aspect, TextureUsage usage)
+	{
 		TextureViewDescriptor viewDesc = Default;
-		viewDesc.label = StringView("world depth view");
-		viewDesc.format = depthFormat;
+		viewDesc.label = StringView(label);
+		viewDesc.format = format;
 		viewDesc.dimension = TextureViewDimension::_2D;
 		viewDesc.baseMipLevel = 0;
 		viewDesc.mipLevelCount = 1;
 		viewDesc.baseArrayLayer = 0;
 		viewDesc.arrayLayerCount = 1;
-		viewDesc.aspect = TextureAspect::DepthOnly;
-		viewDesc.usage = TextureUsage::RenderAttachment;
-		w.depthView = w.depthTexture.createView(viewDesc);
-		if (!w.depthView || scope.failed()) { return false; }
+		viewDesc.aspect = aspect;
+		viewDesc.usage = usage;
+		return texture.createView(viewDesc);
+	}
+
+	void releaseTargets()
+	{
+		if (w.peelBindGroup) { w.peelBindGroup.release(); w.peelBindGroup = nullptr; }
+		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView })
+		{
+			if (*view) { view->release(); *view = nullptr; }
+		}
+		for (Texture *texture : { &w.depthTexture, &w.peelDepthTexture, &w.peelColorTexture })
+		{
+			if (*texture) { texture->destroy(); texture->release(); *texture = nullptr; }
+		}
+	}
+
+	// The depth texture and the peel's copies have to match the surface's
+	// size exactly (copies and attachments both demand it), so they follow it.
+	bool ensureTargets(int width, int height)
+	{
+		if (w.depthTexture && w.depthWidth == width && w.depthHeight == height) { return true; }
+		releaseTargets();
+
+		ErrorScope scope("world render targets");
+
+		// The depth buffer: also a copy source, for the peel.
+		w.depthTexture = createTarget("world depth", depthFormat,
+			TextureUsage::RenderAttachment | TextureUsage::CopySrc, width, height);
+		// The peel depth: a copy of it, drawn into (water) and then read.
+		w.peelDepthTexture = createTarget("world peel depth", depthFormat,
+			TextureUsage::RenderAttachment | TextureUsage::CopyDst | TextureUsage::TextureBinding, width, height);
+		// The peel color: a copy of the surface, in its format (a texture
+		// copy keeps the format; it cannot convert).
+		w.peelColorTexture = createTarget("world peel color", wgpuSurfaceFormat(),
+			TextureUsage::CopyDst | TextureUsage::TextureBinding, width, height);
+		if (!w.depthTexture || !w.peelDepthTexture || !w.peelColorTexture) { return false; }
+
+		w.depthView = createTargetView(w.depthTexture, "world depth view", depthFormat,
+			TextureAspect::DepthOnly, TextureUsage::RenderAttachment);
+		// One view of the peel depth serves both uses (attachment, then
+		// sampled) in different passes.
+		w.peelDepthView = createTargetView(w.peelDepthTexture, "world peel depth view", depthFormat,
+			TextureAspect::DepthOnly, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+		w.peelColorView = createTargetView(w.peelColorTexture, "world peel color view", wgpuSurfaceFormat(),
+			TextureAspect::All, TextureUsage::TextureBinding);
+		if (!w.depthView || !w.peelDepthView || !w.peelColorView) { return false; }
+
+		BindGroupEntry entries[2];
+		entries[0] = Default;
+		entries[0].binding = 0;
+		entries[0].textureView = w.peelDepthView;
+		entries[1] = Default;
+		entries[1].binding = 1;
+		entries[1].textureView = w.peelColorView;
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world peel bind group");
+		groupDesc.layout = w.peelBindGroupLayout;
+		groupDesc.entryCount = 2;
+		groupDesc.entries = entries;
+		w.peelBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		if (!w.peelBindGroup || scope.failed()) { return false; }
 
 		w.depthWidth = width;
 		w.depthHeight = height;
-		std::cout << "WebGPU world depth texture: " << width << "x" << height << "\n";
+		std::cout << "WebGPU world targets: " << width << "x" << height << " (depth, peel depth, peel color)\n";
 		return true;
+	}
+
+	// A whole-texture copy between two textures of one size and format. For
+	// depth, WebGPU only copies whole subresources, which this always is.
+	void copyWholeTexture(CommandEncoder encoder, Texture from, Texture to, int width, int height)
+	{
+		TexelCopyTextureInfo source = Default;
+		source.texture = from;
+		source.mipLevel = 0;
+		source.origin = { 0, 0, 0 };
+		source.aspect = TextureAspect::All;
+		TexelCopyTextureInfo destination = source;
+		destination.texture = to;
+		Extent3D size = { (uint32_t)width, (uint32_t)height, 1 };
+		encoder.copyTextureToTexture(source, destination, size);
+	}
+
+	// Draws `count` argument records starting at `first`, by the frame's
+	// draw path. The records are already in w.drawArgs and, for the indirect
+	// paths, in the indirect buffer at the same index.
+	void drawRecords(RenderPassEncoder pass, DrawMode mode, uint32_t first, uint32_t count)
+	{
+		if (!count) { return; }
+		if (mode == DrawMode::Direct)
+		{
+			for (uint32_t i = first; i < first + count; i++)
+			{
+				const DrawArgs &a = w.drawArgs[i];
+				pass.draw(a.vertexCount, a.instanceCount, a.firstVertex, a.firstInstance);
+			}
+		}
+		else if (mode == DrawMode::Multi)
+		{
+			pass.multiDrawIndirect(w.indirectBuffer, (uint64_t)first * sizeof(DrawArgs), count);
+		}
+		else
+		{
+			for (uint32_t i = first; i < first + count; i++)
+			{
+				pass.drawIndirect(w.indirectBuffer, (uint64_t)i * sizeof(DrawArgs));
+			}
+		}
+	}
+
+	// Binds what every chunk face pass binds.
+	void bindFaces(RenderPassEncoder pass, RenderPipeline pipeline, bool peelGroup)
+	{
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+		if (peelGroup) { pass.setBindGroup(1, w.peelBindGroup, 0, nullptr); }
+		pass.setVertexBuffer(0, w.arena, 0, w.arenaFaces * faceBytes);
+	}
+
+	// Gives a chunk's faces a range of the arena, replacing the range it had
+	// in `ranges`. An empty vector only frees.
+	void placeFaces(std::unordered_map<const Chunk *, ChunkRange> &ranges, const Chunk *chunk,
+		const std::vector<int> &faces)
+	{
+		auto it = ranges.find(chunk);
+		if (it != ranges.end())
+		{
+			freeRange(it->second.firstFace, it->second.faceCount);
+			w.facesInUse -= it->second.faceCount;
+			ranges.erase(it);
+		}
+
+		const uint32_t count = (uint32_t)(faces.size() * sizeof(int) / faceBytes);
+		if (count == 0) { return; }
+
+		uint32_t first = 0;
+		while (!allocateRange(count, first))
+		{
+			if (!growArena(w.arenaFaces + count)) { return; }
+		}
+
+		wgpuQueue().writeBuffer(w.arena, (uint64_t)first * faceBytes, faces.data(), (uint64_t)count * faceBytes);
+		ranges[chunk] = ChunkRange{ first, count };
+		w.facesInUse += count;
 	}
 
 	// The fastest path the device allows, unless OURCRAFT_WORLD_DRAWS asks for
@@ -837,7 +1094,7 @@ namespace
 		if (w.initialized) { return true; }
 		if (w.failed || !wgpuDevice()) { return false; }
 
-		if (!createLayoutAndUniforms() || !createPipeline())
+		if (!createLayoutAndUniforms() || !createPipelines())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -867,33 +1124,23 @@ void setBlockTextures(const std::vector<uint64_t> &handles)
 void setChunkFaces(const Chunk *chunk, const std::vector<int> &faces)
 {
 	if (!wgpuDevice()) { return; }
+	placeFaces(w.chunks, chunk, faces);
+}
 
-	removeChunk(chunk);
-
-	const uint32_t count = (uint32_t)(faces.size() * sizeof(int) / faceBytes);
-	if (count == 0) { return; }
-
-	uint32_t first = 0;
-	while (!allocateRange(count, first))
-	{
-		if (!growArena(w.arenaFaces + count)) { return; }
-	}
-
-	wgpuQueue().writeBuffer(w.arena, (uint64_t)first * faceBytes, faces.data(), (uint64_t)count * faceBytes);
-	w.chunks[chunk] = ChunkRange{ first, count };
-	w.facesInUse += count;
+void setChunkTransparentFaces(const Chunk *chunk, const std::vector<int> &faces)
+{
+	if (!wgpuDevice()) { return; }
+	placeFaces(w.transparentChunks, chunk, faces);
 }
 
 void removeChunk(const Chunk *chunk)
 {
-	auto it = w.chunks.find(chunk);
-	if (it == w.chunks.end()) { return; }
-	freeRange(it->second.firstFace, it->second.faceCount);
-	w.facesInUse -= it->second.faceCount;
-	w.chunks.erase(it);
+	static const std::vector<int> none;
+	placeFaces(w.chunks, chunk, none);
+	placeFaces(w.transparentChunks, chunk, none);
 }
 
-void render(Camera &camera, const std::vector<Chunk *> &visibleChunks)
+void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const glm::vec3 &waterColor, bool waterPeel)
 {
 	if (!initialize()) { return; }
 	if (!updateResources()) { return; }
@@ -901,7 +1148,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks)
 	int width = 0, height = 0;
 	wgpuSurfaceSize(width, height);
 	if (width <= 0 || height <= 0) { return; }
-	if (!ensureDepthTexture(width, height)) { return; }
+	if (!ensureTargets(width, height)) { return; }
 
 	// The camera's own fov and planes, the surface's aspect (the ratio the
 	// game puts in camera.aspectRatio), but the 0..1 depth range.
@@ -922,18 +1169,30 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks)
 	uniforms.viewProjection = projection * camera.getViewMatrix();
 	uniforms.positionInt = glm::ivec4(positionInt, 0);
 	uniforms.positionFloat = glm::vec4(positionFloat, 0.f);
+	// GL mixes water in linear space and converts at the end; this world is
+	// unlit and writes colors as textures hold them, so the water color is
+	// converted to that space here (sRGB, as defaultShader.frag's toLinear
+	// undoes).
+	auto toSrgb = [](float c)
+	{
+		c = glm::clamp(c, 0.f, 1.f);
+		return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.f / 2.4f) - 0.055f;
+	};
+	uniforms.waterColor = glm::vec4(toSrgb(waterColor.r), toSrgb(waterColor.g), toSrgb(waterColor.b), 1.f);
+	uniforms.planes = glm::vec4(camera.closePlane, camera.farPlane, 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
-
-	RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, depthClear, "world pass");
-	if (!pass) { return; }
 
 	const auto recordStart = std::chrono::steady_clock::now();
 
-	// One record per visible chunk that has faces. The renderer's list is
-	// frustum-culled and sorted far to near; walk it backwards, as the GL loop
-	// does, so near chunks fill the depth buffer first and hide what is
-	// behind them early. Records run in buffer order, so that holds for the
-	// indirect paths too.
+	// Every draw of the frame as argument records, in three runs:
+	//   opaque: near to far (the renderer's list backwards, as GL's loop),
+	//     so near chunks fill the depth buffer first;
+	//   transparent, LOD 0 only: the water depth and peel passes (GL draws
+	//     those with firstLod only);
+	//   transparent, every LOD: the final pass.
+	// The transparent runs go far to near, the list's own order, and each
+	// chunk's faces were sorted far to near when baked, so blending sees
+	// them back to front.
 	w.drawArgs.clear();
 	uint64_t facesDrawn = 0;
 	for (auto c = visibleChunks.rbegin(); c != visibleChunks.rend(); ++c)
@@ -943,46 +1202,121 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks)
 		w.drawArgs.push_back(DrawArgs{ 4, it->second.faceCount, 0, it->second.firstFace });
 		facesDrawn += it->second.faceCount;
 	}
-	const uint32_t drawCalls = (uint32_t)w.drawArgs.size();
+	const uint32_t opaqueCount = (uint32_t)w.drawArgs.size();
 
-	if (w.arena && drawCalls)
+	for (Chunk *c : visibleChunks)
 	{
-		pass.setPipeline(w.pipeline);
-		pass.setBindGroup(0, w.bindGroup, 0, nullptr);
-		pass.setVertexBuffer(0, w.arena, 0, w.arenaFaces * faceBytes);
+		auto it = w.transparentChunks.find(c);
+		if (it == w.transparentChunks.end() || c->currentLod != 0) { continue; }
+		w.drawArgs.push_back(DrawArgs{ 4, it->second.faceCount, 0, it->second.firstFace });
+	}
+	const uint32_t peelFirst = opaqueCount;
+	const uint32_t peelCount = (uint32_t)w.drawArgs.size() - peelFirst;
 
-		DrawMode mode = w.drawMode;
-		if (mode != DrawMode::Direct && !ensureIndirectBuffer(drawCalls)) { mode = DrawMode::Direct; }
+	uint64_t transparentFacesDrawn = 0;
+	for (Chunk *c : visibleChunks)
+	{
+		auto it = w.transparentChunks.find(c);
+		if (it == w.transparentChunks.end()) { continue; }
+		w.drawArgs.push_back(DrawArgs{ 4, it->second.faceCount, 0, it->second.firstFace });
+		transparentFacesDrawn += it->second.faceCount;
+	}
+	const uint32_t finalFirst = peelFirst + peelCount;
+	const uint32_t finalCount = (uint32_t)w.drawArgs.size() - finalFirst;
+	const uint32_t drawCalls = opaqueCount + (waterPeel ? 2 * peelCount : 0) + finalCount;
 
-		if (mode == DrawMode::Direct)
-		{
-			for (const DrawArgs &a : w.drawArgs)
-			{
-				pass.draw(a.vertexCount, a.instanceCount, a.firstVertex, a.firstInstance);
-			}
-		}
-		else
+	DrawMode mode = w.drawMode;
+	if (mode != DrawMode::Direct && !w.drawArgs.empty())
+	{
+		if (ensureIndirectBuffer(w.drawArgs.size()))
 		{
 			// A queue write lands before the commands of any later submit,
 			// this frame's included, and after every earlier one, so one
 			// buffer serves every frame.
-			wgpuQueue().writeBuffer(w.indirectBuffer, 0, w.drawArgs.data(), drawCalls * sizeof(DrawArgs));
-			if (mode == DrawMode::Multi)
-			{
-				pass.multiDrawIndirect(w.indirectBuffer, 0, drawCalls);
-			}
-			else
-			{
-				for (uint32_t i = 0; i < drawCalls; i++)
-				{
-					pass.drawIndirect(w.indirectBuffer, (uint64_t)i * sizeof(DrawArgs));
-				}
-			}
+			wgpuQueue().writeBuffer(w.indirectBuffer, 0, w.drawArgs.data(), w.drawArgs.size() * sizeof(DrawArgs));
 		}
+		else { mode = DrawMode::Direct; }
 	}
 
-	pass.end();
-	pass.release();
+	// Solid pass: clears color (if nothing has yet) and depth.
+	{
+		RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, true, depthClear, "world opaque pass");
+		if (!pass) { return; }
+		if (w.arena && opaqueCount)
+		{
+			bindFaces(pass, w.pipeline, false);
+			drawRecords(pass, mode, 0, opaqueCount);
+		}
+		pass.end();
+		pass.release();
+	}
+
+	if (w.arena && finalCount)
+	{
+		CommandEncoder encoder = wgpuFrameEncoder();
+
+		// Copy depth (GL's step 3): the water passes start from the opaque
+		// depth, and the no-peel water reads it for its depth.
+		copyWholeTexture(encoder, w.depthTexture, w.peelDepthTexture, width, height);
+
+		if (waterPeel)
+		{
+			// Water into the peel depth (4): the nearest water surface.
+			if (peelCount)
+			{
+				RenderPassDepthStencilAttachment depthAttachment = Default;
+				depthAttachment.view = w.peelDepthView;
+				depthAttachment.depthLoadOp = LoadOp::Load;
+				depthAttachment.depthStoreOp = StoreOp::Store;
+				depthAttachment.depthClearValue = depthClear;
+				depthAttachment.depthReadOnly = false;
+				depthAttachment.stencilLoadOp = LoadOp::Undefined;
+				depthAttachment.stencilStoreOp = StoreOp::Undefined;
+				depthAttachment.stencilClearValue = 0;
+				depthAttachment.stencilReadOnly = false;
+
+				RenderPassDescriptor passDesc = Default;
+				passDesc.label = StringView("world water depth pass");
+				passDesc.colorAttachmentCount = 0;
+				passDesc.colorAttachments = nullptr;
+				passDesc.depthStencilAttachment = &depthAttachment;
+				passDesc.occlusionQuerySet = nullptr;
+				passDesc.timestampWrites = nullptr;
+				RenderPassEncoder pass = encoder.beginRenderPass(passDesc);
+				bindFaces(pass, w.waterDepthPipeline, false);
+				drawRecords(pass, mode, peelFirst, peelCount);
+				pass.end();
+				pass.release();
+			}
+
+			// The peel (5): what lies beyond that surface, onto the frame.
+			if (peelCount)
+			{
+				RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world peel pass");
+				if (!pass) { return; }
+				bindFaces(pass, w.peelPipeline, true);
+				drawRecords(pass, mode, peelFirst, peelCount);
+				pass.end();
+				pass.release();
+			}
+
+			// Copy color and depth (6): what the water will show under it.
+			// Always, so far-LOD water never reads an old frame.
+			encoder = wgpuFrameEncoder();
+			copyWholeTexture(encoder, wgpuFrameTexture(), w.peelColorTexture, width, height);
+			copyWholeTexture(encoder, w.depthTexture, w.peelDepthTexture, width, height);
+		}
+
+		// The final transparency (7).
+		{
+			RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world transparent pass");
+			if (!pass) { return; }
+			bindFaces(pass, waterPeel ? w.finalPeelPipeline : w.finalPlainPipeline, true);
+			drawRecords(pass, mode, finalFirst, finalCount);
+			pass.end();
+			pass.release();
+		}
+	}
 
 	const auto recordEnd = std::chrono::steady_clock::now();
 	w.renderedFrames++;
@@ -996,6 +1330,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks)
 
 	w.lastDrawCalls = drawCalls;
 	w.lastFacesDrawn = facesDrawn;
+	w.lastTransparentFacesDrawn = transparentFacesDrawn;
 	w.lastVisibleChunks = visibleChunks.size();
 
 	if (!w.firstRenderReported && drawCalls > 0)
@@ -1012,8 +1347,9 @@ void shutdown()
 	if (w.initialized)
 	{
 		std::cout << "WebGPU world last frame: " << w.lastDrawCalls << " draws of "
-			<< w.lastVisibleChunks << " visible chunks, " << w.lastFacesDrawn << " faces; arena "
-			<< w.chunks.size() << " chunks, " << w.facesInUse << " of " << w.arenaFaces << " faces used, "
+			<< w.lastVisibleChunks << " visible chunks, " << w.lastFacesDrawn << " opaque and "
+			<< w.lastTransparentFacesDrawn << " transparent faces; arena "
+			<< w.chunks.size() << " + " << w.transparentChunks.size() << " chunks, " << w.facesInUse << " of " << w.arenaFaces << " faces used, "
 			<< w.freeRanges.size() << " free ranges\n";
 		if (w.timedFrames)
 		{
@@ -1024,9 +1360,14 @@ void shutdown()
 		}
 	}
 
-	if (w.depthView) { w.depthView.release(); w.depthView = nullptr; }
-	if (w.depthTexture) { w.depthTexture.destroy(); w.depthTexture.release(); w.depthTexture = nullptr; }
-	if (w.pipeline) { w.pipeline.release(); w.pipeline = nullptr; }
+	releaseTargets();
+	for (RenderPipeline *pipeline : { &w.pipeline, &w.waterDepthPipeline, &w.peelPipeline,
+		&w.finalPeelPipeline, &w.finalPlainPipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	if (w.transparentPipelineLayout) { w.transparentPipelineLayout.release(); w.transparentPipelineLayout = nullptr; }
+	if (w.peelBindGroupLayout) { w.peelBindGroupLayout.release(); w.peelBindGroupLayout = nullptr; }
 	if (w.pipelineLayout) { w.pipelineLayout.release(); w.pipelineLayout = nullptr; }
 	if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
 	if (w.uniformBuffer) { w.uniformBuffer.release(); w.uniformBuffer = nullptr; }

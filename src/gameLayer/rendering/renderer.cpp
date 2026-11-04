@@ -2921,7 +2921,10 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	// The WebGPU world pass: the opaque faces of the chunks that survived the
 	// frustum culling above. Everything below still goes to the null GL
 	// scaffold.
-	wgpuWorld::render(c, chunkVectorCopy);
+	// The water color GL sends as u_waterColor, and whether to peel
+	// (the shading setting that picks GL's two transparency paths).
+	wgpuWorld::render(c, chunkVectorCopy, defaultShader.shadingSettings.waterColor,
+		getShadingSettings().waterType != 0);
 #endif
 
 

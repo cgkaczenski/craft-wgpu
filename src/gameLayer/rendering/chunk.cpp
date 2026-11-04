@@ -2451,6 +2451,10 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 		//	transparentGeometry.data(), GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT);
 
 		transparentElementCountSize = transparentGeometry.size() / 4; //todo magic number
+
+	#if RENDERER_WEBGPU
+		wgpuWorld::setChunkTransparentFaces(this, transparentGeometry);
+	#endif
 	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, 0);

@@ -48,12 +48,24 @@ namespace render
 	// ourCraft: a pass of the caller's own on the surface, with a depth
 	// attachment, for the 3D world. Ends the open 2D pass (the 2D pipelines
 	// have no depth state, so they cannot share a pass that has depth),
-	// clears the surface if nothing has this frame, and clears depth to
-	// `depthClearValue`. The caller records, then ends and releases the pass
-	// before anything else draws; the next 2D draw loads what it left. Null
-	// when no frame is open.
+	// clears the surface if nothing has this frame, and either clears depth
+	// to `depthClearValue` (clearDepth) or keeps what an earlier pass left
+	// there. Depth is stored, so a later pass or copy can use it. The caller
+	// records, then ends and releases the pass before anything else draws;
+	// the next 2D draw loads what it left. Null when no frame is open.
 	wgpu::RenderPassEncoder wgpuBeginSurfacePassWithDepth(wgpu::TextureView depthView,
-		float depthClearValue, const char *label);
+		bool clearDepth, float depthClearValue, const char *label);
+
+	// ourCraft: the frame's command encoder, with the open 2D pass ended, for
+	// work between passes: texture copies, a pass on the caller's own
+	// targets. Whatever the caller records lands in frame order. Null when no
+	// frame is open. The caller must not finish or release it.
+	wgpu::CommandEncoder wgpuFrameEncoder();
+
+	// ourCraft: this frame's surface texture (usage RenderAttachment |
+	// CopySrc), for copying what has been drawn so far. Null when no frame
+	// is open.
+	wgpu::Texture wgpuFrameTexture();
 
 	// ---- Diagnostics ----------------------------------------------------
 	//

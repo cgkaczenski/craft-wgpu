@@ -2,11 +2,14 @@
 
 // The WebGPU side of the 3D renderer, beside the OpenGL Renderer. Milestone 5
 // started it (depth buffer, camera); milestone 6 draws the chunks' opaque
-// faces from one GPU buffer arena; milestone 7 textures them. Later milestones grow it into the
+// faces from one GPU buffer arena; milestone 7 textures them, milestone 9
+// adds the transparent faces and water. Later milestones grow it into the
 // WgpuRenderer of docs/roadmap.md.
 //
 // Names no WebGPU types, so renderer.cpp, chunk.cpp and glfwMain.cpp can call
 // it without including webgpu.hpp.
+
+#include <glm/vec3.hpp>
 
 #include <cstdint>
 #include <vector>
@@ -31,14 +34,23 @@ namespace wgpuWorld
 	// for OpenGL. Replaces what the chunk had; an empty vector frees it.
 	void setChunkFaces(const Chunk *chunk, const std::vector<int> &faces);
 
+	// A chunk's transparent faces (water, ice, glass, and decals), as
+	// Chunk::bake made them: sorted far to near from the player when baked.
+	// Replaces what the chunk had; an empty vector frees it.
+	void setChunkTransparentFaces(const Chunk *chunk, const std::vector<int> &faces);
+
 	// The chunk is going away: frees its faces.
 	void removeChunk(const Chunk *chunk);
 
-	// Records the world's pass for this frame: clears color and depth and
+	// Records the world's passes for this frame: clears color and depth,
 	// draws the opaque faces of `visibleChunks` (the renderer's
-	// frustum-culled list, sorted far to near), one draw per chunk. Call
+	// frustum-culled list, sorted far to near), then their transparent faces
+	// blended back to front. With `waterPeel` (GL's waterType 1) water shows
+	// what is under it through a depth peel; without it, water is plain
+	// see-through. `waterColor` is GL's u_waterColor, in linear space. Call
 	// inside an open frame, before the 2D layer draws.
-	void render(Camera &camera, const std::vector<Chunk *> &visibleChunks);
+	void render(Camera &camera, const std::vector<Chunk *> &visibleChunks,
+		const glm::vec3 &waterColor, bool waterPeel);
 
 	// Releases every GPU object. Call before wgpuWindow::shutdown.
 	void shutdown();
