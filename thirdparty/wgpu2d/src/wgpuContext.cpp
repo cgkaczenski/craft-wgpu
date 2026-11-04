@@ -3583,6 +3583,12 @@ TextureView wgpuTextureView(uint32_t textureId)
 	return textures[textureId - 1].view;
 }
 
+void wgpuMarkTargetDrawn(uint32_t textureId)
+{
+	if (textureId == 0 || textureId > textures.size()) { return; }
+	textures[textureId - 1].needsClear = false;
+}
+
 void wgpuSurfaceSize(int &width, int &height)
 {
 	width = g.surfaceWidth;

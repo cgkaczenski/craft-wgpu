@@ -42,10 +42,12 @@
 #include <glm/ext/matrix_clip_space.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <cstdint>
 #include <iostream>
@@ -116,6 +118,32 @@ namespace
 	// Frames skipped before timing starts: chunks are still loading then.
 	constexpr uint64_t timingWarmupFrames = 300;
 
+	// A model or item mesh: vertices, and indices when indexed.
+	struct Mesh
+	{
+		Buffer vertices = nullptr;
+		Buffer indices = nullptr;
+		IndexFormat indexFormat = IndexFormat::Undefined;
+		uint32_t count = 0; // indices if indexed, else vertices
+	};
+
+	// What entities.wgsl's Model and Item read; 48 and 96 bytes.
+	struct ModelGpu
+	{
+		glm::ivec4 positionInt;  // w: first bone
+		glm::vec4 positionFloat;
+		glm::vec4 brightness;
+	};
+	static_assert(sizeof(ModelGpu) == 48, "must match entities.wgsl's Model");
+
+	struct ItemGpu
+	{
+		glm::mat4 model;
+		glm::ivec4 positionInt;
+		glm::vec4 positionFloat; // w: brightness
+	};
+	static_assert(sizeof(ItemGpu) == 96, "must match entities.wgsl's Item");
+
 	struct ChunkRange
 	{
 		uint32_t firstFace = 0;
@@ -150,7 +178,9 @@ namespace
 		BindGroupLayout cubeBindGroupLayout = nullptr;
 		BindGroupLayout decalBindGroupLayout = nullptr;
 
-		std::vector<float> cubeGeometry; // 36 vertices x 8 floats
+		// The entity geometry, 8 floats a vertex: the cube's 36, then the
+		// block models' (setBlockCubeGeometry).
+		std::vector<float> cubeGeometry;
 		bool cubeGeometryDirty = false;
 		Buffer cubeVertexBuffer = nullptr;
 		Buffer cubeInstanceBuffer = nullptr;
@@ -161,8 +191,43 @@ namespace
 		BindGroup decalBindGroup = nullptr;
 		uint32_t decalTextureId = 0;        // the texture decalBindGroup names
 
+		// Milestone 10b: the inventory's block icons, drawn into wgpu2d
+		// targets (renderBlockIcons). Made on first use.
+		RenderPipeline iconPipeline = nullptr;
+
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
+
+		// render's transparent passes, waiting for renderTransparent.
+		bool pendingTransparent = false;
+		struct
+		{
+			DrawMode mode = DrawMode::Direct;
+			bool waterPeel = false;
+			uint32_t peelFirst = 0, peelCount = 0, finalFirst = 0, finalCount = 0;
+			int width = 0, height = 0;
+		} pending;
+
+		// Milestone 10b: meshes by GL vao, the model and item pipelines, and
+		// the frame's bones and instances.
+		std::unordered_map<unsigned int, Mesh> meshes;
+		RenderPipeline modelPipeline = nullptr;
+		RenderPipeline itemPipeline = nullptr;
+		PipelineLayout entityPipelineLayout = nullptr;
+		BindGroupLayout entityBindGroupLayout = nullptr;   // group 1: bones, models, items
+		BindGroupLayout textureBindGroupLayout = nullptr;  // group 2: four textures
+		Buffer boneBuffer = nullptr;
+		uint64_t boneCapacity = 0;
+		Buffer modelBuffer = nullptr;
+		uint64_t modelCapacity = 0;
+		Buffer itemBuffer = nullptr;
+		uint64_t itemCapacity = 0;
+		BindGroup entityBindGroup = nullptr;
+		Texture whiteTexture = nullptr;      // stands in for a missing texture
+		TextureView whiteView = nullptr;
+		std::map<std::array<uint32_t, 4>, BindGroup> textureGroups;
+		uint32_t lastModelDraws = 0;
+		uint32_t lastItemDraws = 0;
 		BindGroup bindGroup = nullptr; // everything below; remade when any of it changes
 		Buffer uniformBuffer = nullptr;
 
@@ -436,6 +501,35 @@ namespace
 		decalLayoutDesc.entries = &decalEntry;
 		w.decalBindGroupLayout = wgpuDevice().createBindGroupLayout(decalLayoutDesc);
 		if (!w.decalBindGroupLayout) { return false; }
+
+		// Group 1 of the model and item pipelines: the frame's bones,
+		// models and items, read by the vertex stage.
+		BindGroupLayoutEntry entityEntries[3];
+		for (uint32_t i = 0; i < 3; i++)
+		{
+			entityEntries[i] = cubeEntries[0];
+			entityEntries[i].binding = i;
+		}
+		BindGroupLayoutDescriptor entityLayoutDesc = Default;
+		entityLayoutDesc.label = StringView("world entity bind group layout");
+		entityLayoutDesc.entryCount = 3;
+		entityLayoutDesc.entries = entityEntries;
+		w.entityBindGroupLayout = wgpuDevice().createBindGroupLayout(entityLayoutDesc);
+		if (!w.entityBindGroupLayout) { return false; }
+
+		// Group 2: an entity's four textures (GL's textureSampler0-3).
+		BindGroupLayoutEntry textureEntries[4];
+		for (uint32_t i = 0; i < 4; i++)
+		{
+			textureEntries[i] = decalEntry;
+			textureEntries[i].binding = i;
+		}
+		BindGroupLayoutDescriptor textureLayoutDesc = Default;
+		textureLayoutDesc.label = StringView("world entity texture bind group layout");
+		textureLayoutDesc.entryCount = 4;
+		textureLayoutDesc.entries = textureEntries;
+		w.textureBindGroupLayout = wgpuDevice().createBindGroupLayout(textureLayoutDesc);
+		if (!w.textureBindGroupLayout) { return false; }
 
 		BufferDescriptor bufferDesc = Default;
 		bufferDesc.label = StringView("world uniforms");
@@ -716,9 +810,55 @@ namespace
 		fragment.entryPoint = StringView("fs_line");
 		w.linePipeline = wgpuDevice().createRenderPipeline(desc);
 
+		// Models and items: indexed or not, both culled like nothing (GL's
+		// hand is mirrored with scale(-1, 1, 1), which turns its winding
+		// inside out; depth sorts closed meshes either way).
+		BindGroupLayout entityGroups[3] = { w.bindGroupLayout, w.entityBindGroupLayout, w.textureBindGroupLayout };
+		{
+			WGPUBindGroupLayout layouts[3] = { entityGroups[0], entityGroups[1], entityGroups[2] };
+			PipelineLayoutDescriptor layoutDesc = Default;
+			layoutDesc.label = StringView("world entity pipeline layout");
+			layoutDesc.bindGroupLayoutCount = 3;
+			layoutDesc.bindGroupLayouts = layouts;
+			w.entityPipelineLayout = wgpuDevice().createPipelineLayout(layoutDesc);
+		}
+		if (!w.entityPipelineLayout) { module.release(); return false; }
+
+		VertexAttribute modelAttributes[4];
+		for (int i = 0; i < 4; i++) { modelAttributes[i] = Default; modelAttributes[i].shaderLocation = i; }
+		modelAttributes[0].format = VertexFormat::Float32x3; modelAttributes[0].offset = 0;  // position
+		modelAttributes[1].format = VertexFormat::Float32x3; modelAttributes[1].offset = 12; // normal
+		modelAttributes[2].format = VertexFormat::Float32x2; modelAttributes[2].offset = 24; // uv
+		modelAttributes[3].format = VertexFormat::Sint16x2;  modelAttributes[3].offset = 32; // bone, texture
+		VertexBufferLayout modelLayout = Default;
+		modelLayout.arrayStride = 36; // model.cpp's Data
+		modelLayout.stepMode = VertexStepMode::Vertex;
+		modelLayout.attributeCount = 4;
+		modelLayout.attributes = modelAttributes;
+
+		depth.depthCompare = CompareFunction::Less;
+		desc.label = StringView("world models");
+		desc.layout = w.entityPipelineLayout;
+		desc.vertex.entryPoint = StringView("vs_model");
+		desc.vertex.bufferCount = 1;
+		desc.vertex.buffers = &modelLayout;
+		desc.primitive.topology = PrimitiveTopology::TriangleList;
+		desc.primitive.cullMode = CullMode::None;
+		fragment.entryPoint = StringView("fs_model");
+		w.modelPipeline = wgpuDevice().createRenderPipeline(desc);
+
+		VertexBufferLayout itemLayout = modelLayout;
+		itemLayout.arrayStride = 8 * sizeof(float);
+		itemLayout.attributeCount = 3;
+		desc.label = StringView("world items");
+		desc.vertex.entryPoint = StringView("vs_item");
+		desc.vertex.buffers = &itemLayout;
+		fragment.entryPoint = StringView("fs_item");
+		w.itemPipeline = wgpuDevice().createRenderPipeline(desc);
+
 		const bool invalid = scope.failed();
 		module.release();
-		return w.cubePipeline && w.linePipeline && !invalid;
+		return w.cubePipeline && w.linePipeline && w.modelPipeline && w.itemPipeline && !invalid;
 	}
 
 	Buffer makeStorageBuffer(const void *data, uint64_t bytes, const char *label)
@@ -731,6 +871,68 @@ namespace
 		Buffer buffer = wgpuDevice().createBuffer(desc);
 		if (buffer && bytes) { wgpuQueue().writeBuffer(buffer, 0, data, bytes); }
 		return buffer;
+	}
+
+	// The block icon pipeline (blockIcons.wgsl): the cube pipeline's layout,
+	// depth as GL's GL_LESS, no blending (GL disables it: a texel's alpha is
+	// stored as it is, so glass icons stay see-through).
+	bool createIconPipeline()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/blockIcons.wgsl");
+		if (!module) { return false; }
+
+		ErrorScope scope("world block icon pipeline");
+
+		DepthStencilState depth = Default;
+		depth.format = depthFormat;
+		depth.depthWriteEnabled = OptionalBool::True;
+		depth.depthCompare = CompareFunction::Less;
+		depth.stencilFront.compare = CompareFunction::Always;
+		depth.stencilFront.failOp = StencilOperation::Keep;
+		depth.stencilFront.depthFailOp = StencilOperation::Keep;
+		depth.stencilFront.passOp = StencilOperation::Keep;
+		depth.stencilBack = depth.stencilFront;
+		depth.stencilReadMask = 0;
+		depth.stencilWriteMask = 0;
+		depth.depthBias = 0;
+		depth.depthBiasSlopeScale = 0.f;
+		depth.depthBiasClamp = 0.f;
+
+		ColorTargetState colorTarget = Default;
+		colorTarget.format = wgpuSurfaceFormat(); // wgpu2d render targets' format
+		colorTarget.blend = nullptr;
+		colorTarget.writeMask = ColorWriteMask::All;
+
+		FragmentState fragment = Default;
+		fragment.module = module;
+		fragment.entryPoint = StringView("fs_icon");
+		fragment.constantCount = 0;
+		fragment.constants = nullptr;
+		fragment.targetCount = 1;
+		fragment.targets = &colorTarget;
+
+		RenderPipelineDescriptor desc = Default;
+		desc.label = StringView("world block icons");
+		desc.layout = w.cubePipelineLayout;
+		desc.vertex.module = module;
+		desc.vertex.entryPoint = StringView("vs_icon");
+		desc.vertex.constantCount = 0;
+		desc.vertex.constants = nullptr;
+		desc.vertex.bufferCount = 0;
+		desc.vertex.buffers = nullptr;
+		desc.primitive.topology = PrimitiveTopology::TriangleList;
+		desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+		desc.primitive.frontFace = FrontFace::CCW;
+		desc.primitive.cullMode = CullMode::Back;
+		desc.primitive.unclippedDepth = false;
+		desc.depthStencil = &depth;
+		desc.fragment = &fragment;
+		desc.multisample.count = 1;
+		desc.multisample.mask = 0xFFFFFFFFu;
+		desc.multisample.alphaToCoverageEnabled = false;
+		w.iconPipeline = wgpuDevice().createRenderPipeline(desc);
+		module.release();
+		return w.iconPipeline && !scope.failed();
 	}
 
 	// The corner and UV tables, as storage buffers.
@@ -1246,20 +1448,29 @@ namespace
 
 	// The cube vertices and this frame's cubes, and the bind group naming
 	// both. False when there is nothing to draw.
-	bool prepareCubes(const std::vector<BlockCube> &cubes)
+	// The entity geometry's storage buffer, (re)made when it changed;
+	// `remade` says the bind groups naming it are stale.
+	bool ensureCubeVertices(bool &remade)
 	{
-		if (cubes.empty() || w.cubeGeometry.empty()) { return false; }
-
-		bool remade = false;
+		if (w.cubeGeometry.empty()) { return false; }
 		if (w.cubeGeometryDirty || !w.cubeVertexBuffer)
 		{
 			if (w.cubeVertexBuffer) { w.cubeVertexBuffer.release(); w.cubeVertexBuffer = nullptr; }
 			w.cubeVertexBuffer = makeStorageBuffer(w.cubeGeometry.data(),
-				w.cubeGeometry.size() * sizeof(float), "world cube vertices");
+				w.cubeGeometry.size() * sizeof(float), "world entity geometry");
 			if (!w.cubeVertexBuffer) { return false; }
 			w.cubeGeometryDirty = false;
 			remade = true;
 		}
+		return true;
+	}
+
+	bool prepareCubes(const std::vector<BlockCube> &cubes)
+	{
+		if (cubes.empty()) { return false; }
+
+		bool remade = false;
+		if (!ensureCubeVertices(remade)) { return false; }
 
 		bool grown = false;
 		if (!ensureBuffer(w.cubeInstanceBuffer, w.cubeInstanceCapacity, cubes.size(), sizeof(BlockCube),
@@ -1286,6 +1497,62 @@ namespace
 			w.cubeBindGroup = wgpuDevice().createBindGroup(groupDesc);
 		}
 		return (bool)w.cubeBindGroup;
+	}
+
+	// A 1x1 white texture, where GL used its tempWhite for items with none.
+	bool ensureWhiteTexture()
+	{
+		if (w.whiteView) { return true; }
+		w.whiteTexture = createTarget("world white texture", TextureFormat::RGBA8Unorm,
+			TextureUsage::TextureBinding | TextureUsage::CopyDst, 1, 1);
+		if (!w.whiteTexture) { return false; }
+		const uint8_t white[4] = { 255, 255, 255, 255 };
+		TexelCopyTextureInfo destination = Default;
+		destination.texture = w.whiteTexture;
+		destination.mipLevel = 0;
+		destination.origin = { 0, 0, 0 };
+		destination.aspect = TextureAspect::All;
+		TexelCopyBufferLayout layout = Default;
+		layout.offset = 0;
+		layout.bytesPerRow = 4;
+		layout.rowsPerImage = 1;
+		Extent3D size = { 1, 1, 1 };
+		wgpuQueue().writeTexture(destination, white, sizeof(white), layout, size);
+		w.whiteView = createTargetView(w.whiteTexture, "world white texture view", TextureFormat::RGBA8Unorm,
+			TextureAspect::All, TextureUsage::TextureBinding);
+		return (bool)w.whiteView;
+	}
+
+	// The bind group of four entity textures, made once per combination.
+	BindGroup textureGroup(const uint32_t (&ids)[4])
+	{
+		const std::array<uint32_t, 4> key = { ids[0], ids[1], ids[2], ids[3] };
+		auto found = w.textureGroups.find(key);
+		if (found != w.textureGroups.end()) { return found->second; }
+
+		BindGroupEntry entries[4];
+		for (uint32_t i = 0; i < 4; i++)
+		{
+			TextureView view = ids[i] ? wgpuTextureView(ids[i]) : TextureView(nullptr);
+			entries[i] = Default;
+			entries[i].binding = i;
+			entries[i].textureView = view ? view : w.whiteView;
+		}
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world entity textures");
+		groupDesc.layout = w.textureBindGroupLayout;
+		groupDesc.entryCount = 4;
+		groupDesc.entries = entries;
+		BindGroup group = wgpuDevice().createBindGroup(groupDesc);
+		if (group) { w.textureGroups.emplace(key, group); }
+		return group;
+	}
+
+	void releaseMesh(Mesh &mesh)
+	{
+		if (mesh.vertices) { mesh.vertices.release(); }
+		if (mesh.indices) { mesh.indices.release(); }
+		mesh = {};
 	}
 
 	// The fastest path the device allows, unless OURCRAFT_WORLD_DRAWS asks for
@@ -1370,6 +1637,131 @@ void setBlockCubeGeometry(const std::vector<float> &vertices)
 {
 	w.cubeGeometry = vertices;
 	w.cubeGeometryDirty = true;
+}
+
+void renderBlockIcons(const std::vector<BlockIcon> &icons, int size)
+{
+	if (icons.empty() || size <= 0) { return; }
+	if (!initialize() || !updateResources())
+	{
+		std::cerr << "WebGPU world: block icons need the block geometry and textures first\n";
+		return;
+	}
+	if (!w.iconPipeline && !createIconPipeline()) { return; }
+	bool remade = false;
+	if (!ensureCubeVertices(remade)) { return; }
+	if (remade && w.cubeBindGroup) { w.cubeBindGroup.release(); w.cubeBindGroup = nullptr; }
+
+	ErrorScope scope("world block icons");
+
+	// blockIcons.wgsl's Icon.
+	struct IconRecord
+	{
+		glm::mat4 viewProjection;
+		glm::uvec4 slotsA, slotsB, flags;
+	};
+	static_assert(sizeof(IconRecord) == 112, "must match blockIcons.wgsl's Icon");
+
+	// glm::ortho gives GL's -1..1 depth; WebGPU clips to 0..1.
+	glm::mat4 toZeroOne(1.f);
+	toZeroOne[2][2] = 0.5f;
+	toZeroOne[3][2] = 0.5f;
+
+	std::vector<IconRecord> records(icons.size());
+	for (size_t i = 0; i < icons.size(); i++)
+	{
+		records[i].viewProjection = toZeroOne * icons[i].viewProjection;
+		records[i].slotsA = icons[i].slotsA;
+		records[i].slotsB = icons[i].slotsB;
+		records[i].flags = glm::uvec4(icons[i].oneTexture ? 1u : 0u, 0, 0, 0);
+	}
+	Buffer recordBuffer = makeStorageBuffer(records.data(), records.size() * sizeof(IconRecord), "world block icon records");
+
+	BindGroupEntry entries[2];
+	entries[0] = Default;
+	entries[0].binding = 0;
+	entries[0].buffer = w.cubeVertexBuffer;
+	entries[0].size = w.cubeVertexBuffer.getSize();
+	entries[1] = Default;
+	entries[1].binding = 1;
+	entries[1].buffer = recordBuffer;
+	entries[1].size = recordBuffer ? recordBuffer.getSize() : 0;
+	BindGroupDescriptor groupDesc = Default;
+	groupDesc.label = StringView("world block icon bind group");
+	groupDesc.layout = w.cubeBindGroupLayout;
+	groupDesc.entryCount = 2;
+	groupDesc.entries = entries;
+	BindGroup group = recordBuffer ? wgpuDevice().createBindGroup(groupDesc) : BindGroup(nullptr);
+
+	// One depth buffer serves every icon: each pass clears it.
+	Texture depthTexture = createTarget("world block icon depth", depthFormat, TextureUsage::RenderAttachment, size, size);
+	TextureView depthView = depthTexture ? createTargetView(depthTexture, "world block icon depth view", depthFormat,
+		TextureAspect::DepthOnly, TextureUsage::RenderAttachment) : TextureView(nullptr);
+
+	uint32_t drawn = 0;
+	if (group && depthView)
+	{
+		CommandEncoderDescriptor encoderDesc = Default;
+		encoderDesc.label = StringView("world block icons");
+		CommandEncoder encoder = wgpuDevice().createCommandEncoder(encoderDesc);
+
+		const uint32_t vertexTotal = (uint32_t)(w.cubeGeometry.size() / 8);
+		for (uint32_t i = 0; i < icons.size(); i++)
+		{
+			const BlockIcon &icon = icons[i];
+			TextureView target = wgpuTextureView(icon.target);
+			if (!target || icon.vertexCount == 0 || icon.firstVertex + icon.vertexCount > vertexTotal) { continue; }
+
+			RenderPassColorAttachment color = Default;
+			color.view = target;
+			color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+			color.resolveTarget = nullptr;
+			color.loadOp = LoadOp::Clear;
+			color.storeOp = StoreOp::Store;
+			color.clearValue = Color{ 0.0, 0.0, 0.0, 0.0 };
+
+			RenderPassDepthStencilAttachment depthAttachment = Default;
+			depthAttachment.view = depthView;
+			depthAttachment.depthLoadOp = LoadOp::Clear;
+			depthAttachment.depthStoreOp = StoreOp::Discard;
+			depthAttachment.depthClearValue = 1.f;
+			depthAttachment.depthReadOnly = false;
+			depthAttachment.stencilLoadOp = LoadOp::Undefined;
+			depthAttachment.stencilStoreOp = StoreOp::Undefined;
+			depthAttachment.stencilClearValue = 0;
+			depthAttachment.stencilReadOnly = false;
+
+			RenderPassDescriptor passDesc = Default;
+			passDesc.label = StringView("world block icon pass");
+			passDesc.colorAttachmentCount = 1;
+			passDesc.colorAttachments = &color;
+			passDesc.depthStencilAttachment = &depthAttachment;
+			passDesc.occlusionQuerySet = nullptr;
+			passDesc.timestampWrites = nullptr;
+			RenderPassEncoder pass = encoder.beginRenderPass(passDesc);
+			pass.setPipeline(w.iconPipeline);
+			pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+			pass.setBindGroup(1, group, 0, nullptr);
+			pass.draw(icon.vertexCount, 1, icon.firstVertex, i);
+			pass.end();
+			pass.release();
+			wgpuMarkTargetDrawn(icon.target); // this pass cleared it
+			drawn++;
+		}
+
+		CommandBufferDescriptor commandDesc = Default;
+		commandDesc.label = StringView("world block icons");
+		CommandBuffer commands = encoder.finish(commandDesc);
+		wgpuQueue().submit(1, &commands);
+		commands.release();
+		encoder.release();
+	}
+
+	if (depthView) { depthView.release(); }
+	if (depthTexture) { depthTexture.release(); } // freed once the submitted passes are done
+	if (group) { group.release(); }
+	if (recordBuffer) { recordBuffer.release(); }
+	std::cout << "WebGPU world: drew " << drawn << " of " << icons.size() << " block icons\n";
 }
 
 void setChunkFaces(const Chunk *chunk, const std::vector<int> &faces)
@@ -1513,7 +1905,210 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		pass.release();
 	}
 
-	if (w.arena && finalCount)
+	// The transparent passes wait for renderTransparent, after the entities
+	// (GL's order: solid pass, entities, depth copy, transparency).
+	w.pendingTransparent = w.arena && finalCount;
+	w.pending.mode = mode;
+	w.pending.waterPeel = waterPeel;
+	w.pending.peelFirst = peelFirst;
+	w.pending.peelCount = peelCount;
+	w.pending.finalFirst = finalFirst;
+	w.pending.finalCount = finalCount;
+	w.pending.width = width;
+	w.pending.height = height;
+
+	const auto recordEnd = std::chrono::steady_clock::now();
+	w.renderedFrames++;
+	if (w.renderedFrames > timingWarmupFrames)
+	{
+		w.timedFrames++;
+		w.recordMsTotal += std::chrono::duration<double, std::milli>(recordEnd - recordStart).count();
+		w.frameMsTotal += std::chrono::duration<double, std::milli>(recordStart - w.lastFrameStart).count();
+	}
+	w.lastFrameStart = recordStart;
+
+	w.lastDrawCalls = drawCalls;
+	w.lastFacesDrawn = facesDrawn;
+	w.lastTransparentFacesDrawn = transparentFacesDrawn;
+	w.lastVisibleChunks = visibleChunks.size();
+
+	if (!w.firstRenderReported && drawCalls > 0)
+	{
+		w.firstRenderReported = true;
+		std::cout << "WebGPU world first render: " << drawCalls << " chunks of " << visibleChunks.size()
+			<< " visible, " << facesDrawn << " faces (" << w.chunks.size() << " chunks, "
+			<< w.facesInUse << " faces in the arena)\n";
+	}
+}
+
+void setMesh(unsigned int vao, const void *vertices, size_t vertexBytes,
+	const void *indices, size_t indexCount, unsigned int indexBytes)
+{
+	if (!wgpuDevice() || !vao || !vertices || !vertexBytes) { return; }
+	removeMesh(vao);
+
+	auto upload = [](const void *data, uint64_t bytes, BufferUsage usage, const char *label)
+	{
+		BufferDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.usage = usage | BufferUsage::CopyDst;
+		desc.size = (bytes + 3) & ~uint64_t(3); // writeBuffer sizes are multiples of 4
+		desc.mappedAtCreation = false;
+		Buffer buffer = wgpuDevice().createBuffer(desc);
+		if (buffer)
+		{
+			std::vector<uint8_t> padded((size_t)desc.size, 0);
+			std::memcpy(padded.data(), data, (size_t)bytes);
+			wgpuQueue().writeBuffer(buffer, 0, padded.data(), padded.size());
+		}
+		return buffer;
+	};
+
+	Mesh mesh;
+	mesh.vertices = upload(vertices, vertexBytes, BufferUsage::Vertex, "world mesh vertices");
+	if (indices && indexCount && (indexBytes == 2 || indexBytes == 4))
+	{
+		mesh.indices = upload(indices, indexCount * indexBytes, BufferUsage::Index, "world mesh indices");
+		mesh.indexFormat = indexBytes == 2 ? IndexFormat::Uint16 : IndexFormat::Uint32;
+		mesh.count = (uint32_t)indexCount;
+	}
+	else
+	{
+		// Unindexed: every vertex drawn in order. The vertex size is the
+		// pipeline's to know; items are the only unindexed meshes.
+		mesh.count = (uint32_t)(vertexBytes / (8 * sizeof(float)));
+	}
+	if (!mesh.vertices || (indices && indexCount && !mesh.indices)) { releaseMesh(mesh); return; }
+	w.meshes[vao] = mesh;
+}
+
+void removeMesh(unsigned int vao)
+{
+	auto found = w.meshes.find(vao);
+	if (found == w.meshes.end()) { return; }
+	releaseMesh(found->second);
+	w.meshes.erase(found);
+}
+
+void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<ModelInstance> &models,
+	const std::vector<ItemInstance> &items)
+{
+	if (!w.initialized || !w.bindGroup || !w.depthView) { return; }
+	if (models.empty() && items.empty()) { w.lastModelDraws = w.lastItemDraws = 0; return; }
+	if (!ensureWhiteTexture()) { return; }
+
+	// This frame's instances, in the form the shaders read.
+	static std::vector<ModelGpu> modelData;
+	static std::vector<ItemGpu> itemData;
+	modelData.clear();
+	itemData.clear();
+	for (const ModelInstance &m : models)
+	{
+		modelData.push_back(ModelGpu{ glm::ivec4(m.positionInt, (int)m.boneBase),
+			glm::vec4(m.positionFloat, 0.f), glm::vec4(m.brightness, 1.f) });
+	}
+	for (const ItemInstance &item : items)
+	{
+		itemData.push_back(ItemGpu{ item.model, glm::ivec4(item.positionInt, 0),
+			glm::vec4(item.positionFloat, item.brightness) });
+	}
+
+	// Storage buffers can't be empty: at least one element each.
+	bool grownBones = false, grownModels = false, grownItems = false;
+	if (!ensureBuffer(w.boneBuffer, w.boneCapacity, std::max<size_t>(bones.size(), 1), sizeof(glm::mat4),
+		BufferUsage::Storage, "world entity bones", grownBones)) { return; }
+	if (!ensureBuffer(w.modelBuffer, w.modelCapacity, std::max<size_t>(modelData.size(), 1), sizeof(ModelGpu),
+		BufferUsage::Storage, "world entity models", grownModels)) { return; }
+	if (!ensureBuffer(w.itemBuffer, w.itemCapacity, std::max<size_t>(itemData.size(), 1), sizeof(ItemGpu),
+		BufferUsage::Storage, "world entity items", grownItems)) { return; }
+	if (!bones.empty()) { wgpuQueue().writeBuffer(w.boneBuffer, 0, bones.data(), bones.size() * sizeof(glm::mat4)); }
+	if (!modelData.empty()) { wgpuQueue().writeBuffer(w.modelBuffer, 0, modelData.data(), modelData.size() * sizeof(ModelGpu)); }
+	if (!itemData.empty()) { wgpuQueue().writeBuffer(w.itemBuffer, 0, itemData.data(), itemData.size() * sizeof(ItemGpu)); }
+
+	if (grownBones || grownModels || grownItems || !w.entityBindGroup)
+	{
+		if (w.entityBindGroup) { w.entityBindGroup.release(); w.entityBindGroup = nullptr; }
+		BindGroupEntry entries[3];
+		Buffer buffers[3] = { w.boneBuffer, w.modelBuffer, w.itemBuffer };
+		for (uint32_t i = 0; i < 3; i++)
+		{
+			entries[i] = Default;
+			entries[i].binding = i;
+			entries[i].buffer = buffers[i];
+			entries[i].size = buffers[i].getSize();
+		}
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world entity bind group");
+		groupDesc.layout = w.entityBindGroupLayout;
+		groupDesc.entryCount = 3;
+		groupDesc.entries = entries;
+		w.entityBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		if (!w.entityBindGroup) { return; }
+	}
+
+	// One draw per instance: each has its own textures (one bind group per
+	// combination), and firstInstance picks its record.
+	RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world entity pass");
+	if (!pass) { return; }
+	pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+	pass.setBindGroup(1, w.entityBindGroup, 0, nullptr);
+
+	uint32_t draws = 0;
+	auto drawMesh = [&](const Mesh &mesh, uint32_t instance)
+	{
+		pass.setVertexBuffer(0, mesh.vertices, 0, mesh.vertices.getSize());
+		if (mesh.indices)
+		{
+			pass.setIndexBuffer(mesh.indices, mesh.indexFormat, 0, mesh.indices.getSize());
+			pass.drawIndexed(mesh.count, 1, 0, 0, instance);
+		}
+		else
+		{
+			pass.draw(mesh.count, 1, 0, instance);
+		}
+		draws++;
+	};
+
+	pass.setPipeline(w.modelPipeline);
+	for (uint32_t i = 0; i < models.size(); i++)
+	{
+		auto mesh = w.meshes.find(models[i].mesh);
+		if (mesh == w.meshes.end() || !mesh->second.indices) { continue; }
+		BindGroup textures = textureGroup(models[i].textures);
+		if (!textures) { continue; }
+		pass.setBindGroup(2, textures, 0, nullptr);
+		drawMesh(mesh->second, i);
+	}
+
+	w.lastModelDraws = draws;
+	pass.setPipeline(w.itemPipeline);
+	for (uint32_t i = 0; i < items.size(); i++)
+	{
+		auto mesh = w.meshes.find(items[i].mesh);
+		if (mesh == w.meshes.end()) { continue; }
+		const uint32_t ids[4] = { items[i].texture, items[i].texture, items[i].texture, items[i].texture };
+		BindGroup textures = textureGroup(ids);
+		if (!textures) { continue; }
+		pass.setBindGroup(2, textures, 0, nullptr);
+		drawMesh(mesh->second, i);
+	}
+
+	pass.end();
+	pass.release();
+	w.lastItemDraws = draws - w.lastModelDraws;
+}
+
+void renderTransparent()
+{
+	if (!w.pendingTransparent) { return; }
+	w.pendingTransparent = false;
+
+	const DrawMode mode = w.pending.mode;
+	const bool waterPeel = w.pending.waterPeel;
+	const uint32_t peelFirst = w.pending.peelFirst, peelCount = w.pending.peelCount;
+	const uint32_t finalFirst = w.pending.finalFirst, finalCount = w.pending.finalCount;
+	const int width = w.pending.width, height = w.pending.height;
+
 	{
 		CommandEncoder encoder = wgpuFrameEncoder();
 
@@ -1578,29 +2173,6 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			pass.end();
 			pass.release();
 		}
-	}
-
-	const auto recordEnd = std::chrono::steady_clock::now();
-	w.renderedFrames++;
-	if (w.renderedFrames > timingWarmupFrames)
-	{
-		w.timedFrames++;
-		w.recordMsTotal += std::chrono::duration<double, std::milli>(recordEnd - recordStart).count();
-		w.frameMsTotal += std::chrono::duration<double, std::milli>(recordStart - w.lastFrameStart).count();
-	}
-	w.lastFrameStart = recordStart;
-
-	w.lastDrawCalls = drawCalls;
-	w.lastFacesDrawn = facesDrawn;
-	w.lastTransparentFacesDrawn = transparentFacesDrawn;
-	w.lastVisibleChunks = visibleChunks.size();
-
-	if (!w.firstRenderReported && drawCalls > 0)
-	{
-		w.firstRenderReported = true;
-		std::cout << "WebGPU world first render: " << drawCalls << " chunks of " << visibleChunks.size()
-			<< " visible, " << facesDrawn << " faces (" << w.chunks.size() << " chunks, "
-			<< w.facesInUse << " faces in the arena)\n";
 	}
 }
 
@@ -1679,7 +2251,9 @@ void shutdown()
 			<< w.lastVisibleChunks << " visible chunks, " << w.lastFacesDrawn << " opaque and "
 			<< w.lastTransparentFacesDrawn << " transparent faces; arena "
 			<< w.chunks.size() << " + " << w.transparentChunks.size() << " chunks, " << w.facesInUse << " of " << w.arenaFaces << " faces used, "
-			<< w.freeRanges.size() << " free ranges\n";
+			<< w.freeRanges.size() << " free ranges; entities " << w.lastModelDraws << " model and "
+			<< w.lastItemDraws << " item draws, "
+			<< w.meshes.size() << " meshes\n";
 		if (w.timedFrames)
 		{
 			std::cout << "WebGPU world timing (" << drawModeName(w.drawMode) << ", " << w.timedFrames
@@ -1696,7 +2270,7 @@ void shutdown()
 		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
 	}
 	if (w.transparentPipelineLayout) { w.transparentPipelineLayout.release(); w.transparentPipelineLayout = nullptr; }
-	for (RenderPipeline *pipeline : { &w.cubePipeline, &w.decalPipeline, &w.linePipeline })
+	for (RenderPipeline *pipeline : { &w.cubePipeline, &w.decalPipeline, &w.linePipeline, &w.iconPipeline })
 	{
 		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
 	}
@@ -1712,10 +2286,25 @@ void shutdown()
 	{
 		if (*buffer) { buffer->release(); *buffer = nullptr; }
 	}
-	for (BindGroupLayout *layout : { &w.cubeBindGroupLayout, &w.decalBindGroupLayout })
+	for (BindGroupLayout *layout : { &w.cubeBindGroupLayout, &w.decalBindGroupLayout,
+		&w.entityBindGroupLayout, &w.textureBindGroupLayout })
 	{
 		if (*layout) { layout->release(); *layout = nullptr; }
 	}
+	for (auto &mesh : w.meshes) { releaseMesh(mesh.second); }
+	for (auto &group : w.textureGroups) { if (group.second) { group.second.release(); } }
+	for (RenderPipeline *pipeline : { &w.modelPipeline, &w.itemPipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	if (w.entityPipelineLayout) { w.entityPipelineLayout.release(); w.entityPipelineLayout = nullptr; }
+	if (w.entityBindGroup) { w.entityBindGroup.release(); w.entityBindGroup = nullptr; }
+	for (Buffer *buffer : { &w.boneBuffer, &w.modelBuffer, &w.itemBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
+	if (w.whiteView) { w.whiteView.release(); w.whiteView = nullptr; }
+	if (w.whiteTexture) { w.whiteTexture.destroy(); w.whiteTexture.release(); w.whiteTexture = nullptr; }
 	if (w.peelBindGroupLayout) { w.peelBindGroupLayout.release(); w.peelBindGroupLayout = nullptr; }
 	if (w.pipelineLayout) { w.pipelineLayout.release(); w.pipelineLayout = nullptr; }
 	if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }

@@ -18,6 +18,7 @@
 #include <blocks.h>
 #include <unordered_map>
 #include <magic_enum.hpp>
+#include <rendering/wgpuWorld.h>
 
 glm::mat4 aiToGlm(const aiMatrix4x4 &matrix)
 {
@@ -441,6 +442,12 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 
 			glBufferData(GL_ARRAY_BUFFER, vertexes.size() * sizeof(Data), vertexes.data(), GL_STATIC_DRAW);
 			glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+
+		#if RENDERER_WEBGPU
+			static_assert(sizeof(Data) == 36, "the WebGPU model pipeline reads 36-byte vertices");
+			wgpuWorld::setMesh(model.vao, vertexes.data(), vertexes.size() * sizeof(Data),
+				indices.data(), indices.size(), sizeof(unsigned int));
+		#endif
 
 			glEnableVertexAttribArray(0);
 			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 9, 0);
@@ -1055,6 +1062,9 @@ gl2d::Texture loadPlayerSkin(const char *path)
 
 void Model::cleanup()
 {
+#if RENDERER_WEBGPU
+	wgpuWorld::removeMesh(vao);
+#endif
 	glDeleteBuffers(1, &indexBuffer);
 	glDeleteBuffers(1, &geometry);
 	glDeleteVertexArrays(1, &vao);

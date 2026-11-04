@@ -6,6 +6,16 @@
 //   vs_line / fs_line   GyzmosRenderer's cubes (the block-selection outline)
 //                       and lines, as camera-relative line segments
 //                       (gyzmosCubeShader / gyzmosLinesShader).
+//   vs_model / fs_model skinned models (milestone 10b): players, zombies and
+//                       the other creatures, and the player's right hand
+//                       (basicEntity.vert/.frag).
+//   vs_item / fs_item   item entities and the held item: extruded sprites
+//                       and 3D item models (blockEntity.vert, itemEntity.frag).
+//
+// Entity and item textures are wgpu2d textures, stored top row first, where
+// GL's gl2d stored them bottom row first: v is flipped when sampling.
+// Brightness is GL's linear light factor taken to output (sRGB) space, as
+// this world is unlit and writes texture colors as they are.
 //
 // Group 0 is the world's bind group (wgpuWorld.cpp); only the bindings used
 // here are declared, and they must match chunkFaces.wgsl's.
@@ -89,4 +99,112 @@ fn vs_line(@location(0) position: vec3f) -> @builtin(position) vec4f {
 fn fs_line() -> @location(0) vec4f {
     // gyzmosCubeShader.frag's color.
     return vec4f(0.5, 0.5, 0.6, 1.0);
+}
+
+// ---- Skinned models and items (milestone 10b) ----------------------------
+
+// One per model instance (wgpuWorld::ModelInstance).
+struct Model {
+    // xyz the integer part of the position; w the first bone in `bones`.
+    positionInt: vec4i,
+    positionFloat: vec4f,
+    // rgb: GL's v_color (color * max(light/15, 0.1)), in output space.
+    brightness: vec4f,
+};
+
+// One per item (wgpuWorld::ItemInstance).
+struct Item {
+    model: mat4x4f,       // GL's u_modelMatrix
+    positionInt: vec4i,
+    positionFloat: vec4f, // w: GL's v_ambient, in output space
+};
+
+@group(1) @binding(0) var<storage, read> bones: array<mat4x4f>;
+@group(1) @binding(1) var<storage, read> models: array<Model>;
+@group(1) @binding(2) var<storage, read> items: array<Item>;
+
+// GL's textureSampler0-3: the four textures an entity draws with; each
+// vertex names one. Items bind their one texture four times.
+@group(2) @binding(0) var entityTexture0: texture_2d<f32>;
+@group(2) @binding(1) var entityTexture1: texture_2d<f32>;
+@group(2) @binding(2) var entityTexture2: texture_2d<f32>;
+@group(2) @binding(3) var entityTexture3: texture_2d<f32>;
+
+struct EntityOutput {
+    @builtin(position) position: vec4f,
+    @location(0) uv: vec2f,
+    @location(1) @interpolate(flat) textureIndex: u32,
+    @location(2) @interpolate(flat) brightness: vec3f,
+};
+
+struct ModelVertex {
+    @location(0) shape: vec3f,
+    @location(1) normal: vec3f,
+    @location(2) uv: vec2f,
+    // model.cpp's Data: short bone, short texture index.
+    @location(3) boneAndTexture: vec2i,
+};
+
+@vertex
+fn vs_model(v: ModelVertex, @builtin(instance_index) instance: u32) -> EntityOutput {
+    let m = models[instance];
+    let skin = bones[u32(m.positionInt.w) + u32(v.boneAndTexture.x)];
+
+    let relative = vec3f(m.positionInt.xyz - u.positionInt.xyz) - u.positionFloat.xyz
+        + m.positionFloat.xyz + (skin * vec4f(v.shape, 1.0)).xyz;
+
+    var out: EntityOutput;
+    out.position = u.viewProjection * vec4f(relative, 1.0);
+    out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
+    out.textureIndex = u32(clamp(v.boneAndTexture.y, 0, 3));
+    out.brightness = m.brightness.rgb;
+    return out;
+}
+
+// All four are sampled (textureSample must stay in uniform control flow),
+// then the vertex's one is kept.
+fn entityAlbedo(in: EntityOutput) -> vec4f {
+    let c0 = textureSample(entityTexture0, blockSampler, in.uv);
+    let c1 = textureSample(entityTexture1, blockSampler, in.uv);
+    let c2 = textureSample(entityTexture2, blockSampler, in.uv);
+    let c3 = textureSample(entityTexture3, blockSampler, in.uv);
+    var c = c0;
+    if (in.textureIndex == 1u) { c = c1; }
+    if (in.textureIndex == 2u) { c = c2; }
+    if (in.textureIndex == 3u) { c = c3; }
+    return c;
+}
+
+@fragment
+fn fs_model(in: EntityOutput) -> @location(0) vec4f {
+    let c = entityAlbedo(in);
+    if (c.a < 0.5) { discard; }
+    return vec4f(c.rgb * in.brightness, 1.0);
+}
+
+struct ItemVertex {
+    @location(0) shape: vec3f,
+    @location(1) normal: vec3f,
+    @location(2) uv: vec2f,
+};
+
+@vertex
+fn vs_item(v: ItemVertex, @builtin(instance_index) instance: u32) -> EntityOutput {
+    let item = items[instance];
+    let relative = vec3f(item.positionInt.xyz - u.positionInt.xyz) - u.positionFloat.xyz
+        + item.positionFloat.xyz + (item.model * vec4f(v.shape, 1.0)).xyz;
+
+    var out: EntityOutput;
+    out.position = u.viewProjection * vec4f(relative, 1.0);
+    out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
+    out.textureIndex = 0u;
+    out.brightness = vec3f(item.positionFloat.w);
+    return out;
+}
+
+@fragment
+fn fs_item(in: EntityOutput) -> @location(0) vec4f {
+    let c = textureSample(entityTexture0, blockSampler, in.uv);
+    if (c.a <= 0.0) { discard; }
+    return vec4f(c.rgb * in.brightness, 1.0);
 }

@@ -33,6 +33,12 @@ namespace render
 	// world's block texture array being filled. Null if the id is not live.
 	wgpu::TextureView wgpuTextureView(uint32_t textureId);
 
+	// ourCraft: a pass of the caller's own has drawn the whole of this render
+	// target (a FrameBuffer's texture id). A new target is cleared the first
+	// time wgpu2d draws into it, and reads back as cleared until then; this
+	// says its contents are now defined, so neither happens.
+	void wgpuMarkTargetDrawn(uint32_t textureId);
+
 	// The size the surface is currently configured at, in framebuffer pixels.
 	void wgpuSurfaceSize(int &width, int &height);
 

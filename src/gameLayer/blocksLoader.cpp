@@ -1,4 +1,5 @@
 #include <blocksLoader.h>
+#include <rendering/wgpuWorld.h>
 #include "blocks.h"
 #include <fstream>
 #include <iostream>
@@ -2188,6 +2189,10 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		result.count = finalData.size() / 8;
 
+	#if RENDERER_WEBGPU
+		wgpuWorld::setMesh(result.vao, finalData.data(), finalData.size() * sizeof(float), nullptr, 0, 0);
+	#endif
+
 	};
 
 
@@ -2290,6 +2295,11 @@ void BlocksLoader::loadAllItemsGeometry()
 
 			glBufferStorage(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(indices[0]),
 				indices.data(), 0);
+
+		#if RENDERER_WEBGPU
+			wgpuWorld::setMesh(result.vao, finalData.data(), finalData.size() * sizeof(float),
+				indices.data(), indices.size(), sizeof(indices[0]));
+		#endif
 
 			// --- TEXTURE: try to load the first embedded diffuse/albedo texture (keeps default if none)
 			{
@@ -2463,6 +2473,9 @@ uint16_t getGpuIdIndexForBlock(short type, int face)
 
 void BlocksLoader::ItemGeometry2D::clear()
 {
+#if RENDERER_WEBGPU
+	wgpuWorld::removeMesh(vao);
+#endif
 	glDeleteBuffers(1, &buffer);
 	glDeleteVertexArrays(1, &vao);
 	*this = {};
@@ -2470,6 +2483,9 @@ void BlocksLoader::ItemGeometry2D::clear()
 
 void BlocksLoader::ItemGeometry3D::clear()
 {
+#if RENDERER_WEBGPU
+	wgpuWorld::removeMesh(vao);
+#endif
 
 	glDeleteBuffers(1, &buffer);
 	glDeleteVertexArrays(1, &vao);

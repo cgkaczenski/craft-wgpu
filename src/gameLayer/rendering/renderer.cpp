@@ -1492,9 +1492,80 @@ void Renderer::renderAllBlocksUiTextures(BlocksLoader &blocksLoader, ModelsManag
 
 
 	if (!renderUIBlocksShader.shader.id) { return; }
-	renderUIBlocksShader.shader.bind();
 
 	auto view = glm::lookAt(glm::vec3{3, 3, 3}, {0, 0, 0}, {0, 1, 0});
+
+#if RENDERER_WEBGPU
+	{
+		// The same icons, drawn by wgpuWorld into wgpu2d render targets: the
+		// GL path below is all stubs here and would leave each icon a GL name
+		// wgpu2d has never heard of (drawn white). Same cameras, same
+		// geometry ranges, same textures per face.
+		const int TEXTURE_SIZE = 64;
+		blocksLoader.blockUiTextures.resize(BlocksCount);
+
+		auto cameraFor = [&](float distFromCamera, float yOffset)
+		{
+			return glm::ortho(-distFromCamera, distFromCamera, -distFromCamera + yOffset, distFromCamera + yOffset, 0.1f, 10.f) * view;
+		};
+		// setDistance's camera, for furniture.
+		auto cameraForSize = [&](glm::vec3 size)
+		{
+			float s = std::max(size.x, std::max(size.y, size.z));
+			s = glm::clamp(s, 0.4f, 2.f);
+			return cameraFor(s - 0.1f * s, -0.1f);
+		};
+
+		std::vector<wgpuWorld::BlockIcon> icons;
+		for (BlockType i = 1; i < BlocksCount; i++)
+		{
+			wgpuWorld::BlockIcon icon;
+			bool furniture = false;
+			if (isBlockMesh(i))
+			{
+				icon.firstVertex = 0;
+				icon.vertexCount = 36;
+				icon.viewProjection = cameraFor(0.78f, 0.f);
+			}
+			else
+			{
+				int index = -1;
+				if (isStairsMesh(i)) { index = ModelsManager::stairsModel; }
+				else if (isSlabMesh(i)) { index = ModelsManager::slabModel; }
+				else if (isWallMesh(i)) { index = ModelsManager::wallModel; }
+				else if (isDecorativeFurniture(i) || isFenceMesh(i)) { index = getDefaultBlockShapeForFurniture(i); furniture = true; }
+				if (index < 0) { continue; }
+
+				icon.oneTexture = true;
+				icon.firstVertex = blockGeometryForEntities[index].startIndex / 8;
+				icon.vertexCount = blockGeometryForEntities[index].componentCount;
+				icon.viewProjection = furniture
+					? cameraForSize(modelsManager.blockModels[index].getDimensions())
+					: cameraFor(0.78f, 0.f);
+			}
+
+			for (int j = 0; j < 6; j++)
+			{
+				const unsigned slot = (unsigned)getGpuIdIndexForBlock(i, j);
+				if (j < 4) { icon.slotsA[j] = slot; } else { icon.slotsB[j - 4] = slot; }
+			}
+
+			// Nearest filtering, as GL's icon textures. An icon from an
+			// earlier call (a reload) is released first; GL's path leaks it.
+			blocksLoader.blockUiTextures[i].cleanup();
+			gl2d::FrameBuffer target;
+			target.create(TEXTURE_SIZE, TEXTURE_SIZE, true);
+			blocksLoader.blockUiTextures[i] = target.texture;
+			icon.target = target.texture.id;
+			icons.push_back(icon);
+		}
+
+		wgpuWorld::renderBlockIcons(icons, TEXTURE_SIZE);
+		return;
+	}
+#endif
+
+	renderUIBlocksShader.shader.bind();
 
 	auto setDistance = [&](glm::vec3 size)
 	{
@@ -1933,11 +2004,6 @@ void Renderer::create(ModelsManager &modelsManager)
 		}
 	}
 
-#if RENDERER_WEBGPU
-	// The cube itself (the first 36 vertices), for dropped block items.
-	wgpuWorld::setBlockCubeGeometry(data);
-#endif
-
 
 	auto addModelData = [&](BlockModel &blockModel, int index)
 	{
@@ -2017,6 +2083,12 @@ void Renderer::create(ModelsManager &modelsManager)
 	{
 		addModelData(modelsManager.blockModels[i], i);
 	}
+
+#if RENDERER_WEBGPU
+	// The cube (the first 36 vertices) for dropped block items, and all of
+	// it for the inventory's block icons.
+	wgpuWorld::setBlockCubeGeometry(data);
+#endif
 
 
 	glBufferData(GL_ARRAY_BUFFER, sizeof(float) * data.size(), data.data(), GL_STATIC_DRAW);
@@ -3625,6 +3697,10 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 			programData.renderer.defaultShader.shadingSettings.exposure, chunkSystem, skyLightIntensity,
 			currentSkinBindlessTexture, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
 			showHand, playersConnectionData);
+	#if RENDERER_WEBGPU
+		// The world's transparent passes come after the entities, as here.
+		wgpuWorld::renderTransparent();
+	#endif
 		programData.GPUProfiler.endSubProfile("entities");
 	#pragma endregion
 
@@ -3723,6 +3799,10 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 			programData.renderer.defaultShader.shadingSettings.exposure, chunkSystem, skyLightIntensity,
 			currentSkinBindlessTexture, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
 			showHand, playersConnectionData);
+	#if RENDERER_WEBGPU
+		// The world's transparent passes come after the entities, as here.
+		wgpuWorld::renderTransparent();
+	#endif
 		programData.GPUProfiler.endSubProfile("entities");
 	#pragma endregion
 
@@ -4591,6 +4671,38 @@ void Renderer::renderEntities(
 	static std::vector<PerEntityData> entityData;
 	entityData.clear();
 
+#if RENDERER_WEBGPU
+	// The same draws, for the WebGPU entity pass: bone matrices and
+	// per-entity data as the GL buffers get them, textures as wgpu2d ids (a
+	// handle carries its texture's id in the low 32 bits; see nullGL.cpp).
+	static std::vector<glm::mat4> wgpuBones;
+	static std::vector<wgpuWorld::ModelInstance> wgpuModels;
+	static std::vector<wgpuWorld::ItemInstance> wgpuItems;
+	wgpuBones.clear();
+	wgpuModels.clear();
+	wgpuItems.clear();
+
+	auto textureIdOf = [](GLuint64 handle) -> uint32_t { return (handle >> 32) ? (uint32_t)handle : 0; };
+
+	auto addModel = [&](Model &model, const glm::mat4 *matrices, size_t count, const PerEntityData &data)
+	{
+		wgpuWorld::ModelInstance instance;
+		instance.mesh = model.vao;
+		instance.boneBase = (uint32_t)wgpuBones.size();
+		wgpuBones.insert(wgpuBones.end(), matrices, matrices + count);
+		instance.positionInt = data.entityPositionInt;
+		instance.positionFloat = data.entityPositionFloat;
+		// basicEntity's v_color, linear, to output space.
+		const glm::vec3 linear = data.color * std::max(data.lightLevels / 15.f, 0.1f);
+		instance.brightness = glm::pow(glm::max(linear, glm::vec3(0.f)), glm::vec3(1.f / 2.2f));
+		instance.textures[0] = textureIdOf(data.textureId0);
+		instance.textures[1] = textureIdOf(data.textureId1);
+		instance.textures[2] = textureIdOf(data.textureId2);
+		instance.textures[3] = textureIdOf(data.textureId3);
+		wgpuModels.push_back(instance);
+	};
+#endif
+
 	glm::mat4 handItemMatrix = glm::mat4{1.f};
 
 	auto renderHand = [&]()
@@ -4715,6 +4827,10 @@ void Renderer::renderEntities(
 				entityData.data(), GL_STREAM_DRAW);
 
 			glDrawElements(GL_TRIANGLES, model.vertexCount, GL_UNSIGNED_INT, nullptr);
+
+		#if RENDERER_WEBGPU
+			addModel(model, skinningMatrix.data(), skinningMatrix.size(), entityData.back());
+		#endif
 		};
 
 	};
@@ -4866,6 +4982,11 @@ void Renderer::renderEntities(
 				{ data.lightLevels = 15; }
 
 			entityData.push_back(data);
+
+		#if RENDERER_WEBGPU
+			addModel(model, skinningMatrix.data() + (skinningMatrix.size() - model.transforms.size()),
+				model.transforms.size(), data);
+		#endif
 		}
 
 		glBindBuffer(GL_SHADER_STORAGE_BUFFER, skinningMatrixSSBO);
@@ -5136,6 +5257,30 @@ void Renderer::renderEntities(
 				glDrawArrays(GL_TRIANGLES, 0, count);
 			}
 
+		#if RENDERER_WEBGPU
+			{
+				// The same uniforms as above, as one item record.
+				wgpuWorld::ItemInstance item;
+				item.mesh = vao;
+				item.texture = textureIdOf(texture);
+				if (mat)
+				{
+					decomposePosition(c.position, item.positionFloat, item.positionInt);
+					item.model = *mat;
+				}
+				else
+				{
+					decomposePosition(pos, item.positionFloat, item.positionInt);
+					item.positionFloat += glm::vec3(0, 0.4, 0);
+					item.model = glm::scale(glm::vec3{isA3DModel ? 1.f : 0.4f});
+				}
+				// blockEntity.vert's v_ambient is pow(x, 2.2) of this, on a
+				// linear color: x itself in output space.
+				item.brightness = (light / 15.f) * 0.6f * (1.f - 0.25f) + 0.25f;
+				wgpuItems.push_back(item);
+			}
+		#endif
+
 		
 		};
 
@@ -5189,7 +5334,9 @@ void Renderer::renderEntities(
 
 #pragma endregion
 
-
+#if RENDERER_WEBGPU
+	wgpuWorld::renderEntities(wgpuBones, wgpuModels, wgpuItems);
+#endif
 
 }
 

@@ -11,7 +11,9 @@
 
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
+#include <glm/mat4x4.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -30,9 +32,73 @@ namespace wgpuWorld
 		glm::uvec4 slotsB = {};        // faces 4-5 in xy
 	};
 
-	// The 36 vertices of GL's cube entity, 8 floats each (position, normal,
-	// uv), as Renderer builds them for blockEntityshader.vaoCube.
+	// GL's entity geometry, 8 floats a vertex (position, normal, uv), as
+	// Renderer builds it for blockEntityshader.vaoCube: the cube's 36 vertices
+	// first, then each block model's (blockGeometryForEntities ranges).
 	void setBlockCubeGeometry(const std::vector<float> &vertices);
+
+	// One inventory icon (Renderer::renderAllBlocksUiTextures): a range of
+	// the entity geometry drawn into a wgpu2d render target.
+	struct BlockIcon
+	{
+		glm::mat4 viewProjection = glm::mat4(1.f); // GL's, -1..1 depth
+		glm::uvec4 slotsA = {};                    // faces 0-3
+		glm::uvec4 slotsB = {};                    // faces 4-5 in xy
+		bool oneTexture = false;                   // every face takes slotsA.x
+		uint32_t firstVertex = 0;
+		uint32_t vertexCount = 0;
+		uint32_t target = 0;                       // wgpu2d::FrameBuffer texture id
+	};
+
+	// Draws the icons now, on a command buffer of their own: needs no open
+	// frame. Each target is cleared to transparent first. Every target must
+	// be `size` pixels square, in the surface's format.
+	void renderBlockIcons(const std::vector<BlockIcon> &icons, int size);
+
+	// ---- Models and items (milestone 10b) ------------------------------
+	//
+	// Meshes are named by the GL vertex array their data was made for (the
+	// null GL scaffold hands out unique names), so the draw lists below can
+	// name them the way the GL code binds them.
+
+	// A mesh's vertices and, if indexed, indices (indexBytes 2 or 4; 0 for
+	// none). Models use model.cpp's 36-byte vertex, items 8 floats.
+	void setMesh(unsigned int vao, const void *vertices, size_t vertexBytes,
+		const void *indices, size_t indexCount, unsigned int indexBytes);
+	void removeMesh(unsigned int vao);
+
+	// One skinned model instance (basicEntity.vert's PerEntityData).
+	struct ModelInstance
+	{
+		unsigned int mesh = 0;         // the model's vao
+		uint32_t boneBase = 0;         // its first matrix in the frame's bones
+		glm::ivec3 positionInt = {};
+		glm::vec3 positionFloat = {};
+		glm::vec3 brightness = {1, 1, 1}; // output-space color factor
+		uint32_t textures[4] = {};     // wgpu2d texture ids; 0 draws white
+	};
+
+	// One item (itemEntityShader's uniforms for one draw).
+	struct ItemInstance
+	{
+		unsigned int mesh = 0;         // the item geometry's vao
+		uint32_t texture = 0;          // wgpu2d texture id; 0 draws white
+		glm::mat4 model = glm::mat4(1.f);
+		glm::ivec3 positionInt = {};
+		glm::vec3 positionFloat = {};
+		float brightness = 1.f;        // output-space factor
+	};
+
+	// The entity pass (Renderer::renderEntities): skinned models (their
+	// bone matrices, concatenated), then items. Call after render and
+	// before renderTransparent, as GL draws entities between its solid pass
+	// and the transparent ones.
+	void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<ModelInstance> &models,
+		const std::vector<ItemInstance> &items);
+
+	// The transparent passes render prepared (water peel, glass): call once
+	// after renderEntities.
+	void renderTransparent();
 
 	// The corner table (4 corners x 3 floats per face orientation) and the UV
 	// table (4 corners x 2 floats) that Renderer::recreateBlockGeometryData
@@ -57,10 +123,11 @@ namespace wgpuWorld
 	// The chunk is going away: frees its faces.
 	void removeChunk(const Chunk *chunk);
 
-	// Records the world's passes for this frame: clears color and depth,
-	// draws the opaque faces of `visibleChunks` (the renderer's
+	// Records the world's opaque pass for this frame and prepares the
+	// transparent ones (renderTransparent records them): clears color and
+	// depth, draws the opaque faces of `visibleChunks` (the renderer's
 	// frustum-culled list, sorted far to near) and the dropped block cubes,
-	// then their transparent faces
+	// then, later, their transparent faces
 	// blended back to front. With `waterPeel` (GL's waterType 1) water shows
 	// what is under it through a depth peel; without it, water is plain
 	// see-through. `waterColor` is GL's u_waterColor, in linear space. Call
