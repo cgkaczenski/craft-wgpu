@@ -1,4 +1,5 @@
 #include "rendering/renderer.h"
+#include "rendering/wgpuWorld.h"
 #include <ctime>
 #include "blocks.h"
 #define GLM_ENABLE_EXPERIMENTAL
@@ -2620,6 +2621,12 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	//glFrontFace(GL_CW);
 
 	glViewport(0, 0, screenX, screenY);
+
+#if RENDERER_WEBGPU
+	// Milestone 5: the WebGPU world pass (test cubes for now). Everything
+	// below still goes to the null GL scaffold.
+	wgpuWorld::render(c);
+#endif
 
 
 	

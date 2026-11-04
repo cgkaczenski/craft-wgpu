@@ -3563,6 +3563,57 @@ ShaderModule wgpuCreateShaderModuleFromFile(const char *path)
 	return createShaderModuleFromFile(path);
 }
 
+RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, float depthClearValue,
+	const char *label)
+{
+	// The low-res final-effect target is not supported here: ourCraft sets no
+	// final effect, so the world always goes straight to the surface.
+	if (!g.frameOpen || !depthView) { return nullptr; }
+
+	if (g.framePass)
+	{
+		g.framePass.end();
+		g.framePass.release();
+		g.framePass = nullptr;
+	}
+
+	const bool clear = !g.surfaceCleared;
+	g.surfaceCleared = true;
+
+	RenderPassColorAttachment colorAttachment = Default;
+	colorAttachment.view = g.frameView;
+	colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+	colorAttachment.resolveTarget = nullptr;
+	colorAttachment.loadOp = clear ? LoadOp::Clear : LoadOp::Load;
+	colorAttachment.storeOp = StoreOp::Store;
+	colorAttachment.clearValue.r = g.clearColor.r;
+	colorAttachment.clearValue.g = g.clearColor.g;
+	colorAttachment.clearValue.b = g.clearColor.b;
+	colorAttachment.clearValue.a = g.clearColor.a;
+
+	// Depth only: the stencil ops must stay Undefined for a format with no
+	// stencil aspect. Discard after the pass, since nothing reads it yet.
+	RenderPassDepthStencilAttachment depthAttachment = Default;
+	depthAttachment.view = depthView;
+	depthAttachment.depthLoadOp = LoadOp::Clear;
+	depthAttachment.depthStoreOp = StoreOp::Discard;
+	depthAttachment.depthClearValue = depthClearValue;
+	depthAttachment.depthReadOnly = false;
+	depthAttachment.stencilLoadOp = LoadOp::Undefined;
+	depthAttachment.stencilStoreOp = StoreOp::Undefined;
+	depthAttachment.stencilClearValue = 0;
+	depthAttachment.stencilReadOnly = false;
+
+	RenderPassDescriptor passDesc = Default;
+	passDesc.label = StringView(label);
+	passDesc.colorAttachmentCount = 1;
+	passDesc.colorAttachments = &colorAttachment;
+	passDesc.depthStencilAttachment = &depthAttachment;
+	passDesc.occlusionQuerySet = nullptr;
+	passDesc.timestampWrites = nullptr;
+	return g.frameEncoder.beginRenderPass(passDesc);
+}
+
 RenderPassEncoder wgpuCurrentRenderPass()
 {
 	// The surface, always: the UI is drawn at native resolution on top of

@@ -177,8 +177,33 @@ The last row needs the most care. Projection matrices need
 `GLM_FORCE_DEPTH_ZERO_TO_ONE` (or the `_ZO` glm functions), and every
 screen-space shader that rebuilds positions from depth will be quietly wrong
 until it is updated. That includes SSR, HBAO, god rays, fog and
-`defaultShader.frag:1928`. Decide the convention in milestone 5 and write it
-down.
+`defaultShader.frag:1928`. Decided in milestone 5:
+
+### Conventions (decided in milestone 5)
+
+- **Depth: standard 0..1.** Projection is `glm::perspectiveRH_ZO` from the
+  camera's fov and planes; near maps to 0, far to 1. `Depth32Float`, compare
+  `Less` (where GL said `GL_LESS`; `GL_LEQUAL` becomes `LessEqual`), cleared
+  to 1. Porting a shader that rebuilds a position from depth means dropping
+  its `depth * 2.0 - 1.0`: WebGPU's NDC z is the stored depth. Reversed-Z was
+  considered and not taken, to keep ported shaders one step from the GL ones.
+  `Camera::getProjectionMatrix` stays −1..1, because the OpenGL path and the
+  CPU frustum culling use it; the WebGPU renderer builds its own.
+- **Clip-space y points up**, as in GL, so projections need no flip and a
+  triangle counter-clockwise in GL is counter-clockwise here (`FrontFace::CCW`,
+  `CullMode::Back`).
+- **Render targets are top-first.** Row 0 of a framebuffer or render target is
+  the top of the image in WebGPU and the bottom in GL. A screen-space shader
+  turns NDC into a texture coordinate with `uv = (0.5 + 0.5*x, 0.5 - 0.5*y)`
+  (GL: `0.5 + 0.5*y`), and `@builtin(position).y` counts down from the top
+  (GL's `gl_FragCoord.y` counts up).
+- **Sampled textures are not flipped.** In both APIs memory row 0 is v = 0.
+  Upload block textures with the rows the GL path uploads (bottom-first after
+  `stbi_set_flip_vertically_on_load(true)`), and every mesh UV carries over
+  unchanged.
+- **Positions are camera-relative.** The CPU subtracts the camera position in
+  doubles and the GPU gets small floats, as GL does with `u_positionInt` +
+  `u_positionFloat`; the view matrix is `Camera::getViewMatrix` (rotation only).
 
 The feature names above come from space-game-wgpu's vendored headers. Re-check
 them against this repo's headers once milestone 1a fetches them.
@@ -204,7 +229,7 @@ ourCraft. Phases B–D are where the new 3D concepts are.
 
 | # | Milestone | Ends with | Type |
 |---|---|---|---|
-| 5 | First 3D: depth and a camera | Depth texture, perspective projection in a uniform buffer, back-face culling. One hardcoded cube at the player's position, moving with the camera. **Decide depth range and Y conventions here.** | Learning |
+| 5 | First 3D: depth and a camera | `wgpuWorld` (`src/gameLayer/rendering/wgpuWorld.cpp`, `resources/shaders/webgpu/testCubes.wgsl`), called from `Renderer::renderFromBakedData`: a `Depth32Float` texture sized to the surface, `perspectiveRH_ZO` times the camera's view in a uniform buffer, `CullMode::Back`, and two interpenetrating test cubes near the player built from `vertex_index`. wgpu2d gained `wgpuBeginSurfacePassWithDepth`, a world pass before the 2D one. Checked: face colors show only outside faces; the nearer cube stays in front though drawn first; cube bounds in screenshots match a CPU projection to a pixel, before and after a scripted camera turn (`OURCRAFT_INPUT` gained `move@x,y` and `key@F9`). Conventions are written down above. | Learning |
 | 6 | Chunk faces | Storage buffers read in the vertex shader, instance step mode, corners from `vertex_index` (no fans). `BigGpuBuffer` becomes one `wgpu::Buffer` arena; one draw per chunk. Faces colored by orientation (the `vertexColor` table). World shape visible. | Learning |
 | 7 | Block textures without bindless | Choose between texture arrays and binding arrays. Load the 6.6k textures, generate mips, handle animation strips, and replace the `u_textureSamplerers` handle table with an index table. Textured, unlit world. | Learning |
 | 8 | Indirect draws | Indirect buffers, `MultiDrawIndirect` or a loop, GPU-side draw args from the existing culling. Compare frame time against `slow-frames.log`. | Learning |
@@ -284,8 +309,8 @@ WebGPU wants that state declared up front in pipelines. So:
 - **Attachment byte budget.** Five MRTs with no 3-channel formats may exceed
   `maxColorAttachmentBytesPerSample`. Pack positions or reconstruct them from
   depth if needed.
-- **ImGui upgrade.** The jump from 1.85 is bigger than space-game's. Docking
-  API changes may touch the debug UI code.
+- ~~**ImGui upgrade.**~~ Avoided in milestone 4: the backend was ported
+  from space-game, and ImGui stays at 1.85.
 - **Header churn.** Same as space-game: check every call against the vendored
   headers.
 - **Multiplayer.** The server (`src/gameLayer/multyPlayer/server.cpp`) runs in

@@ -40,6 +40,16 @@ namespace render
 	// recorded into it after the game's flush draws on top.
 	wgpu::RenderPassEncoder wgpuCurrentRenderPass();
 
+	// ourCraft: a pass of the caller's own on the surface, with a depth
+	// attachment, for the 3D world. Ends the open 2D pass (the 2D pipelines
+	// have no depth state, so they cannot share a pass that has depth),
+	// clears the surface if nothing has this frame, and clears depth to
+	// `depthClearValue`. The caller records, then ends and releases the pass
+	// before anything else draws; the next 2D draw loads what it left. Null
+	// when no frame is open.
+	wgpu::RenderPassEncoder wgpuBeginSurfacePassWithDepth(wgpu::TextureView depthView,
+		float depthClearValue, const char *label);
+
 	// ---- Diagnostics ----------------------------------------------------
 	//
 	// The device's uncaptured-error callback is the catch-all: it reports

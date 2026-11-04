@@ -24,6 +24,7 @@
 #if RENDERER_WEBGPU
 	#include "wgpuWindow.h"
 	#include "wgpuImgui.h"
+	#include "rendering/wgpuWorld.h"
 	#include "nullGL.h"
 #else
 	#include <stb_image_write/stb_image_write.h>
@@ -230,8 +231,9 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // OURCRAFT_INPUT="frame:action;frame:action..." plays input on given frames, so
 // a WGPU_SCREENSHOT_FRAME capture can reach a menu with no one at the keyboard.
 // Actions: click@x,y (window points; the press lands on that frame, the
-// release on the next) and key@E (a letter key, pressed then released the
-// same way). Feeds the callbacks below; the mouse position is overridden from
+// release on the next), move@x,y (the mouse moves there, no button: turns the
+// camera in game) and key@E or key@F9 (a letter or function key,
+// pressed then released the same way). Feeds the callbacks below; the mouse position is overridden from
 // the first click on, without moving the real cursor.
 static glm::ivec2 scriptedMouse = {-1, -1};
 
@@ -261,14 +263,27 @@ static void playScriptedInput(GLFWwindow *window)
 		std::string step = s.substr(start, end - start);
 		start = end + 1;
 
-		int frame = 0, x = 0, y = 0;
+		int frame = 0, x = 0, y = 0, function = 0;
 		char letter = 0;
-		if (std::sscanf(step.c_str(), "%d:click@%d,%d", &frame, &x, &y) == 3 && frame == frameIndex)
+		if (std::sscanf(step.c_str(), "%d:key@F%d", &frame, &function) == 2 && frame == frameIndex
+			&& function >= 1 && function <= 12)
+		{
+			int key = GLFW_KEY_F1 + function - 1;
+			keyCallback(window, key, 0, GLFW_PRESS, 0);
+			releases.push_back({frame + 1, key});
+			std::cout << "input: frame " << frame << " key F" << function << "\n";
+		}
+		else if (std::sscanf(step.c_str(), "%d:click@%d,%d", &frame, &x, &y) == 3 && frame == frameIndex)
 		{
 			scriptedMouse = {x, y};
 			mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
 			releases.push_back({frame + 1, -1});
 			std::cout << "input: frame " << frame << " click " << x << "," << y << "\n";
+		}
+		else if (std::sscanf(step.c_str(), "%d:move@%d,%d", &frame, &x, &y) == 3 && frame == frameIndex)
+		{
+			scriptedMouse = {x, y};
+			std::cout << "input: frame " << frame << " move " << x << "," << y << "\n";
 		}
 		else if (std::sscanf(step.c_str(), "%d:key@%c", &frame, &letter) == 2 && frame == frameIndex
 			&& std::isalpha((unsigned char)letter))
@@ -335,6 +350,8 @@ namespace platform
 
 	void setRelMousePosition(int x, int y)
 	{
+		// A scripted mouse (OURCRAFT_INPUT) follows the warp like a real one.
+		if (scriptedMouse.x >= 0) { scriptedMouse = {x, y}; }
 		glfwSetCursorPos(wind, x, y);
 	}
 
@@ -791,6 +808,7 @@ int main()
 		{
 			closeGame();
 		#if RENDERER_WEBGPU
+			wgpuWorld::shutdown();
 			wgpuImgui::shutdown();
 			wgpuWindow::shutdown();
 		#endif
@@ -910,6 +928,7 @@ int main()
 
 	closeGame();
 #if RENDERER_WEBGPU
+	wgpuWorld::shutdown();
 	wgpuImgui::shutdown();
 	wgpuWindow::shutdown();
 #endif
