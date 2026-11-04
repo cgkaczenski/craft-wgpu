@@ -15,6 +15,11 @@
 //   - one 128x128 texture_2d_array, a layer per distinct block texture, filled
 //     and mipmapped by blockTextures.wgsl from the loader's wgpu2d textures;
 //   - a slot -> layer table standing in for the u_textureSamplerers handles.
+// Milestone 8 draws the visible chunks with indirect draws, as GL's
+// glMultiDrawElementsIndirect: one 16-byte argument record per chunk, built
+// from the culled list and written to an indirect buffer each frame, then one
+// multiDrawIndirect (or a loop of drawIndirect). OURCRAFT_WORLD_DRAWS=
+// direct|indirect|multi picks the path, for comparing them.
 
 #include "rendering/wgpuWorld.h"
 #include "rendering/camera.h"
@@ -28,6 +33,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
+#include <string>
 #include <cstdint>
 #include <iostream>
 #include <iterator>
@@ -61,6 +68,39 @@ namespace
 
 	// The arena starts at a million faces (16 MiB) and doubles when full.
 	constexpr uint64_t initialArenaFaces = 1u << 20;
+
+	// What one indirect draw reads from the buffer: drawIndirect's four
+	// u32s, in this order (WebGPU spec, GPURenderPassEncoder.drawIndirect).
+	struct DrawArgs
+	{
+		uint32_t vertexCount;
+		uint32_t instanceCount;
+		uint32_t firstVertex;
+		uint32_t firstInstance; // nonzero needs IndirectFirstInstance
+	};
+	static_assert(sizeof(DrawArgs) == 16, "indirect draw arguments are four u32s");
+
+	// How the visible chunks are drawn.
+	enum class DrawMode
+	{
+		Direct,   // one draw() per chunk, arguments in the call (milestone 6)
+		Indirect, // one drawIndirect() per chunk, arguments from the buffer
+		Multi,    // one multiDrawIndirect() for all of them
+	};
+
+	const char *drawModeName(DrawMode mode)
+	{
+		switch (mode)
+		{
+			case DrawMode::Direct: return "direct";
+			case DrawMode::Indirect: return "indirect";
+			case DrawMode::Multi: return "multi";
+		}
+		return "?";
+	}
+
+	// Frames skipped before timing starts: chunks are still loading then.
+	constexpr uint64_t timingWarmupFrames = 300;
 
 	struct ChunkRange
 	{
@@ -112,6 +152,22 @@ namespace
 		int depthHeight = 0;
 
 		bool firstRenderReported = false;
+
+		// Indirect draws: this frame's argument records, and the buffer they
+		// are written to (capacity in records, doubled when outgrown).
+		DrawMode drawMode = DrawMode::Direct;
+		std::vector<DrawArgs> drawArgs;
+		Buffer indirectBuffer = nullptr;
+		uint64_t indirectCapacity = 0;
+
+		// Timing, after the warm-up: CPU time recording the chunk draws
+		// (argument upload, draw calls, pass.end, where wgpu encodes the
+		// pass), and the interval between frames.
+		uint64_t renderedFrames = 0;
+		uint64_t timedFrames = 0;
+		double recordMsTotal = 0;
+		double frameMsTotal = 0;
+		std::chrono::steady_clock::time_point lastFrameStart = {};
 
 		// The last frame's numbers, printed at shutdown.
 		uint32_t lastDrawCalls = 0;
@@ -730,6 +786,52 @@ namespace
 		return true;
 	}
 
+	// The fastest path the device allows, unless OURCRAFT_WORLD_DRAWS asks for
+	// another. Indirect needs IndirectFirstInstance: each chunk's record
+	// points at its range of the arena through firstInstance.
+	DrawMode chooseDrawMode()
+	{
+		const bool firstInstance = wgpuDevice().hasFeature(FeatureName::IndirectFirstInstance);
+		const bool multi = wgpuDevice().hasFeature((WGPUFeatureName)WGPUNativeFeature_MultiDrawIndirect);
+
+		DrawMode mode = multi && firstInstance ? DrawMode::Multi
+			: firstInstance ? DrawMode::Indirect : DrawMode::Direct;
+		if (const char *env = std::getenv("OURCRAFT_WORLD_DRAWS"))
+		{
+			const std::string wanted = env;
+			if (wanted == "direct") { mode = DrawMode::Direct; }
+			else if (wanted == "indirect" && firstInstance) { mode = DrawMode::Indirect; }
+			else if (wanted == "multi" && firstInstance && multi) { mode = DrawMode::Multi; }
+			else { std::cerr << "WebGPU world: OURCRAFT_WORLD_DRAWS=" << wanted << " not available here\n"; }
+		}
+		std::cout << "WebGPU world draws: " << drawModeName(mode) << " (IndirectFirstInstance "
+			<< (firstInstance ? "yes" : "no") << ", MultiDrawIndirect " << (multi ? "yes" : "no") << ")\n";
+		return mode;
+	}
+
+	bool ensureIndirectBuffer(uint64_t records)
+	{
+		if (records <= w.indirectCapacity) { return true; }
+
+		uint64_t capacity = w.indirectCapacity ? w.indirectCapacity : 1024;
+		while (capacity < records) { capacity *= 2; }
+
+		ErrorScope scope("world indirect buffer");
+		BufferDescriptor desc = Default;
+		desc.label = StringView("world indirect draws");
+		desc.usage = BufferUsage::Indirect | BufferUsage::CopyDst;
+		desc.size = capacity * sizeof(DrawArgs);
+		desc.mappedAtCreation = false;
+		Buffer buffer = wgpuDevice().createBuffer(desc);
+		if (!buffer || scope.failed()) { return false; }
+
+		// Draws already recorded keep the old buffer alive until they ran.
+		if (w.indirectBuffer) { w.indirectBuffer.release(); }
+		w.indirectBuffer = buffer;
+		w.indirectCapacity = capacity;
+		return true;
+	}
+
 	bool initialize()
 	{
 		if (w.initialized) { return true; }
@@ -742,6 +844,7 @@ namespace
 			return false;
 		}
 
+		w.drawMode = chooseDrawMode();
 		w.initialized = true;
 		std::cout << "WebGPU world pipeline created\n";
 		return true;
@@ -824,29 +927,72 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks)
 	RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, depthClear, "world pass");
 	if (!pass) { return; }
 
-	uint32_t drawCalls = 0;
+	const auto recordStart = std::chrono::steady_clock::now();
+
+	// One record per visible chunk that has faces. The renderer's list is
+	// frustum-culled and sorted far to near; walk it backwards, as the GL loop
+	// does, so near chunks fill the depth buffer first and hide what is
+	// behind them early. Records run in buffer order, so that holds for the
+	// indirect paths too.
+	w.drawArgs.clear();
 	uint64_t facesDrawn = 0;
-	if (w.arena)
+	for (auto c = visibleChunks.rbegin(); c != visibleChunks.rend(); ++c)
+	{
+		auto it = w.chunks.find(*c);
+		if (it == w.chunks.end()) { continue; }
+		w.drawArgs.push_back(DrawArgs{ 4, it->second.faceCount, 0, it->second.firstFace });
+		facesDrawn += it->second.faceCount;
+	}
+	const uint32_t drawCalls = (uint32_t)w.drawArgs.size();
+
+	if (w.arena && drawCalls)
 	{
 		pass.setPipeline(w.pipeline);
 		pass.setBindGroup(0, w.bindGroup, 0, nullptr);
 		pass.setVertexBuffer(0, w.arena, 0, w.arenaFaces * faceBytes);
 
-		// The renderer's list is frustum-culled and sorted far to near; walk
-		// it backwards, as the GL loop does, so near chunks fill the depth
-		// buffer first and hide what is behind them early.
-		for (auto c = visibleChunks.rbegin(); c != visibleChunks.rend(); ++c)
+		DrawMode mode = w.drawMode;
+		if (mode != DrawMode::Direct && !ensureIndirectBuffer(drawCalls)) { mode = DrawMode::Direct; }
+
+		if (mode == DrawMode::Direct)
 		{
-			auto it = w.chunks.find(*c);
-			if (it == w.chunks.end()) { continue; }
-			pass.draw(4, it->second.faceCount, 0, it->second.firstFace);
-			drawCalls++;
-			facesDrawn += it->second.faceCount;
+			for (const DrawArgs &a : w.drawArgs)
+			{
+				pass.draw(a.vertexCount, a.instanceCount, a.firstVertex, a.firstInstance);
+			}
+		}
+		else
+		{
+			// A queue write lands before the commands of any later submit,
+			// this frame's included, and after every earlier one, so one
+			// buffer serves every frame.
+			wgpuQueue().writeBuffer(w.indirectBuffer, 0, w.drawArgs.data(), drawCalls * sizeof(DrawArgs));
+			if (mode == DrawMode::Multi)
+			{
+				pass.multiDrawIndirect(w.indirectBuffer, 0, drawCalls);
+			}
+			else
+			{
+				for (uint32_t i = 0; i < drawCalls; i++)
+				{
+					pass.drawIndirect(w.indirectBuffer, (uint64_t)i * sizeof(DrawArgs));
+				}
+			}
 		}
 	}
 
 	pass.end();
 	pass.release();
+
+	const auto recordEnd = std::chrono::steady_clock::now();
+	w.renderedFrames++;
+	if (w.renderedFrames > timingWarmupFrames)
+	{
+		w.timedFrames++;
+		w.recordMsTotal += std::chrono::duration<double, std::milli>(recordEnd - recordStart).count();
+		w.frameMsTotal += std::chrono::duration<double, std::milli>(recordStart - w.lastFrameStart).count();
+	}
+	w.lastFrameStart = recordStart;
 
 	w.lastDrawCalls = drawCalls;
 	w.lastFacesDrawn = facesDrawn;
@@ -869,6 +1015,13 @@ void shutdown()
 			<< w.lastVisibleChunks << " visible chunks, " << w.lastFacesDrawn << " faces; arena "
 			<< w.chunks.size() << " chunks, " << w.facesInUse << " of " << w.arenaFaces << " faces used, "
 			<< w.freeRanges.size() << " free ranges\n";
+		if (w.timedFrames)
+		{
+			std::cout << "WebGPU world timing (" << drawModeName(w.drawMode) << ", " << w.timedFrames
+				<< " frames after " << timingWarmupFrames << "): recording the chunk draws "
+				<< 1000.0 * w.recordMsTotal / w.timedFrames << " us, frame "
+				<< w.frameMsTotal / w.timedFrames << " ms\n";
+		}
 	}
 
 	if (w.depthView) { w.depthView.release(); w.depthView = nullptr; }
@@ -887,6 +1040,7 @@ void shutdown()
 	if (w.downsamplePipeline) { w.downsamplePipeline.release(); w.downsamplePipeline = nullptr; }
 	if (w.bindGroupLayout) { w.bindGroupLayout.release(); w.bindGroupLayout = nullptr; }
 	if (w.arena) { w.arena.release(); w.arena = nullptr; }
+	if (w.indirectBuffer) { w.indirectBuffer.release(); w.indirectBuffer = nullptr; }
 	w = World{};
 }
 

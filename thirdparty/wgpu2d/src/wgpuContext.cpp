@@ -3120,10 +3120,25 @@ bool wgpuInit(WGPUSurface surface, int width, int height)
 		requiredLimits.maxTextureArrayLayers = adapterLimits.maxTextureArrayLayers;
 	}
 
+	// Features, each only if the adapter has it, so the device request never
+	// fails over one: ourCraft's world draws its chunks with indirect draws,
+	// which need firstInstance in the indirect arguments (each chunk's range
+	// of the face arena) and, for one call per pass, wgpu-native's
+	// MultiDrawIndirect. Callers check device.hasFeature before using them.
+	std::vector<WGPUFeatureName> requiredFeatures;
+	const WGPUFeatureName wanted[] = {
+		WGPUFeatureName_IndirectFirstInstance,
+		(WGPUFeatureName)WGPUNativeFeature_MultiDrawIndirect,
+	};
+	for (WGPUFeatureName f : wanted)
+	{
+		if (g.adapter.hasFeature(f)) { requiredFeatures.push_back(f); }
+	}
+
 	DeviceDescriptor deviceDesc = Default;
 	deviceDesc.label = StringView("space-game device");
-	deviceDesc.requiredFeatureCount = 0;
-	deviceDesc.requiredFeatures = nullptr;
+	deviceDesc.requiredFeatureCount = requiredFeatures.size();
+	deviceDesc.requiredFeatures = requiredFeatures.data();
 	deviceDesc.requiredLimits = &requiredLimits;
 	deviceDesc.defaultQueue.label = StringView("space-game queue");
 	deviceDesc.deviceLostCallbackInfo.mode = CallbackMode::AllowProcessEvents;
