@@ -23,6 +23,7 @@
 
 #if RENDERER_WEBGPU
 	#include "wgpuWindow.h"
+	#include "wgpuImgui.h"
 	#include "nullGL.h"
 #else
 	#include <stb_image_write/stb_image_write.h>
@@ -283,8 +284,8 @@ static void playScriptedInput(GLFWwindow *window)
 #if !RENDERER_WEBGPU
 // WGPU_SCREENSHOT_FRAME=N saves frame N as screenshot-frameN.png, the same as
 // the WebGPU path (wgpuWindow.cpp), so both renderers can be compared. Called
-// before ImGui draws and the buffers swap, so the back buffer holds the
-// finished game frame.
+// just before the swap, so the back buffer holds the finished frame,
+// ImGui included.
 static void saveGLScreenshotIfAsked(GLFWwindow *window)
 {
 	static long long frameIndex = 0;
@@ -625,9 +626,10 @@ int main()
 	glfwSetScrollCallback(wind, scrollCallback);
 
 #if RENDERER_WEBGPU
-	// WebGPU owns the window and only clears it for now. gl2d, glui, ImGui's
-	// GL backend and the 3D renderer still call OpenGL; with no context, those
-	// calls go to nullGL's do-nothing stubs until later milestones port them.
+	// WebGPU owns the window. gl2d and glui draw through wgpu2d and ImGui
+	// through wgpuImgui; the 3D renderer still calls OpenGL, and with no
+	// context those calls go to nullGL's do-nothing stubs until later
+	// milestones port it.
 	if (!wgpuWindow::init(wind))
 	{
 		std::cout << "WebGPU initialization failed.\n";
@@ -677,15 +679,22 @@ int main()
 		//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
 	#if !RENDERER_WEBGPU
-		// Extra OS windows need a renderer backend to draw them. The WebGPU path
-		// has none until milestone 4.
+		// Each extra OS window would need its own WebGPU surface, so the
+		// WebGPU path keeps ImGui windows inside the game window.
 		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
 	#endif
 		//io.ConfigViewportsNoAutoMerge = true;
 		//io.ConfigViewportsNoTaskBarIcon = true;
 	
 		ImGuiStyle& style = ImGui::GetStyle();
-		if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
+	#if RENDERER_WEBGPU
+		// The same see-through style as with viewports, so the dock space
+		// covering the window does not hide the game behind it.
+		const bool seeThrough = true;
+	#else
+		const bool seeThrough = io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable;
+	#endif
+		if (seeThrough)
 		{
 			//style.WindowRounding = 0.0f;
 			style.Colors[ImGuiCol_WindowBg].w = 0.f; //always
@@ -693,8 +702,7 @@ int main()
 		}
 	
 	#if RENDERER_WEBGPU
-		// Input and window size only. ImGui windows are built every frame but
-		// not drawn until milestone 4 adds the WebGPU backend.
+		// Input and window size; wgpuImgui draws.
 		ImGui_ImplGlfw_InitForOther(wind, true);
 	#else
 		ImGui_ImplGlfw_InitForOpenGL(wind, true);
@@ -710,8 +718,8 @@ int main()
 		io.FontDefault = font;
 
 	#if RENDERER_WEBGPU
-		// The OpenGL backend builds the font atlas; ImGui::NewFrame asserts it exists.
-		io.Fonts->Build();
+		// After the font setup: it builds the atlas and uploads it.
+		permaAssertComment(wgpuImgui::init(), "err initializing the WebGPU ImGui backend");
 	#endif
 	#endif
 #pragma endregion
@@ -783,6 +791,7 @@ int main()
 		{
 			closeGame();
 		#if RENDERER_WEBGPU
+			wgpuImgui::shutdown();
 			wgpuWindow::shutdown();
 		#endif
 			return 0;
@@ -847,16 +856,12 @@ int main()
 		PL::Profiler pl;
 		pl.start();
 
-	#if !RENDERER_WEBGPU
-		// Before ImGui draws, so the frame matches what the WebGPU path shows
-		// (it has no ImGui renderer yet).
-		saveGLScreenshotIfAsked(wind);
-	#endif
-
 		#pragma region imgui
 				#if REMOVE_IMGUI == 0
 				ImGui::Render();
-				#if !RENDERER_WEBGPU
+				#if RENDERER_WEBGPU
+				wgpuImgui::renderDrawData(); // on top of the game, same pass
+				#else
 				int display_w, display_h;
 				glfwGetFramebufferSize(wind, &display_w, &display_h);
 				glViewport(0, 0, display_w, display_h);
@@ -886,6 +891,7 @@ int main()
 	#if RENDERER_WEBGPU
 		wgpuWindow::endFrame();
 	#else
+		saveGLScreenshotIfAsked(wind);
 		glfwSwapBuffers(wind);
 	#endif
 		pl.end();
@@ -904,6 +910,7 @@ int main()
 
 	closeGame();
 #if RENDERER_WEBGPU
+	wgpuImgui::shutdown();
 	wgpuWindow::shutdown();
 #endif
 
