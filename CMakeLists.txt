@@ -3,6 +3,10 @@
 
 cmake_minimum_required(VERSION 3.16)
 
+# CMake 4 refuses projects that ask for cmake_minimum_required below 3.5, and
+# most of thirdparty/ does. Treat them as 3.5 instead of editing each one.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -21,11 +25,6 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Release>:Release>")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 project(ourCraft)
-
-if(APPLE)
-	# For src/platform/wgpuMetalLayer.mm on the WebGPU path.
-	enable_language(OBJCXX)
-endif()
 
 
 # AVX2 is x86-only. Apple Silicon and other ARM targets use NEON inside FastNoise.
@@ -186,8 +185,14 @@ if(RENDERER_WEBGPU)
 	target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RENDERER_WEBGPU=1)
 	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu)
 	if(APPLE)
-		# Pins the CAMetalLayer colorspace to sRGB (Objective-C++).
-		target_sources("${CMAKE_PROJECT_NAME}" PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/wgpuMetalLayer.mm")
+		# Pins the CAMetalLayer colorspace to sRGB. Compiled as C++ with
+		# -x objective-c++ rather than enable_language(OBJCXX), which would also
+		# claim GLFW's .m files and compile its Objective-C as Objective-C++.
+		set(WGPU_METAL_LAYER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/wgpuMetalLayer.mm")
+		set_source_files_properties("${WGPU_METAL_LAYER_SRC}" PROPERTIES
+			LANGUAGE CXX
+			COMPILE_OPTIONS "-x;objective-c++")
+		target_sources("${CMAKE_PROJECT_NAME}" PRIVATE "${WGPU_METAL_LAYER_SRC}")
 		target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE "-framework Cocoa" "-framework QuartzCore")
 	endif()
 	# Copies the wgpu-native .dylib/.so/.dll next to the executable.

@@ -267,6 +267,12 @@ WebGPU wants that state declared up front in pipelines. So:
 - **Texture memory.** Albedo alone for 6.6k textures at their native sizes is
   around 170 MB before mips and before normal and material maps. Bucket by
   size, resample, or load only the active texture pack. Decide in milestone 7.
+- **Binding-array size.** On the Apple M6 the adapter reports
+  `maxSampledTexturesPerShaderStage` 128, and wgpu-native v24's
+  `WGPUNativeLimits` has no separate binding-array limit. A
+  `binding_array` of thousands of block textures may not fit; texture arrays
+  probably will. Check whether the device can request more before choosing in
+  milestone 7.
 - **Depth convention drift.** See above. A silently wrong screen-space effect
   is the most likely bug in Phases C–D.
 - **Attachment byte budget.** Five MRTs with no 3-channel formats may exceed
