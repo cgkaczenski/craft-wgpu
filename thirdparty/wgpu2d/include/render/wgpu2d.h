@@ -38,6 +38,13 @@ namespace wgpu2d
 	// pipelines, so there is none to restore.
 	inline void enableNecessaryGLFeatures() {}
 
+	// ourCraft draws gl2d with GL_CULL_FACE on (gameLayer.cpp enables it
+	// every frame), so a quad mirrored in one axis by a negative width or
+	// height faced away and was culled; glui's narrow slider knob depends on
+	// it. With this on, renderRectangle skips such quads the same way.
+	// Off by default: wgpu2d draws every quad.
+	void setCullMirroredQuads(bool cull);
+
 	using Color4f = glm::vec4;
 	using Rect = glm::vec4; // x, y, width, height in world pixels, y down
 
@@ -261,8 +268,10 @@ namespace wgpu2d
 
 		glm::ivec2 GetSize();
 
-		// RGBA8 pixels, rows top-first. Mipmaps are generated on the CPU.
-		void createFromBuffer(const char *image_data, const int width, const int height,
+		// RGBA8 pixels, rows top-first. Mipmaps are generated on the GPU.
+		// (wgpu2d's own createFromBuffer; renamed in ourCraft, where that
+		// name has gl2d's bottom-first rows, below.)
+		void createFromBufferTopFirst(const char *image_data, const int width, const int height,
 			bool pixelated = false, bool useMipMaps = true);
 
 		void create1PxSquare(const char *b = 0);
@@ -282,6 +291,13 @@ namespace wgpu2d
 
 		// ---- gl2d compatibility (ourCraft) ------------------------------
 
+		// gl2d's row order, which is OpenGL's: rows bottom-first. ourCraft
+		// decodes with stbi_set_flip_vertically_on_load(true) and builds
+		// buffers that way, so this flips them and calls
+		// createFromBufferTopFirst.
+		void createFromBuffer(const char *image_data, const int width, const int height,
+			bool pixelated = false, bool useMipMaps = true);
+
 		// An encoded image (PNG, JPG, ...) already in memory.
 		void createFromFileData(const unsigned char *image_file_data, const size_t image_file_size,
 			bool pixelated = false, bool useMipMaps = true);
@@ -290,9 +306,12 @@ namespace wgpu2d
 		// go to nullGL on this path, so there is nothing to bind.
 		void bind(const unsigned int sample = 0) {}
 
-		// gl2d read the texels back from the GPU. Milestone 3a: zeros of the
-		// right size, which is what the null GL path returned before; the
-		// real readback is 3b.
+		// One mip level's texels read back from the GPU: RGBA, rows
+		// bottom-first like gl2d's glGetTexImage, so data read here goes back
+		// through createFromBuffer the right way up. width * height * 4
+		// bytes, the size in `outSize`. Waits for the GPU,
+		// so for load time, not every frame. Empty, size 0, for an id wgpu2d
+		// did not issue or a level the texture does not have.
 		std::vector<unsigned char> readTextureData(int mipLevel = 0, glm::ivec2 *outSize = nullptr);
 	};
 

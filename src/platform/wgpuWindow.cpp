@@ -4,6 +4,7 @@
 // uses the wrapper.
 #include <webgpu/webgpu.hpp>
 #include <render/wgpuContext.h>
+#include <render/wgpu2d.h>
 
 #include "wgpuWindow.h"
 
@@ -109,6 +110,10 @@ bool init(GLFWwindow *glfwWindow)
 	if (!render::wgpuInit(surface, width, height)) { return false; }
 
 	printPortReport(render::wgpuAdapter());
+
+	// The game keeps GL_CULL_FACE on while it draws gl2d (gameLayer.cpp), and
+	// its UI looks right only with mirrored quads culled.
+	wgpu2d::setCullMirroredQuads(true);
 	return true;
 }
 

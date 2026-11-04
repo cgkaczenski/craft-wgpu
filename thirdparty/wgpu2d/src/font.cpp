@@ -2,7 +2,7 @@
 // pack API, drawn as one quad per character through the existing batch.
 //
 // Nothing here touches WebGPU. The atlas becomes a GPU texture through
-// Texture::createFromBuffer like any other image, and the glyphs are drawn
+// Texture::createFromBufferTopFirst like any other image, and the glyphs are drawn
 // with renderRectangle like any other sprite; consecutive glyphs share that
 // texture, so a string -- or a whole HUD's worth of strings -- is one draw run.
 
@@ -86,7 +86,7 @@ bool Font::createFromFile(const char *ttfFile, float bakePixelHeight, bool pixel
 	// No mipmaps: text is drawn at its size or larger, and a mip chain would
 	// only ever be sampled when it is shrunk -- where a bitmap font is
 	// illegible anyway.
-	texture.createFromBuffer((const char *)rgba.data(), w, h, pixelated, false);
+	texture.createFromBufferTopFirst((const char *)rgba.data(), w, h, pixelated, false);
 	if (texture.id == 0)
 	{
 		std::cerr << "wgpu2d: could not create the atlas for " << ttfFile << "\n";

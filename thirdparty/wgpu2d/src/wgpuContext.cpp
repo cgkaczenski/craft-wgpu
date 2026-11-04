@@ -27,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 // File scope only, never in a header: wgpu:: names would otherwise leak into
@@ -1493,7 +1494,9 @@ namespace
 		// is a property of the whole texture, not of a level, so asking for
 		// mips asks for it everywhere -- including level 0, which is only ever
 		// written by the queue.
-		texDesc.usage = TextureUsage::TextureBinding | TextureUsage::CopyDst;
+		// CopySrc (ourCraft): gl2d's readTextureData reads the texels back,
+		// and the block loader does that to every block texture.
+		texDesc.usage = TextureUsage::TextureBinding | TextureUsage::CopyDst | TextureUsage::CopySrc;
 		if (levelCount > 1) { texDesc.usage = texDesc.usage | TextureUsage::StorageBinding; }
 		texDesc.viewFormatCount = 0;
 		texDesc.viewFormats = nullptr;
@@ -2370,11 +2373,17 @@ namespace
 	// and are converted to WebGPU's top-left origin here: v = 1 - v.
 	// A texture a record can draw with: the one asked for, or the white pixel
 	// with a warning if that one is not usable. 0 if not even that exists.
+	// The warning is once per id: ourCraft draws GL texture names (block
+	// icons) every frame until its 3D renderer is ported.
 	uint32_t usableTexture(const wgpu2d::Texture texture)
 	{
 		if (texture.id == 0 || texture.id > textures.size() || !textures[texture.id - 1].bindGroup)
 		{
-			std::cerr << "wgpu2d: Invalid texture (id " << texture.id << ")\n";
+			static std::unordered_set<uint32_t> warned;
+			if (warned.insert(texture.id).second)
+			{
+				std::cerr << "wgpu2d: Invalid texture (id " << texture.id << "), drawn white\n";
+			}
 			return white1pxSquareTexture.id;
 		}
 		return texture.id;
@@ -2430,11 +2439,18 @@ namespace
 		}
 	}
 
+	// See wgpu2d::setCullMirroredQuads.
+	static bool cullMirroredQuads = false;
+
 	void pushQuad(const wgpu2d::Camera &camera, wgpu2d::BlendMode blend,
 		uint32_t shader, const wgpu2d::EffectParams &effectParams,
 		const glm::vec4 transforms, const wgpu2d::Texture texture,
 		const glm::vec4 colors[4], const glm::vec2 origin, const float rotation, const glm::vec4 textureCoords)
 	{
+		// One negative size reverses the winding (rotation never does); two
+		// cancel out, as they did under GL's back-face cull.
+		if (cullMirroredQuads && (transforms.z < 0.f) != (transforms.w < 0.f)) { return; }
+
 		const uint32_t textureId = usableTexture(texture);
 		if (textureId == 0) { return; }
 
@@ -3701,7 +3717,7 @@ namespace wgpu2d
 		return { textures[id - 1].width, textures[id - 1].height };
 	}
 
-	void Texture::createFromBuffer(const char *image_data, const int width, const int height, bool pixelated, bool useMipMaps)
+	void Texture::createFromBufferTopFirst(const char *image_data, const int width, const int height, bool pixelated, bool useMipMaps)
 	{
 		*this = createTextureFromPixels((const unsigned char *)image_data, width, height, "buffer", pixelated, useMipMaps);
 	}
@@ -3803,25 +3819,74 @@ namespace wgpu2d
 		if (g.frameOpen) { ensurePassBegun(fbo); }
 	}
 
-	// The copy's rules, the same as the frame capture's: a buffer row is a
-	// multiple of 256 bytes, so rows are padded on the way and unpadded here.
+	static bool readTexels(const TextureEntry &entry, uint32_t mipLevel, int width, int height,
+		std::vector<unsigned char> &texels, const char *label);
+
 	// Texels stay in the target's format -- this is a round trip, not an
 	// image to look at, so nothing is swizzled.
 	bool FrameBuffer::read(std::vector<unsigned char> &texels)
 	{
 		if (fbo == 0 || fbo > textures.size() || !g.device) { return false; }
 		const TextureEntry &entry = textures[fbo - 1];
-		const uint32_t row = (uint32_t)entry.width * 4;
-		texels.assign((size_t)row * entry.height, 0);
+		texels.assign((size_t)entry.width * 4 * entry.height, 0);
 		// A clear still waiting is what the target holds.
 		if (entry.needsClear) { return true; }
 
-		const uint32_t paddedRow = ceilToNextMultiple(row, 256);
-		const uint64_t total = (uint64_t)paddedRow * entry.height;
+		return readTexels(entry, 0, entry.width, entry.height, texels, "framebuffer read");
+	}
 
-		ErrorScope scope("framebuffer read");
+	// ourCraft: gl2d's readTextureData. Rows top first, RGBA, one mip level.
+	// It waits for the GPU, so it is for load time (the block loader reads
+	// every block texture this way), not for every frame.
+	std::vector<unsigned char> Texture::readTextureData(int mipLevel, glm::ivec2 *outSize)
+	{
+		glm::ivec2 size = {};
+		std::vector<unsigned char> texels;
+
+		if (id != 0 && id <= textures.size() && g.device && mipLevel >= 0)
+		{
+			const TextureEntry &entry = textures[id - 1];
+			if (entry.texture && (uint32_t)mipLevel < entry.texture.getMipLevelCount())
+			{
+				size.x = std::max(1, entry.width >> mipLevel);
+				size.y = std::max(1, entry.height >> mipLevel);
+				texels.assign((size_t)size.x * size.y * 4, 0);
+				readTexels(entry, (uint32_t)mipLevel, size.x, size.y, texels, "readTextureData");
+
+				// Render targets are in the surface's format, BGRA here.
+				if (entry.format == TextureFormat::BGRA8Unorm || entry.format == TextureFormat::BGRA8UnormSrgb)
+				{
+					for (size_t i = 0; i + 3 < texels.size(); i += 4) { std::swap(texels[i], texels[i + 2]); }
+				}
+
+				// Stored top-first; gl2d's callers expect bottom-first.
+				const size_t rowBytes = (size_t)size.x * 4;
+				for (int y = 0; y < size.y / 2; y++)
+				{
+					std::swap_ranges(texels.begin() + y * rowBytes, texels.begin() + (y + 1) * rowBytes,
+						texels.begin() + (size.y - 1 - y) * rowBytes);
+				}
+			}
+		}
+
+		if (outSize) { *outSize = size; }
+		return texels;
+	}
+
+	// The copy's rules, the same as the frame capture's: a buffer row is a
+	// multiple of 256 bytes, so rows are padded on the way and unpadded here.
+	// `texels` is already sized width * height * 4 and receives the level as
+	// it is stored.
+	static bool readTexels(const TextureEntry &entry, uint32_t mipLevel, int width, int height,
+		std::vector<unsigned char> &texels, const char *label)
+	{
+		const uint32_t row = (uint32_t)width * 4;
+		const uint32_t paddedRow = ceilToNextMultiple(row, 256);
+		const uint64_t total = (uint64_t)paddedRow * height;
+
+		ErrorScope scope(label);
 		BufferDescriptor desc = Default;
-		desc.label = StringView("framebuffer read");
+		desc.label = StringView(label);
 		desc.usage = BufferUsage::CopyDst | BufferUsage::MapRead;
 		desc.size = total;
 		desc.mappedAtCreation = false;
@@ -3829,24 +3894,24 @@ namespace wgpu2d
 		if (!buffer) { return false; }
 
 		CommandEncoderDescriptor encoderDesc = Default;
-		encoderDesc.label = StringView("framebuffer read");
+		encoderDesc.label = StringView(label);
 		CommandEncoder encoder = g.device.createCommandEncoder(encoderDesc);
 
 		TexelCopyTextureInfo source = Default;
 		source.texture = entry.texture;
-		source.mipLevel = 0;
+		source.mipLevel = mipLevel;
 		source.origin = { 0, 0, 0 };
 		source.aspect = TextureAspect::All;
 		TexelCopyBufferInfo destination = Default;
 		destination.buffer = buffer;
 		destination.layout.offset = 0;
 		destination.layout.bytesPerRow = paddedRow;
-		destination.layout.rowsPerImage = (uint32_t)entry.height;
-		Extent3D size = { (uint32_t)entry.width, (uint32_t)entry.height, 1 };
+		destination.layout.rowsPerImage = (uint32_t)height;
+		Extent3D size = { (uint32_t)width, (uint32_t)height, 1 };
 		encoder.copyTextureToBuffer(source, destination, size);
 
 		CommandBufferDescriptor bufferDesc = Default;
-		bufferDesc.label = StringView("framebuffer read");
+		bufferDesc.label = StringView(label);
 		CommandBuffer commands = encoder.finish(bufferDesc);
 		g.queue.submit(1, &commands);
 		commands.release();
@@ -3868,13 +3933,13 @@ namespace wgpu2d
 		const unsigned char *src = mapped ? static_cast<const unsigned char *>(buffer.getConstMappedRange(0, (size_t)total)) : nullptr;
 		if (src)
 		{
-			for (int y = 0; y < entry.height; y++)
+			for (int y = 0; y < height; y++)
 			{
 				std::memcpy(texels.data() + (size_t)y * row, src + (size_t)y * paddedRow, row);
 			}
 			buffer.unmap();
 		}
-		else { std::cerr << "WebGPU: framebuffer read never mapped\n"; }
+		else { std::cerr << "WebGPU: " << label << " never mapped\n"; }
 		buffer.release();
 		return src != nullptr && !scope.failed();
 	}
@@ -4052,6 +4117,8 @@ namespace wgpu2d
 	{
 		clearBatch();
 	}
+
+	void setCullMirroredQuads(bool cull) { cullMirroredQuads = cull; }
 
 	// gl2d's renderRectangle: the rotation origin is relative to the
 	// rectangle's center.

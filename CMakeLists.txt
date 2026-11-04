@@ -106,9 +106,6 @@ if(RENDERER_WEBGPU)
 	# so the game and glui compile unchanged.
 	add_subdirectory(thirdparty/wgpu2d)
 	set(GL2D_TARGET gl2dShim)
-
-	# PNG output for WGPU_SCREENSHOT_FRAME (src/platform/wgpuWindow.cpp).
-	add_subdirectory(thirdparty/stb_image_write)
 else()
 	add_subdirectory(thirdparty/glfw-3.3.7)
 	set(GL2D_TARGET gl2d)
@@ -118,6 +115,9 @@ endif()
 # renderer off OpenGL.
 add_subdirectory(thirdparty/glad)
 add_subdirectory(thirdparty/stb_image)
+# PNG output for WGPU_SCREENSHOT_FRAME on both paths (wgpuWindow.cpp and
+# glfwMain.cpp), so the two renderers can be compared screenshot to screenshot.
+add_subdirectory(thirdparty/stb_image_write)
 add_subdirectory(thirdparty/stb_truetype)
 if(NOT RENDERER_WEBGPU)
 	add_subdirectory(thirdparty/gl2d)
@@ -187,14 +187,14 @@ target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURC
 target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/")
 
 
-target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw glad stb_image stb_truetype 
+target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw glad stb_image stb_image_write stb_truetype 
 	${GL2D_TARGET} raudio imgui fastNoiseSIMD FastNoise2 enet glui
 	magic_enum safeSave profilerLib
 	libzstd_static assimp)
 
 if(RENDERER_WEBGPU)
 	target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RENDERER_WEBGPU=1)
-	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu stb_image_write)
+	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu)
 	if(APPLE)
 		# Pins the CAMetalLayer colorspace to sRGB. Compiled as C++ with
 		# -x objective-c++ rather than enable_language(OBJCXX), which would also

@@ -15,10 +15,17 @@
 #include <chrono>
 #include <profilerLib/include/profilerLib.h>
 #include <errorReporting.h>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 #if RENDERER_WEBGPU
 	#include "wgpuWindow.h"
 	#include "nullGL.h"
+#else
+	#include <stb_image_write/stb_image_write.h>
 #endif
 
 
@@ -219,6 +226,104 @@ void characterCallback(GLFWwindow *window, unsigned int codepoint)
 
 void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 
+// OURCRAFT_INPUT="frame:action;frame:action..." plays input on given frames, so
+// a WGPU_SCREENSHOT_FRAME capture can reach a menu with no one at the keyboard.
+// Actions: click@x,y (window points; the press lands on that frame, the
+// release on the next) and key@E (a letter key, pressed then released the
+// same way). Feeds the callbacks below; the mouse position is overridden from
+// the first click on, without moving the real cursor.
+static glm::ivec2 scriptedMouse = {-1, -1};
+
+static void playScriptedInput(GLFWwindow *window)
+{
+	static const char *script = std::getenv("OURCRAFT_INPUT");
+	if (!script) { return; }
+
+	static long long frameIndex = 0;
+	static std::vector<std::pair<int, int>> releases; // frame, key (-1 = left mouse)
+	++frameIndex;
+
+	for (auto it = releases.begin(); it != releases.end();)
+	{
+		if (it->first != frameIndex) { ++it; continue; }
+		if (it->second < 0) { mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, 0); }
+		else { keyCallback(window, it->second, 0, GLFW_RELEASE, 0); }
+		it = releases.erase(it);
+	}
+
+	std::string s = script;
+	size_t start = 0;
+	while (start < s.size())
+	{
+		size_t end = s.find(';', start);
+		if (end == std::string::npos) { end = s.size(); }
+		std::string step = s.substr(start, end - start);
+		start = end + 1;
+
+		int frame = 0, x = 0, y = 0;
+		char letter = 0;
+		if (std::sscanf(step.c_str(), "%d:click@%d,%d", &frame, &x, &y) == 3 && frame == frameIndex)
+		{
+			scriptedMouse = {x, y};
+			mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
+			releases.push_back({frame + 1, -1});
+			std::cout << "input: frame " << frame << " click " << x << "," << y << "\n";
+		}
+		else if (std::sscanf(step.c_str(), "%d:key@%c", &frame, &letter) == 2 && frame == frameIndex
+			&& std::isalpha((unsigned char)letter))
+		{
+			int key = GLFW_KEY_A + (std::toupper((unsigned char)letter) - 'A');
+			keyCallback(window, key, 0, GLFW_PRESS, 0);
+			releases.push_back({frame + 1, key});
+			std::cout << "input: frame " << frame << " key " << letter << "\n";
+		}
+	}
+}
+
+#if !RENDERER_WEBGPU
+// WGPU_SCREENSHOT_FRAME=N saves frame N as screenshot-frameN.png, the same as
+// the WebGPU path (wgpuWindow.cpp), so both renderers can be compared. Called
+// before ImGui draws and the buffers swap, so the back buffer holds the
+// finished game frame.
+static void saveGLScreenshotIfAsked(GLFWwindow *window)
+{
+	static long long frameIndex = 0;
+	static const char *shotAt = std::getenv("WGPU_SCREENSHOT_FRAME");
+	++frameIndex;
+	if (!shotAt || frameIndex != std::atoll(shotAt)) { return; }
+
+	int width = 0, height = 0;
+	glfwGetFramebufferSize(window, &width, &height);
+	if (width <= 0 || height <= 0) { return; }
+
+	std::vector<unsigned char> pixels(size_t(width) * height * 4);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	glReadBuffer(GL_BACK);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+	// glReadPixels returns the bottom row first; PNG wants the top row first.
+	// Alpha is forced opaque, as the window shows it.
+	std::vector<unsigned char> flipped(pixels.size());
+	const size_t rowBytes = size_t(width) * 4;
+	for (int y = 0; y < height; y++)
+	{
+		std::copy_n(&pixels[(height - 1 - y) * rowBytes], rowBytes, &flipped[y * rowBytes]);
+	}
+	for (size_t i = 3; i < flipped.size(); i += 4) { flipped[i] = 255; }
+
+	std::string name = "screenshot-frame" + std::to_string(frameIndex) + ".png";
+	if (stbi_write_png(name.c_str(), width, height, 4, flipped.data(), int(rowBytes)))
+	{
+		std::cout << "screenshot: " << name << " (" << width << "x" << height << ")\n";
+	}
+	else
+	{
+		std::cout << "screenshot: could not write " << name << "\n";
+	}
+}
+#endif
+
 
 #pragma region platform functions
 
@@ -244,6 +349,7 @@ namespace platform
 
 	glm::ivec2 getRelMousePosition()
 	{
+		if (scriptedMouse.x >= 0) { return scriptedMouse; }
 		double x = 0, y = 0;
 		glfwGetCursorPos(wind, &x, &y);
 		return { x, y };
@@ -671,6 +777,8 @@ int main()
 		wgpuWindow::beginFrame();
 	#endif
 
+		playScriptedInput(wind);
+
 		if (!gameLogic(augmentedDeltaTime))
 		{
 			closeGame();
@@ -738,6 +846,12 @@ int main()
 
 		PL::Profiler pl;
 		pl.start();
+
+	#if !RENDERER_WEBGPU
+		// Before ImGui draws, so the frame matches what the WebGPU path shows
+		// (it has no ImGui renderer yet).
+		saveGLScreenshotIfAsked(wind);
+	#endif
 
 		#pragma region imgui
 				#if REMOVE_IMGUI == 0

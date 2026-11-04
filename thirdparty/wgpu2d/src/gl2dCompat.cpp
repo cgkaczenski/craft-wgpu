@@ -89,7 +89,7 @@ void Font::createFromFile(const char *ttfFile, bool monospacedFont)
 		rgba[i * 4 + 2] = coverage[i];
 		rgba[i * 4 + 3] = coverage[i] > 1 ? 255 : 0;
 	}
-	texture.createFromBuffer((const char *)rgba.data(), atlasSize, atlasSize, false, false);
+	texture.createFromBufferTopFirst((const char *)rgba.data(), atlasSize, atlasSize, false, false);
 
 	// Each glyph's quad with the pen at (0, 0), as gl2d's fontGetGlyphQuad
 	// asked stb for it. stb's t runs down the atlas; the atlas rows go up top
@@ -369,8 +369,8 @@ void Camera::follow(glm::vec2 pos, float speed, float min, float max, float w, f
 void Texture::createFromFileData(const unsigned char *image_file_data, const size_t image_file_size,
 	bool pixelated, bool useMipMaps)
 {
-	// Rows top first, as createFromBuffer wants. gl2d flipped on load for
-	// OpenGL's bottom-up rows; wgpu2d's coordinate conversion makes that
+	// Rows top first, for createFromBufferTopFirst. gl2d flipped on load
+	// for OpenGL's bottom-up rows; wgpu2d's coordinate conversion makes that
 	// unnecessary.
 	stbi_set_flip_vertically_on_load(false);
 
@@ -383,23 +383,26 @@ void Texture::createFromFileData(const unsigned char *image_file_data, const siz
 		return;
 	}
 
-	createFromBuffer((const char *)pixels, width, height, pixelated, useMipMaps);
+	createFromBufferTopFirst((const char *)pixels, width, height, pixelated, useMipMaps);
 	stbi_image_free(pixels);
 }
 
-#pragma endregion
-
-#pragma region texture readback
-
-std::vector<unsigned char> Texture::readTextureData(int mipLevel, glm::ivec2 *outSize)
+void Texture::createFromBuffer(const char *image_data, const int width, const int height,
+	bool pixelated, bool useMipMaps)
 {
-	glm::ivec2 size = GetSize();
-	size.x = std::max(1, size.x >> mipLevel);
-	size.y = std::max(1, size.y >> mipLevel);
-	if (id == 0) { size = {}; }
+	if (!image_data || width <= 0 || height <= 0)
+	{
+		createFromBufferTopFirst(image_data, width, height, pixelated, useMipMaps);
+		return;
+	}
 
-	if (outSize) { *outSize = size; }
-	return std::vector<unsigned char>((size_t)size.x * size.y * 4, 0);
+	const size_t rowBytes = (size_t)width * 4;
+	std::vector<char> topFirst((size_t)height * rowBytes);
+	for (int y = 0; y < height; y++)
+	{
+		std::copy_n(image_data + (size_t)(height - 1 - y) * rowBytes, rowBytes, topFirst.data() + y * rowBytes);
+	}
+	createFromBufferTopFirst(topFirst.data(), width, height, pixelated, useMipMaps);
 }
 
 #pragma endregion
