@@ -11,7 +11,10 @@ namespace
 {
 
 // GL object names. Code treats 0 as "failed to create", so hand out real ones.
-GLuint nextName = 1;
+// They start high because GL texture names end up in gl2d::Texture::id, which
+// is wgpu2d's id on this path: wgpu2d skips an id it never issued, and its own
+// ids count up from 1, so the two never collide.
+GLuint nextName = 1u << 24;
 
 void nullGLNewNames(GLsizei n, GLuint *names)
 {

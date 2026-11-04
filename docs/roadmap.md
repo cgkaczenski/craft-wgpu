@@ -196,7 +196,8 @@ ourCraft. Phases B–D are where the new 3D concepts are.
 | 1a | Deps and adapter | `RENDERER_WEBGPU` CMake option (default OFF) with WebGPU-distribution, glfw3webgpu and WebGPU-Cpp, wired as in space-game. GL-only tools (`PBRTool`, `noiseTool`) off on that path. Adapter and supported features printed, including the ones in the table above. | Mixed |
 | 1b | Clear color | Device, surface, resize, sRGB `CAMetalLayer` pin, all lifted from space-game. Window shows a solid color. | Game-specific |
 | 2 | Null GL scaffold | On the WebGPU path, glad's function pointers are filled with generated do-nothing stubs (`tools/genNullGL.py` → `src/platform/nullGLStubs.inl`, overrides in `nullGL.cpp`), so all existing GL code runs as a no-op. ImGui runs input-only. `OURCRAFT_WORLD=<world>` boots straight into a world. Game boots, hosts its server, generates and meshes chunks, and runs its loop with a cleared screen. GL path unchanged. | Game-specific |
-| 3 | Menus on wgpu2d | `wgpu2d` brought in (copied or as a shared dependency; decide here). gl2d call sites switched behind an alias as in space-game. Main menu, settings and pause screens draw; you can click into a world. | Game-specific |
+| 3a | Menus on wgpu2d | `wgpu2d` vendored in `thirdparty/wgpu2d` (space-game `71d8666`) and owning the device and frame. A shim `gl2d/gl2d.h` makes `gl2d` an alias for `wgpu2d` for the game and glui; gl2d compatibility in `wgpu2d.h` (gl2d text and fonts, 9-patch, `Camera::follow`, `createFromFileData`, `bind`, zero-filled `readTextureData`). `WGPU_SCREENSHOT_FRAME=N` saves a frame. Title menu and in-world HUD draw. | Game-specific |
+| 3b | 2D parity | Real `readTextureData` (GPU readback, `CopySrc` on sprite textures) so block colours and skins sent over the network are right. Screenshot the OpenGL build too (it draws gl2d fine on 4.1) and compare menus, settings, inventory and HUD side by side: text metrics, 9-patch edges, mip fringes, orientation of textures made with `createFromBuffer`. | Game-specific |
 | 4 | ImGui on WebGPU | Upgrade ImGui 1.85 to a release whose wgpu backend matches wgpu-native. Debug windows work, which you need for everything after this. | Game-specific |
 
 ### Phase B: an unlit world you can play
@@ -297,10 +298,12 @@ WebGPU wants that state declared up front in pipelines. So:
 1. **Reference renderer.** Is there a Windows or Linux machine with an
    NVIDIA/AMD GPU to run the GL build for reference screenshots? If not, the
    fallback is the YouTube devlogs and README images, which are good enough for
-   "roughly right" but not pass-by-pass.
-2. **Share or copy `wgpu2d`.** As a git submodule or FetchContent from
-   space-game-wgpu, or vendored? Sharing keeps fixes in one place but couples
-   the two repos' wgpu-native versions.
+   "roughly right" but not pass-by-pass. (For 2D only, the Mac's OpenGL 4.1
+   build is a reference: gl2d's shaders are `#version 330`, so menus and HUD
+   draw there.)
+2. ~~**Share or copy `wgpu2d`.**~~ Decided in milestone 3a: copied into
+   `thirdparty/wgpu2d`, free to diverge (device features, a 3D pass, gl2d
+   compatibility). Fixes don't flow back to space-game on their own.
 3. **Scope of Phase D.** Some effects (lens flare, color grading, god rays)
    could be deferred indefinitely once the game is playable and lit.
 4. **AGENTS.md.** Copy space-game's agent rules into this repo so every

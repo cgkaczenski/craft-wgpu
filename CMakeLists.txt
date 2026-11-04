@@ -101,8 +101,17 @@ if(RENDERER_WEBGPU)
 	)
 
 	FetchContent_MakeAvailable(glfw webgpu glfw3webgpu)
+
+	# The 2D layer (milestone 3): wgpu2d, with gl2d's API through a shim header
+	# so the game and glui compile unchanged.
+	add_subdirectory(thirdparty/wgpu2d)
+	set(GL2D_TARGET gl2dShim)
+
+	# PNG output for WGPU_SCREENSHOT_FRAME (src/platform/wgpuWindow.cpp).
+	add_subdirectory(thirdparty/stb_image_write)
 else()
 	add_subdirectory(thirdparty/glfw-3.3.7)
+	set(GL2D_TARGET gl2d)
 endif()
 
 # glad stays on both paths until milestones 2-4 move gl2d, glui, ImGui and the
@@ -110,7 +119,9 @@ endif()
 add_subdirectory(thirdparty/glad)
 add_subdirectory(thirdparty/stb_image)
 add_subdirectory(thirdparty/stb_truetype)
-add_subdirectory(thirdparty/gl2d)
+if(NOT RENDERER_WEBGPU)
+	add_subdirectory(thirdparty/gl2d)
+endif()
 add_subdirectory(thirdparty/raudio)
 add_subdirectory(thirdparty/glm)
 add_subdirectory(thirdparty/imgui-docking)
@@ -177,13 +188,13 @@ target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURC
 
 
 target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw glad stb_image stb_truetype 
-	gl2d raudio imgui fastNoiseSIMD FastNoise2 enet glui
+	${GL2D_TARGET} raudio imgui fastNoiseSIMD FastNoise2 enet glui
 	magic_enum safeSave profilerLib
 	libzstd_static assimp)
 
 if(RENDERER_WEBGPU)
 	target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RENDERER_WEBGPU=1)
-	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu)
+	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu stb_image_write)
 	if(APPLE)
 		# Pins the CAMetalLayer colorspace to sRGB. Compiled as C++ with
 		# -x objective-c++ rather than enable_language(OBJCXX), which would also

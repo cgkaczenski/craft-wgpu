@@ -1,6 +1,6 @@
 // macOS only (added to the build by CMakeLists.txt when RENDERER_WEBGPU and APPLE).
 
-#include "wgpuContext.h"
+#include "wgpuWindow.h"
 
 #if RENDERER_WEBGPU && defined(__APPLE__)
 
@@ -12,7 +12,7 @@
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/CAMetalLayer.h>
 
-namespace wgpuContext
+namespace wgpuWindow
 {
 
 // A CAMetalLayer with no colorspace (the default) shows its pixels in the

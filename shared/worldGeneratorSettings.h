@@ -65,10 +65,20 @@ struct WorldGeneratorSettings
 	bool loadSettings(const char *data);
 };
 
+#if RENDERER_WEBGPU
+// gl2d is an alias for wgpu2d on this path (wgpu2d's gl2d shim), and a type
+// cannot be forward-declared through an alias. Repeating the alias is allowed.
+namespace wgpu2d
+{
+	struct Texture;
+};
+namespace gl2d = wgpu2d;
+#else
 namespace gl2d
 {
 	struct Texture;
 };
+#endif
 
 struct WorldGenerator
 {

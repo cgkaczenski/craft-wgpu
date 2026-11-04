@@ -17,7 +17,7 @@
 #include <errorReporting.h>
 
 #if RENDERER_WEBGPU
-	#include "wgpuContext.h"
+	#include "wgpuWindow.h"
 	#include "nullGL.h"
 #endif
 
@@ -522,10 +522,10 @@ int main()
 	// WebGPU owns the window and only clears it for now. gl2d, glui, ImGui's
 	// GL backend and the 3D renderer still call OpenGL; with no context, those
 	// calls go to nullGL's do-nothing stubs until later milestones port them.
-	if (!wgpuContext::init(wind))
+	if (!wgpuWindow::init(wind))
 	{
 		std::cout << "WebGPU initialization failed.\n";
-		wgpuContext::shutdown();
+		wgpuWindow::shutdown();
 		glfwTerminate();
 		return 1;
 	}
@@ -666,11 +666,16 @@ int main()
 
 	#pragma region game logic
 
+	#if RENDERER_WEBGPU
+		// The frame must be open before gameLogic: wgpu2d's flush records into it.
+		wgpuWindow::beginFrame();
+	#endif
+
 		if (!gameLogic(augmentedDeltaTime))
 		{
 			closeGame();
 		#if RENDERER_WEBGPU
-			wgpuContext::shutdown();
+			wgpuWindow::shutdown();
 		#endif
 			return 0;
 		}
@@ -765,7 +770,7 @@ int main()
 
 		pl.start();
 	#if RENDERER_WEBGPU
-		wgpuContext::clearAndPresent(0.4f, 0.65f, 0.95f); // sky blue
+		wgpuWindow::endFrame();
 	#else
 		glfwSwapBuffers(wind);
 	#endif
@@ -785,7 +790,7 @@ int main()
 
 	closeGame();
 #if RENDERER_WEBGPU
-	wgpuContext::shutdown();
+	wgpuWindow::shutdown();
 #endif
 
 	//if you want the console to stay after closing the window
