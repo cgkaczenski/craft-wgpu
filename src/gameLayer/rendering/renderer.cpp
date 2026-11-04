@@ -2206,6 +2206,10 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 			i == ModelsManager::crateModel, noRotation(i));
 	}
 
+#if RENDERER_WEBGPU
+	wgpuWorld::setBlockGeometry(newVertexData);
+#endif
+
 	//todo optimize with buffer storage!!!! (don't forget to recreate the buffer!!)
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, vertexDataBuffer);
 	glBufferData(GL_SHADER_STORAGE_BUFFER, newVertexData.size() * sizeof(float), newVertexData.data(), GL_STATIC_DRAW);
@@ -2622,12 +2626,6 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 
 	glViewport(0, 0, screenX, screenY);
 
-#if RENDERER_WEBGPU
-	// Milestone 5: the WebGPU world pass (test cubes for now). Everything
-	// below still goes to the null GL scaffold.
-	wgpuWorld::render(c);
-#endif
-
 
 	
 	if (dayTime > 1.f)
@@ -2913,6 +2911,13 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	}
 
 #pragma endregion
+
+#if RENDERER_WEBGPU
+	// The WebGPU world pass: the opaque faces of the chunks that survived the
+	// frustum culling above. Everything below still goes to the null GL
+	// scaffold.
+	wgpuWorld::render(c, chunkVectorCopy);
+#endif
 
 
 

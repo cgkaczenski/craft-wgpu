@@ -232,8 +232,8 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // a WGPU_SCREENSHOT_FRAME capture can reach a menu with no one at the keyboard.
 // Actions: click@x,y (window points; the press lands on that frame, the
 // release on the next), move@x,y (the mouse moves there, no button: turns the
-// camera in game) and key@E or key@F9 (a letter or function key,
-// pressed then released the same way). Feeds the callbacks below; the mouse position is overridden from
+// camera in game), key@E or key@F9 (a letter or function key, pressed then
+// released the same way) and quit (closes the window, so shutdown runs). Feeds the callbacks below; the mouse position is overridden from
 // the first click on, without moving the real cursor.
 static glm::ivec2 scriptedMouse = {-1, -1};
 
@@ -265,7 +265,15 @@ static void playScriptedInput(GLFWwindow *window)
 
 		int frame = 0, x = 0, y = 0, function = 0;
 		char letter = 0;
-		if (std::sscanf(step.c_str(), "%d:key@F%d", &frame, &function) == 2 && frame == frameIndex
+		int quitFrame = 0;
+		char quitWord[5] = {};
+		if (std::sscanf(step.c_str(), "%d:%4s", &quitFrame, quitWord) == 2 && std::string(quitWord) == "quit"
+			&& quitFrame == frameIndex)
+		{
+			glfwSetWindowShouldClose(window, GLFW_TRUE);
+			std::cout << "input: frame " << quitFrame << " quit\n";
+		}
+		else if (std::sscanf(step.c_str(), "%d:key@F%d", &frame, &function) == 2 && frame == frameIndex
 			&& function >= 1 && function <= 12)
 		{
 			int key = GLFW_KEY_F1 + function - 1;

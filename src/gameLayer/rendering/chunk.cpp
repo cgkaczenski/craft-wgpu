@@ -1,5 +1,6 @@
 #include <chunk.h>
 #include <rendering/renderer.h>
+#include <rendering/wgpuWorld.h>
 #include <blocksLoader.h>
 #include <lightSystem.h>
 #include <iostream>
@@ -2434,6 +2435,10 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 			lights.data(), GL_STREAM_READ);
 		lightsElementCountSize = lights.size();
 
+	#if RENDERER_WEBGPU
+		wgpuWorld::setChunkFaces(this, opaqueGeometry);
+	#endif
+
 		//gpuBuffer->addChunk({data.x, data.z}, opaqueGeometry);
 	}
 
@@ -2548,6 +2553,10 @@ void Chunk::createGpuData()
 
 void Chunk::clearGpuData(BigGpuBuffer *gpuBuffer)
 {
+#if RENDERER_WEBGPU
+	wgpuWorld::removeChunk(this);
+#endif
+
 	glDeleteBuffers(1, &opaqueGeometryBuffer);
 	glDeleteBuffers(1, &opaqueGeometryIndex);
 	glDeleteBuffers(1, &transparentGeometryBuffer);
