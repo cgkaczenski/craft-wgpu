@@ -3108,13 +3108,23 @@ bool wgpuInit(WGPUSurface surface, int width, int height)
 	printAdapter(g.adapter);
 
 	// Device: the working connection to the GPU. Every later object is
-	//    created from it. No required features or limits: the defaults are
-	//    far above what a 2D sprite batcher needs.
+	//    created from it. No required features. The limits stay WebGPU's
+	//    defaults (an undefined field means the default) except
+	//    maxTextureArrayLayers: ourCraft's block textures go in one texture
+	//    array, ~450 layers, and the default allows 256. A device only gets
+	//    a limit above the default when it asks for it.
+	Limits adapterLimits = Default;
+	Limits requiredLimits = Default;
+	if (g.adapter.getLimits(&adapterLimits) == Status::Success)
+	{
+		requiredLimits.maxTextureArrayLayers = adapterLimits.maxTextureArrayLayers;
+	}
+
 	DeviceDescriptor deviceDesc = Default;
 	deviceDesc.label = StringView("space-game device");
 	deviceDesc.requiredFeatureCount = 0;
 	deviceDesc.requiredFeatures = nullptr;
-	deviceDesc.requiredLimits = nullptr;
+	deviceDesc.requiredLimits = &requiredLimits;
 	deviceDesc.defaultQueue.label = StringView("space-game queue");
 	deviceDesc.deviceLostCallbackInfo.mode = CallbackMode::AllowProcessEvents;
 	deviceDesc.deviceLostCallbackInfo.callback = onDeviceLost;
@@ -3550,6 +3560,12 @@ BindGroup wgpuTextureBindGroup(uint32_t textureId)
 {
 	if (textureId == 0 || textureId > textures.size()) { return nullptr; }
 	return textures[textureId - 1].bindGroup;
+}
+
+TextureView wgpuTextureView(uint32_t textureId)
+{
+	if (textureId == 0 || textureId > textures.size()) { return nullptr; }
+	return textures[textureId - 1].view;
 }
 
 void wgpuSurfaceSize(int &width, int &height)

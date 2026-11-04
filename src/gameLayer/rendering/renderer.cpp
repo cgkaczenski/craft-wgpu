@@ -1419,6 +1419,11 @@ float &getHitLensDirt();
 
 void Renderer::recreateBlocksTexturesBuffer(BlocksLoader &blocksLoader)
 {
+#if RENDERER_WEBGPU
+	// The handle table, slot by slot; the WebGPU world turns it into a
+	// texture array and a slot -> layer table (milestone 7).
+	wgpuWorld::setBlockTextures(blocksLoader.gpuIds);
+#endif
 
 	//glDeleteBuffers(1, &textureSamplerersBuffer);
 	//if (!textureSamplerersBuffer)
@@ -2207,7 +2212,7 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 	}
 
 #if RENDERER_WEBGPU
-	wgpuWorld::setBlockGeometry(newVertexData);
+	wgpuWorld::setBlockGeometry(newVertexData, newUVData);
 #endif
 
 	//todo optimize with buffer storage!!!! (don't forget to recreate the buffer!!)

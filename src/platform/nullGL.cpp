@@ -44,8 +44,11 @@ const GLubyte *APIENTRY getStringi(GLenum, GLuint) { return (const GLubyte *)"";
 GLuint APIENTRY createShader(GLenum) { return nextName++; }
 GLuint APIENTRY createProgram() { return nextName++; }
 
-// Bindless handles: 0 would read as "no texture".
-GLuint64 APIENTRY getTextureHandle(GLuint) { return nextName++; }
+// Bindless handles: 0 would read as "no texture". A handle carries its
+// texture's name in the low 32 bits, so BlocksLoader::gpuIds keep saying
+// which texture each slot shows; wgpuWorld reads them back that way (the
+// name of a texture made through gl2d is its wgpu2d id).
+GLuint64 APIENTRY getTextureHandle(GLuint texture) { return (GLuint64(1) << 32) | texture; }
 GLuint64 APIENTRY getTextureSamplerHandle(GLuint, GLuint) { return nextName++; }
 
 // Every shader compiles and links, so shader.cpp doesn't print errors.

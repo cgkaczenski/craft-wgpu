@@ -28,6 +28,11 @@ namespace render
 	// not a live texture.
 	wgpu::BindGroup wgpuTextureBindGroup(uint32_t textureId);
 
+	// ourCraft: the view (all mip levels) of a wgpu2d::Texture id, for a pass
+	// that reads sprite textures outside the sprite pipeline, such as the
+	// world's block texture array being filled. Null if the id is not live.
+	wgpu::TextureView wgpuTextureView(uint32_t textureId);
+
 	// The size the surface is currently configured at, in framebuffer pixels.
 	void wgpuSurfaceSize(int &width, int &height);
 

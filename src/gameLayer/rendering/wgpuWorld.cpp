@@ -10,6 +10,11 @@
 //   - the corner table as a read-only storage buffer the vertex shader
 //     indexes, as OpenGL's u_vertexData;
 //   - one draw per visible chunk, with firstInstance pointing at its range.
+// Milestone 7 textures them without bindless:
+//   - the UV table beside the corner table, both storage buffers;
+//   - one 128x128 texture_2d_array, a layer per distinct block texture, filled
+//     and mipmapped by blockTextures.wgsl from the loader's wgpu2d textures;
+//   - a slot -> layer table standing in for the u_textureSamplerers handles.
 
 #include "rendering/wgpuWorld.h"
 #include "rendering/camera.h"
@@ -22,6 +27,7 @@
 #include <glm/ext/matrix_clip_space.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <iterator>
@@ -70,7 +76,7 @@ namespace
 		RenderPipeline pipeline = nullptr;
 		PipelineLayout pipelineLayout = nullptr;
 		BindGroupLayout bindGroupLayout = nullptr;
-		BindGroup bindGroup = nullptr; // uniforms + corner table; remade when the table changes
+		BindGroup bindGroup = nullptr; // everything below; remade when any of it changes
 		Buffer uniformBuffer = nullptr;
 
 		// The corner table: kept on the CPU until it can be uploaded, and
@@ -78,6 +84,19 @@ namespace
 		std::vector<float> blockGeometry;
 		bool blockGeometryDirty = false;
 		Buffer blockGeometryBuffer = nullptr;
+		std::vector<float> blockUVs; // 4 corners x 2 floats per orientation
+		Buffer blockUVBuffer = nullptr;
+
+		// The loader's handle table (BlocksLoader::gpuIds) and what is built
+		// from it: the texture array, its view, the slot -> layer table.
+		std::vector<uint64_t> textureHandles;
+		bool texturesDirty = false;
+		Texture textureArray = nullptr;
+		TextureView textureArrayView = nullptr;
+		Buffer textureLayerBuffer = nullptr;
+		Sampler sampler = nullptr;
+		ComputePipeline fillPipeline = nullptr;
+		ComputePipeline downsamplePipeline = nullptr;
 
 		// The face arena and its allocator, in faces. `freeRanges` maps the
 		// first face of each free range to its length, kept merged.
@@ -200,7 +219,7 @@ namespace
 	{
 		ErrorScope scope("world bind group layout");
 
-		BindGroupLayoutEntry entries[2];
+		BindGroupLayoutEntry entries[6];
 		entries[0] = Default;
 		entries[0].binding = 0;
 		entries[0].visibility = ShaderStage::Vertex;
@@ -211,14 +230,35 @@ namespace
 		entries[0].texture.sampleType = TextureSampleType::BindingNotUsed;
 		entries[0].storageTexture.access = StorageTextureAccess::BindingNotUsed;
 
-		entries[1] = entries[0];
-		entries[1].binding = 1;
-		entries[1].buffer.type = BufferBindingType::ReadOnlyStorage;
-		entries[1].buffer.minBindingSize = 0;
+		// 1-3: the corner, UV and slot -> layer tables, read by the vertex stage.
+		for (uint32_t i = 1; i <= 3; i++)
+		{
+			entries[i] = entries[0];
+			entries[i].binding = i;
+			entries[i].buffer.type = BufferBindingType::ReadOnlyStorage;
+			entries[i].buffer.minBindingSize = 0;
+		}
+
+		// 4: the block texture array; 5: its sampler. Fragment stage.
+		entries[4] = entries[0];
+		entries[4].binding = 4;
+		entries[4].visibility = ShaderStage::Fragment;
+		entries[4].buffer.type = BufferBindingType::BindingNotUsed;
+		entries[4].buffer.minBindingSize = 0;
+		entries[4].texture.sampleType = TextureSampleType::Float;
+		entries[4].texture.viewDimension = TextureViewDimension::_2DArray;
+		entries[4].texture.multisampled = false;
+
+		entries[5] = entries[0];
+		entries[5].binding = 5;
+		entries[5].visibility = ShaderStage::Fragment;
+		entries[5].buffer.type = BufferBindingType::BindingNotUsed;
+		entries[5].buffer.minBindingSize = 0;
+		entries[5].sampler.type = SamplerBindingType::Filtering;
 
 		BindGroupLayoutDescriptor layoutDesc = Default;
 		layoutDesc.label = StringView("world bind group layout");
-		layoutDesc.entryCount = 2;
+		layoutDesc.entryCount = 6;
 		layoutDesc.entries = entries;
 		w.bindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		if (!w.bindGroupLayout) { return false; }
@@ -324,52 +364,325 @@ namespace
 		return w.pipeline && !invalid;
 	}
 
-	// The corner table and the bind group that points at it. The bind group
-	// names the buffer, so a new table means a new bind group too.
+	Buffer makeStorageBuffer(const void *data, uint64_t bytes, const char *label)
+	{
+		BufferDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.usage = BufferUsage::Storage | BufferUsage::CopyDst;
+		desc.size = std::max<uint64_t>(bytes, 4);
+		desc.mappedAtCreation = false;
+		Buffer buffer = wgpuDevice().createBuffer(desc);
+		if (buffer && bytes) { wgpuQueue().writeBuffer(buffer, 0, data, bytes); }
+		return buffer;
+	}
+
+	// The corner and UV tables, as storage buffers.
 	bool uploadBlockGeometry()
 	{
-		if (!w.blockGeometryDirty && w.bindGroup) { return true; }
-		if (w.blockGeometry.empty()) { return false; }
+		ErrorScope scope("world corner and UV tables");
 
-		ErrorScope scope("world corner table");
-
-		if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
 		if (w.blockGeometryBuffer) { w.blockGeometryBuffer.release(); w.blockGeometryBuffer = nullptr; }
+		if (w.blockUVBuffer) { w.blockUVBuffer.release(); w.blockUVBuffer = nullptr; }
 
-		const uint64_t bytes = w.blockGeometry.size() * sizeof(float);
-		BufferDescriptor bufferDesc = Default;
-		bufferDesc.label = StringView("world corner table");
-		bufferDesc.usage = BufferUsage::Storage | BufferUsage::CopyDst;
-		bufferDesc.size = bytes;
-		bufferDesc.mappedAtCreation = false;
-		w.blockGeometryBuffer = wgpuDevice().createBuffer(bufferDesc);
-		if (!w.blockGeometryBuffer) { return false; }
-		wgpuQueue().writeBuffer(w.blockGeometryBuffer, 0, w.blockGeometry.data(), bytes);
+		w.blockGeometryBuffer = makeStorageBuffer(w.blockGeometry.data(),
+			w.blockGeometry.size() * sizeof(float), "world corner table");
+		w.blockUVBuffer = makeStorageBuffer(w.blockUVs.data(),
+			w.blockUVs.size() * sizeof(float), "world UV table");
+		if (!w.blockGeometryBuffer || !w.blockUVBuffer || scope.failed()) { return false; }
 
-		BindGroupEntry entries[2];
-		entries[0] = Default;
-		entries[0].binding = 0;
+		std::cout << "WebGPU world corner table: " << w.blockGeometry.size() / 12
+			<< " orientations, UV table " << w.blockUVs.size() / 8 << "\n";
+		return true;
+	}
+
+	// ---- Block textures --------------------------------------------------
+
+	constexpr uint32_t blockTextureSize = 128;
+	constexpr uint32_t blockTextureLevels = 5; // 128 down to 8: GL's GL_TEXTURE_MAX_LOD 4
+
+	bool ensureBlockTexturePipelines()
+	{
+		if (w.fillPipeline && w.downsamplePipeline) { return true; }
+
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/blockTextures.wgsl");
+		if (!module) { return false; }
+
+		ErrorScope scope("world block texture pipelines");
+
+		// layout = null: an automatic layout, built from the bindings the
+		// entry point uses, read back with getBindGroupLayout(0).
+		ComputePipelineDescriptor desc = Default;
+		desc.layout = nullptr;
+		desc.compute.nextInChain = nullptr;
+		desc.compute.module = module;
+		desc.compute.constantCount = 0;
+		desc.compute.constants = nullptr;
+
+		desc.label = StringView("block texture fill");
+		desc.compute.entryPoint = StringView("fill");
+		w.fillPipeline = wgpuDevice().createComputePipeline(desc);
+
+		desc.label = StringView("block texture downsample");
+		desc.compute.entryPoint = StringView("downsample");
+		w.downsamplePipeline = wgpuDevice().createComputePipeline(desc);
+
+		module.release();
+		return w.fillPipeline && w.downsamplePipeline && !scope.failed();
+	}
+
+	TextureView makeArrayView(uint32_t baseLevel, uint32_t levels, uint32_t baseLayer, uint32_t layers,
+		TextureViewDimension dimension, TextureUsage usage, const char *label)
+	{
+		TextureViewDescriptor viewDesc = Default;
+		viewDesc.label = StringView(label);
+		viewDesc.format = TextureFormat::RGBA8Unorm;
+		viewDesc.dimension = dimension;
+		viewDesc.baseMipLevel = baseLevel;
+		viewDesc.mipLevelCount = levels;
+		viewDesc.baseArrayLayer = baseLayer;
+		viewDesc.arrayLayerCount = layers;
+		viewDesc.aspect = TextureAspect::All;
+		viewDesc.usage = usage;
+		return w.textureArray.createView(viewDesc);
+	}
+
+	// Builds the texture array and the slot -> layer table from the handle
+	// table. One layer per distinct texture: missing maps all point at the
+	// loader's four defaults, so ~2000 slots share far fewer textures.
+	bool buildBlockTextures()
+	{
+		if (w.textureHandles.empty()) { return false; }
+		if (!ensureBlockTexturePipelines()) { return false; }
+		const auto start = std::chrono::steady_clock::now();
+
+		// A handle names a texture in its low 32 bits. Anything that is not a
+		// live wgpu2d texture (a GL-only name, a zero) shows the loader's
+		// default texture, slot 0, as a missing bindless handle would not.
+		auto textureOf = [](uint64_t handle) -> uint32_t
+		{
+			const uint32_t id = (uint32_t)(handle & 0xFFFFFFFFu);
+			return ((handle >> 32) && wgpuTextureView(id)) ? id : 0;
+		};
+		const uint32_t fallback = textureOf(w.textureHandles[0]);
+		if (!fallback)
+		{
+			std::cerr << "WebGPU world: the default block texture is not a wgpu2d texture\n";
+			return false;
+		}
+
+		std::vector<uint32_t> layerOfSlot(w.textureHandles.size());
+		std::vector<uint32_t> textureOfLayer;
+		std::unordered_map<uint32_t, uint32_t> layerOfTexture;
+		for (size_t slot = 0; slot < w.textureHandles.size(); slot++)
+		{
+			uint32_t id = textureOf(w.textureHandles[slot]);
+			if (!id) { id = fallback; }
+			auto found = layerOfTexture.find(id);
+			if (found == layerOfTexture.end())
+			{
+				found = layerOfTexture.emplace(id, (uint32_t)textureOfLayer.size()).first;
+				textureOfLayer.push_back(id);
+			}
+			layerOfSlot[slot] = found->second;
+		}
+
+		Limits limits = Default;
+		wgpuDevice().getLimits(&limits);
+		const uint32_t layers = (uint32_t)textureOfLayer.size();
+		if (layers > limits.maxTextureArrayLayers)
+		{
+			std::cerr << "WebGPU world: " << layers << " block textures, but maxTextureArrayLayers is "
+				<< limits.maxTextureArrayLayers << "\n";
+			return false;
+		}
+
+		ErrorScope scope("world block texture array");
+
+		if (w.textureArrayView) { w.textureArrayView.release(); w.textureArrayView = nullptr; }
+		if (w.textureArray) { w.textureArray.destroy(); w.textureArray.release(); w.textureArray = nullptr; }
+		if (w.textureLayerBuffer) { w.textureLayerBuffer.release(); w.textureLayerBuffer = nullptr; }
+
+		TextureDescriptor texDesc = Default;
+		texDesc.label = StringView("world block textures");
+		texDesc.usage = TextureUsage::TextureBinding | TextureUsage::StorageBinding;
+		texDesc.dimension = TextureDimension::_2D; // an array is a 2D texture with layers
+		texDesc.size.width = blockTextureSize;
+		texDesc.size.height = blockTextureSize;
+		texDesc.size.depthOrArrayLayers = layers;
+		texDesc.format = TextureFormat::RGBA8Unorm;
+		texDesc.mipLevelCount = blockTextureLevels;
+		texDesc.sampleCount = 1;
+		texDesc.viewFormatCount = 0;
+		texDesc.viewFormats = nullptr;
+		w.textureArray = wgpuDevice().createTexture(texDesc);
+		if (!w.textureArray) { return false; }
+
+		CommandEncoderDescriptor encoderDesc = Default;
+		encoderDesc.label = StringView("world block textures");
+		CommandEncoder encoder = wgpuDevice().createCommandEncoder(encoderDesc);
+		ComputePassDescriptor passDesc = Default;
+		passDesc.label = StringView("world block textures");
+		passDesc.timestampWrites = nullptr;
+		ComputePassEncoder pass = encoder.beginComputePass(passDesc);
+
+		std::vector<TextureView> views;
+		std::vector<BindGroup> groups;
+		views.reserve(layers + 2 * blockTextureLevels);
+		groups.reserve(layers + blockTextureLevels);
+
+		// Level 0: one dispatch per texture, into its own layer. A storage
+		// binding is one level of one layer here, so each gets a 2D view.
+		BindGroupLayout fillLayout = w.fillPipeline.getBindGroupLayout(0);
+		pass.setPipeline(w.fillPipeline);
+		for (uint32_t layer = 0; layer < layers; layer++)
+		{
+			TextureView dst = makeArrayView(0, 1, layer, 1, TextureViewDimension::_2D,
+				TextureUsage::StorageBinding, "block texture layer");
+			views.push_back(dst);
+
+			BindGroupEntry entries[2];
+			entries[0] = Default;
+			entries[0].binding = 0;
+			entries[0].textureView = wgpuTextureView(textureOfLayer[layer]);
+			entries[1] = Default;
+			entries[1].binding = 1;
+			entries[1].textureView = dst;
+
+			BindGroupDescriptor groupDesc = Default;
+			groupDesc.label = StringView("block texture fill");
+			groupDesc.layout = fillLayout;
+			groupDesc.entryCount = 2;
+			groupDesc.entries = entries;
+			BindGroup group = wgpuDevice().createBindGroup(groupDesc);
+			groups.push_back(group);
+
+			pass.setBindGroup(0, group, 0, nullptr);
+			pass.dispatchWorkgroups(blockTextureSize / 8, blockTextureSize / 8, 1);
+		}
+		fillLayout.release();
+
+		// Levels 1-4: every layer at once, through 2D-array views of one
+		// level each. WebGPU orders the dispatches; no barrier to write.
+		BindGroupLayout downsampleLayout = w.downsamplePipeline.getBindGroupLayout(0);
+		pass.setPipeline(w.downsamplePipeline);
+		for (uint32_t level = 1; level < blockTextureLevels; level++)
+		{
+			TextureView upper = makeArrayView(level - 1, 1, 0, layers, TextureViewDimension::_2DArray,
+				TextureUsage::TextureBinding, "block texture upper level");
+			TextureView lower = makeArrayView(level, 1, 0, layers, TextureViewDimension::_2DArray,
+				TextureUsage::StorageBinding, "block texture lower level");
+			views.push_back(upper);
+			views.push_back(lower);
+
+			BindGroupEntry entries[2];
+			entries[0] = Default;
+			entries[0].binding = 2;
+			entries[0].textureView = upper;
+			entries[1] = Default;
+			entries[1].binding = 3;
+			entries[1].textureView = lower;
+
+			BindGroupDescriptor groupDesc = Default;
+			groupDesc.label = StringView("block texture downsample");
+			groupDesc.layout = downsampleLayout;
+			groupDesc.entryCount = 2;
+			groupDesc.entries = entries;
+			BindGroup group = wgpuDevice().createBindGroup(groupDesc);
+			groups.push_back(group);
+
+			const uint32_t size = blockTextureSize >> level;
+			pass.setBindGroup(0, group, 0, nullptr);
+			pass.dispatchWorkgroups((size + 7) / 8, (size + 7) / 8, layers);
+		}
+		downsampleLayout.release();
+
+		pass.end();
+		CommandBufferDescriptor commandDesc = Default;
+		commandDesc.label = StringView("world block textures");
+		CommandBuffer commands = encoder.finish(commandDesc);
+		wgpuQueue().submit(1, &commands);
+		commands.release();
+		pass.release();
+		encoder.release();
+		for (BindGroup &group : groups) { if (group) { group.release(); } }
+		for (TextureView &view : views) { if (view) { view.release(); } }
+
+		w.textureArrayView = makeArrayView(0, blockTextureLevels, 0, layers, TextureViewDimension::_2DArray,
+			TextureUsage::TextureBinding, "world block textures");
+		w.textureLayerBuffer = makeStorageBuffer(layerOfSlot.data(),
+			layerOfSlot.size() * sizeof(uint32_t), "world texture layer table");
+
+		if (!w.sampler)
+		{
+			SamplerDescriptor samplerDesc = Default;
+			samplerDesc.label = StringView("world block sampler");
+			samplerDesc.addressModeU = AddressMode::Repeat;
+			samplerDesc.addressModeV = AddressMode::Repeat;
+			samplerDesc.addressModeW = AddressMode::Repeat;
+			samplerDesc.magFilter = FilterMode::Nearest;
+			samplerDesc.minFilter = FilterMode::Nearest;
+			samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
+			samplerDesc.lodMinClamp = 0.0f;
+			samplerDesc.lodMaxClamp = (float)(blockTextureLevels - 1);
+			samplerDesc.compare = CompareFunction::Undefined;
+			samplerDesc.maxAnisotropy = 1; // GL asked for 4; WebGPU allows it only with linear filters
+			w.sampler = wgpuDevice().createSampler(samplerDesc);
+		}
+
+		if (!w.textureArrayView || !w.textureLayerBuffer || !w.sampler || scope.failed()) { return false; }
+
+		const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+		std::cout << "WebGPU world block textures: " << layers << " layers for " << w.textureHandles.size()
+			<< " slots, " << blockTextureSize << "x" << blockTextureSize << " x " << blockTextureLevels
+			<< " levels, recorded in " << ms << " ms\n";
+		return true;
+	}
+
+	// Brings the tables, the texture array and the bind group naming them up
+	// to date. The bind group holds the buffers and views themselves, so it
+	// is remade after any of them is.
+	bool updateResources()
+	{
+		bool changed = false;
+
+		if (w.blockGeometryDirty)
+		{
+			if (w.blockGeometry.empty() || !uploadBlockGeometry()) { return false; }
+			w.blockGeometryDirty = false;
+			changed = true;
+		}
+		if (w.texturesDirty)
+		{
+			if (!buildBlockTextures()) { w.texturesDirty = false; w.failed = true; return false; }
+			w.texturesDirty = false;
+			changed = true;
+		}
+		if (!changed && w.bindGroup) { return true; }
+		if (!w.blockGeometryBuffer || !w.textureArrayView) { return false; }
+
+		ErrorScope scope("world bind group");
+		if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
+
+		BindGroupEntry entries[6];
+		for (int i = 0; i < 6; i++) { entries[i] = Default; entries[i].binding = i; }
 		entries[0].buffer = w.uniformBuffer;
-		entries[0].offset = 0;
 		entries[0].size = sizeof(Uniforms);
-		entries[1] = Default;
-		entries[1].binding = 1;
 		entries[1].buffer = w.blockGeometryBuffer;
-		entries[1].offset = 0;
-		entries[1].size = bytes;
+		entries[1].size = w.blockGeometryBuffer.getSize();
+		entries[2].buffer = w.blockUVBuffer;
+		entries[2].size = w.blockUVBuffer.getSize();
+		entries[3].buffer = w.textureLayerBuffer;
+		entries[3].size = w.textureLayerBuffer.getSize();
+		entries[4].textureView = w.textureArrayView;
+		entries[5].sampler = w.sampler;
 
 		BindGroupDescriptor groupDesc = Default;
 		groupDesc.label = StringView("world bind group");
 		groupDesc.layout = w.bindGroupLayout;
-		groupDesc.entryCount = 2;
+		groupDesc.entryCount = 6;
 		groupDesc.entries = entries;
 		w.bindGroup = wgpuDevice().createBindGroup(groupDesc);
-		if (!w.bindGroup || scope.failed()) { return false; }
-
-		w.blockGeometryDirty = false;
-		std::cout << "WebGPU world corner table: " << w.blockGeometry.size() / 12
-			<< " orientations (" << bytes << " bytes)\n";
-		return true;
+		return w.bindGroup && !scope.failed();
 	}
 
 	// The depth texture has to match the color attachment's size exactly, so
@@ -435,10 +748,17 @@ namespace
 	}
 }
 
-void setBlockGeometry(const std::vector<float> &vertexData)
+void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<float> &uvData)
 {
 	w.blockGeometry = vertexData;
+	w.blockUVs = uvData;
 	w.blockGeometryDirty = true;
+}
+
+void setBlockTextures(const std::vector<uint64_t> &handles)
+{
+	w.textureHandles = handles;
+	w.texturesDirty = true;
 }
 
 void setChunkFaces(const Chunk *chunk, const std::vector<int> &faces)
@@ -473,7 +793,7 @@ void removeChunk(const Chunk *chunk)
 void render(Camera &camera, const std::vector<Chunk *> &visibleChunks)
 {
 	if (!initialize()) { return; }
-	if (!uploadBlockGeometry()) { return; }
+	if (!updateResources()) { return; }
 
 	int width = 0, height = 0;
 	wgpuSurfaceSize(width, height);
@@ -558,6 +878,13 @@ void shutdown()
 	if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
 	if (w.uniformBuffer) { w.uniformBuffer.release(); w.uniformBuffer = nullptr; }
 	if (w.blockGeometryBuffer) { w.blockGeometryBuffer.release(); w.blockGeometryBuffer = nullptr; }
+	if (w.blockUVBuffer) { w.blockUVBuffer.release(); w.blockUVBuffer = nullptr; }
+	if (w.textureLayerBuffer) { w.textureLayerBuffer.release(); w.textureLayerBuffer = nullptr; }
+	if (w.textureArrayView) { w.textureArrayView.release(); w.textureArrayView = nullptr; }
+	if (w.textureArray) { w.textureArray.destroy(); w.textureArray.release(); w.textureArray = nullptr; }
+	if (w.sampler) { w.sampler.release(); w.sampler = nullptr; }
+	if (w.fillPipeline) { w.fillPipeline.release(); w.fillPipeline = nullptr; }
+	if (w.downsamplePipeline) { w.downsamplePipeline.release(); w.downsamplePipeline = nullptr; }
 	if (w.bindGroupLayout) { w.bindGroupLayout.release(); w.bindGroupLayout = nullptr; }
 	if (w.arena) { w.arena.release(); w.arena = nullptr; }
 	w = World{};
