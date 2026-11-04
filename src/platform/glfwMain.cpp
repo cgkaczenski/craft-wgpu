@@ -18,6 +18,7 @@
 
 #if RENDERER_WEBGPU
 	#include "wgpuContext.h"
+	#include "nullGL.h"
 #endif
 
 
@@ -518,29 +519,18 @@ int main()
 	glfwSetScrollCallback(wind, scrollCallback);
 
 #if RENDERER_WEBGPU
-	// Milestone 1b: WebGPU clears the window and nothing else runs. gl2d, ImGui,
-	// audio and the game need OpenGL until milestones 2-4 port them.
+	// WebGPU owns the window and only clears it for now. gl2d, glui, ImGui's
+	// GL backend and the 3D renderer still call OpenGL; with no context, those
+	// calls go to nullGL's do-nothing stubs until later milestones port them.
+	if (!wgpuContext::init(wind))
 	{
-		if (!wgpuContext::init(wind))
-		{
-			std::cout << "WebGPU initialization failed.\n";
-			wgpuContext::shutdown();
-			glfwTerminate();
-			return 1;
-		}
-
-		while (!glfwWindowShouldClose(wind))
-		{
-			glfwPollEvents();
-			wgpuContext::clearAndPresent(0.4f, 0.65f, 0.95f); // sky blue
-		}
-
+		std::cout << "WebGPU initialization failed.\n";
 		wgpuContext::shutdown();
 		glfwTerminate();
-		return 0;
+		return 1;
 	}
-#endif
-
+	nullGL::install();
+#else
 	permaAssertComment(gladLoadGL(), "err initializing glad");
 	std::cout << "OpenGL " << glGetString(GL_VERSION) << "\n";
 
@@ -560,6 +550,7 @@ int main()
 
 	// example
 	bool bindless = HasExtension("GL_ARB_bindless_texture");
+#endif
 
 	//enableReportGlErrors();
 
@@ -579,7 +570,11 @@ int main()
 		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 		//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
+	#if !RENDERER_WEBGPU
+		// Extra OS windows need a renderer backend to draw them. The WebGPU path
+		// has none until milestone 4.
 		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
+	#endif
 		//io.ConfigViewportsNoAutoMerge = true;
 		//io.ConfigViewportsNoTaskBarIcon = true;
 	
@@ -591,8 +586,14 @@ int main()
 			style.Colors[ImGuiCol_DockingEmptyBg].w = 0.f; //always
 		}
 	
+	#if RENDERER_WEBGPU
+		// Input and window size only. ImGui windows are built every frame but
+		// not drawn until milestone 4 adds the WebGPU backend.
+		ImGui_ImplGlfw_InitForOther(wind, true);
+	#else
 		ImGui_ImplGlfw_InitForOpenGL(wind, true);
 		ImGui_ImplOpenGL3_Init("#version 330");
+	#endif
 
 		//ImGuiIO &io = ImGui::GetIO();
 		//io.Fonts->AddFontFromFileTTF("path/to/your/font.ttf", 24.0f);
@@ -601,6 +602,11 @@ int main()
 		ImFont *font = io.Fonts->AddFontDefault(&fontConfig);
 		font->Scale = 1.5f; // Scale factor to make the default font larger
 		io.FontDefault = font;
+
+	#if RENDERER_WEBGPU
+		// The OpenGL backend builds the font atlas; ImGui::NewFrame asserts it exists.
+		io.Fonts->Build();
+	#endif
 	#endif
 #pragma endregion
 
@@ -649,7 +655,9 @@ int main()
 
 	#pragma region imgui
 		#if REMOVE_IMGUI == 0
+			#if !RENDERER_WEBGPU
 			ImGui_ImplOpenGL3_NewFrame();
+			#endif
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
 			ImGui::DockSpaceOverViewport(ImGui::GetMainViewport());
@@ -661,6 +669,9 @@ int main()
 		if (!gameLogic(augmentedDeltaTime))
 		{
 			closeGame();
+		#if RENDERER_WEBGPU
+			wgpuContext::shutdown();
+		#endif
 			return 0;
 		}
 
@@ -726,6 +737,7 @@ int main()
 		#pragma region imgui
 				#if REMOVE_IMGUI == 0
 				ImGui::Render();
+				#if !RENDERER_WEBGPU
 				int display_w, display_h;
 				glfwGetFramebufferSize(wind, &display_w, &display_h);
 				glViewport(0, 0, display_w, display_h);
@@ -741,6 +753,7 @@ int main()
 					ImGui::RenderPlatformWindowsDefault();
 					glfwMakeContextCurrent(backup_current_context);
 				}
+				#endif
 			#endif
 		#pragma endregion
 
@@ -751,7 +764,11 @@ int main()
 		//}
 
 		pl.start();
+	#if RENDERER_WEBGPU
+		wgpuContext::clearAndPresent(0.4f, 0.65f, 0.95f); // sky blue
+	#else
 		glfwSwapBuffers(wind);
+	#endif
 		pl.end();
 
 		//if (pl.rezult.timeSeconds * 1000 > (17))
@@ -767,6 +784,9 @@ int main()
 	}
 
 	closeGame();
+#if RENDERER_WEBGPU
+	wgpuContext::shutdown();
+#endif
 
 	//if you want the console to stay after closing the window
 	//std::cin.clear();

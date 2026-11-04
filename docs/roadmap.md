@@ -193,9 +193,9 @@ ourCraft. Phases B–D are where the new 3D concepts are.
 
 | # | Milestone | Ends with | Type |
 |---|---|---|---|
-| 1a | Deps and adapter | `RENDERER_WEBGPU` CMake option (default OFF) with WebGPU-distribution, glfw3webgpu and WebGPU-Cpp, wired as in space-game. GL-only targets (`PBRTool`, `noiseTool`, glad) off on that path. Adapter and supported features printed, including the ones in the table above. | Mixed |
+| 1a | Deps and adapter | `RENDERER_WEBGPU` CMake option (default OFF) with WebGPU-distribution, glfw3webgpu and WebGPU-Cpp, wired as in space-game. GL-only tools (`PBRTool`, `noiseTool`) off on that path. Adapter and supported features printed, including the ones in the table above. | Mixed |
 | 1b | Clear color | Device, surface, resize, sRGB `CAMetalLayer` pin, all lifted from space-game. Window shows a solid color. | Game-specific |
-| 2 | The seam | Every GL call outside `rendering/` moved behind renderer functions (texture upload, skins, viewport, profiler, error reporting). On the WebGPU path, the renderer methods in the interface above are stubs. Game boots, generates a world and runs its loop with a cleared screen. GL path still compiles. | Game-specific |
+| 2 | Null GL scaffold | On the WebGPU path, glad's function pointers are filled with generated do-nothing stubs (`tools/genNullGL.py` → `src/platform/nullGLStubs.inl`, overrides in `nullGL.cpp`), so all existing GL code runs as a no-op. ImGui runs input-only. `OURCRAFT_WORLD=<world>` boots straight into a world. Game boots, hosts its server, generates and meshes chunks, and runs its loop with a cleared screen. GL path unchanged. | Game-specific |
 | 3 | Menus on wgpu2d | `wgpu2d` brought in (copied or as a shared dependency; decide here). gl2d call sites switched behind an alias as in space-game. Main menu, settings and pause screens draw; you can click into a world. | Game-specific |
 | 4 | ImGui on WebGPU | Upgrade ImGui 1.85 to a release whose wgpu backend matches wgpu-native. Debug windows work, which you need for everything after this. | Game-specific |
 
@@ -244,6 +244,11 @@ for the 2D layer (milestone 3). It does not work for the 3D renderer.
 `renderer.cpp` changes GL state implicitly across thousands of lines, and
 WebGPU wants that state declared up front in pipelines. So:
 
+- Until a subsystem is ported, it keeps running on the **null GL scaffold**
+  (milestone 2): no context, every GL call a stub. A milestone is done when
+  its subsystem draws through WebGPU and no longer needs the scaffold. When
+  nothing does, delete `nullGL.*`, `nullGLStubs.inl`, `tools/genNullGL.py`
+  and glad.
 - Write a new `WgpuRenderer` beside the old one, with the **same public
   methods** listed in the interface section. Pick between them at compile
   time with `RENDERER_WEBGPU`. Game code includes one header and doesn't know

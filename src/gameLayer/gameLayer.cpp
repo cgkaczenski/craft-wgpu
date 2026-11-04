@@ -10,6 +10,7 @@
 #include "threadStuff.h"
 #include <thread>
 #include <ctime>
+#include <cstdlib>
 #include "multyPlayer/server.h"
 #include "multyPlayer/createConnection.h"
 #include <enet/enet.h>
@@ -537,6 +538,19 @@ bool gameLogic(float deltaTime)
 
 
 	static char ipString[50] = {};
+
+	// Dev shortcut: OURCRAFT_WORLD=<folder in resources/worlds> skips the menu
+	// once at startup. The WebGPU path needs it until milestone 3 draws menus.
+	static bool triedAutoStart = false;
+	if (!gameStarted && !triedAutoStart)
+	{
+		triedAutoStart = true;
+		const char *world = std::getenv("OURCRAFT_WORLD");
+		if (world && *world && !hostServer(world))
+		{
+			std::cout << "OURCRAFT_WORLD=" << world << ": " << lastError << "\n";
+		}
+	}
 
 	if (!gameStarted)
 	{
