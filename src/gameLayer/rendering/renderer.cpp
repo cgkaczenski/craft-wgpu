@@ -2682,6 +2682,55 @@ struct DrawElementsIndirectCommand
 };
 
 
+#if RENDERER_WEBGPU
+// Milestone 13: one sun shadow cascade's matrix, as renderShadow's
+// renderOneFrustum builds it, kept in double throughout (GL stores a float
+// mat4 of world coordinates). OpenGL clip space, world coordinates;
+// wgpuWorld makes it camera-relative and 0..1 deep. The corners of the
+// camera frustum from GL depth -1 to zEnd, turned so the sun is +z, grown to
+// a cube as long as their diagonal (the box keeps its size as the camera
+// turns), then an orthographic box 500 blocks deeper toward and away from
+// the sun, so blockers outside the view still cast.
+//
+// One difference from GL: GL starts the running maximum at
+// -numeric_limits<double>::min(), the smallest positive double negated
+// (about -2e-308, not the most negative), so its box always reaches back to
+// 0 on each axis: around the world origin that changes little, but a few
+// hundred blocks out it spreads the first cascade's 2048 texels over
+// hundreds of blocks. Here the maximum starts at lowest().
+static glm::dmat4 sunCascadeMatrix(Camera &c, glm::vec3 sunPos, double zEnd)
+{
+	const double zStart = -1;
+	const double depthMargin = 500; // GL's farPlane
+
+	const glm::dmat4 inverseViewProjection = glm::inverse(c.getViewProjectionWithPositionMatrixDouble());
+	const glm::dquat lightRotation = glm::conjugate(glm::dquat(glm::rotation(glm::vec3(0, 0, 1), sunPos)));
+
+	glm::dvec3 boxMin(std::numeric_limits<double>::max());
+	glm::dvec3 boxMax(std::numeric_limits<double>::lowest());
+	for (int x = -1; x <= 1; x += 2)
+		for (int y = -1; y <= 1; y += 2)
+			for (int z = -1; z <= 1; z += 2)
+			{
+				glm::dvec4 corner = inverseViewProjection * glm::dvec4(x, y, z == -1 ? zStart : zEnd, 1.0);
+				corner /= corner.w;
+				const glm::dvec3 turned = lightRotation * glm::dvec3(corner);
+				boxMin = glm::min(boxMin, turned);
+				boxMax = glm::max(boxMax, turned);
+			}
+
+	// Each axis as long as the diagonal, about its own center.
+	const double diagonal = glm::distance(boxMax, boxMin);
+	const glm::dvec3 center = (boxMin + boxMax) * 0.5;
+	boxMin = center - diagonal * 0.5;
+	boxMax = center + diagonal * 0.5;
+
+	const glm::dmat4 lightProjection = glm::ortho(boxMin.x, boxMax.x, boxMin.y, boxMax.y,
+		-(boxMax.z + depthMargin), -(boxMin.z - depthMargin));
+	return lightProjection * glm::mat4_cast(lightRotation);
+}
+#endif
+
 void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSystem, Camera &c,
 	ProgramData &programData, BlocksLoader &blocksLoader, ClientEntityManager &entityManager, 
 	ModelsManager &modelsManager, 
@@ -3045,6 +3094,19 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	lighting.useLights = getShadingSettings().useLights != 0;
 	lighting.maxLights = getShadingSettings().maxLights;
 	lighting.aoTexture = programData.aoTexture.id;
+	// Milestone 13: the sun's shadow cascades, at GL's depths (passed as
+	// floats there, so the same rounding here). OURCRAFT_SHADOWS=0|1|2
+	// overrides the setting for test runs.
+	lighting.shadows = getShadingSettings().shadows;
+	if (const char *env = std::getenv("OURCRAFT_SHADOWS")) { lighting.shadows = glm::clamp(std::atoi(env), 0, 2); }
+	if (lighting.shadows)
+	{
+		const float cascadeEnds[3] = { 0.9985f, 0.9995f, 0.99994f };
+		for (int i = 0; i < 3; i++)
+		{
+			lighting.shadowCascades[i] = sunCascadeMatrix(c, mainLightPosition, cascadeEnds[i]);
+		}
+	}
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif

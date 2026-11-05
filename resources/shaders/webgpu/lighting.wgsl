@@ -11,9 +11,10 @@
 //   lights    the same model for each nearby light block, gated by GL's
 //             distance and light-level tests: pointLights
 //   paint     painted blocks recolored through HSV: paintAlbedo
+//   shadow    the sun's cascaded shadow maps (milestone 13), on the sun term
+//             and on the sky part of the ambient: sunShadow
 //
-// Not here yet: shadows (milestone 13; GL's default `shadows` 0 makes the
-// shadow term 1, so this is GL's default look), fog toward the sky (14),
+// Not here yet: fog toward the sky (14),
 // SSR (17), the underwater tint and caustics (18), and animated water
 // normals. GL's BRDF LUT only feeds its physically accurate ambient, which a
 // constant switches off (physicallyAccurateReflections), so its output never
@@ -29,6 +30,107 @@ const PI = 3.14159265359;
 // GL's u_ao: the corner darkening texture (ao.png), mirrored in u.
 @group(0) @binding(7) var aoTexture: texture_2d<f32>;
 @group(0) @binding(8) var aoSampler: sampler;
+
+// ---- Sun shadows (milestone 13; defaultShader.frag's shadowCalc2) --------
+
+// The cascades (GL's u_cascadedShadowsMaps): depth seen from the sun,
+// nearest cascade first, 2048, 2048 and 1024 texels square. While shadows
+// are off, and in the shadow passes themselves, a 1x1 stand-in is bound.
+@group(0) @binding(9) var shadowMap0: texture_depth_2d;
+@group(0) @binding(10) var shadowMap1: texture_depth_2d;
+@group(0) @binding(11) var shadowMap2: texture_depth_2d;
+// Nearest, LessEqual: a tap is 1 where the reference is no deeper than the
+// depth stored there, 0 where something nearer the sun covers it.
+@group(0) @binding(12) var shadowSampler: sampler_comparison;
+
+fn shadowBias(dotLightNormal: f32, cascade: u32) -> f32 {
+    if (cascade == 0u) { return max(0.0002, 0.0007 * (1.0 - dotLightNormal)); }
+    if (cascade == 1u) { return max(0.0003, 0.0010 * (1.0 - dotLightNormal)); }
+    return max(0.005, 0.0016 * (1.0 - dotLightNormal));
+}
+
+// One tap of GL's test, (depth + bias) < z ? 0 : 1, as a comparison against
+// z - bias. Off the map is lit: GL clamps to a border of depth 1, and
+// WebGPU has no border color. The Level form takes no derivatives, so it is
+// allowed in branches and loops (textureSampleCompare is not).
+fn shadowTap(cascade: u32, uv: vec2f, reference: f32) -> f32 {
+    if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return 1.0; }
+    switch cascade {
+        case 0u: { return textureSampleCompareLevel(shadowMap0, shadowSampler, uv, reference); }
+        case 1u: { return textureSampleCompareLevel(shadowMap1, shadowSampler, uv, reference); }
+        default: { return textureSampleCompareLevel(shadowMap2, shadowSampler, uv, reference); }
+    }
+}
+
+fn shadowMapSize(cascade: u32) -> vec2f {
+    switch cascade {
+        case 0u: { return vec2f(textureDimensions(shadowMap0)); }
+        case 1u: { return vec2f(textureDimensions(shadowMap1)); }
+        default: { return vec2f(textureDimensions(shadowMap2)); }
+    }
+}
+
+// GL's InterleavedGradientNoise and vogelDiskSample (from the gamedev.net
+// article on contact-hardening shadows that GL cites): a per-pixel angle,
+// and points spread evenly over a disk turned by it.
+// (GL keeps the three numbers in one vec3 and swizzles it; naga's override
+// pass trips over that, "ExpressionAlreadyInScope", so they are literals.)
+fn interleavedGradientNoise(p: vec2f) -> f32 {
+    return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715))));
+}
+
+fn vogelDiskSample(index: i32, count: i32, phi: f32) -> vec2f {
+    let goldenAngle = 2.4;
+    let r = sqrt(f32(index) + 0.5) / sqrt(f32(count));
+    let theta = f32(index) * goldenAngle + phi;
+    return vec2f(r * cos(theta), r * sin(theta));
+}
+
+// How much of the sun reaches a point, 0-1: GL's shadowCalc2. `relative` is
+// the camera-relative position, `viewDepth` its distance ahead of the
+// camera, which picks the cascade (GL's 16 and 44 blocks), and `fragCoord`
+// the pixel, which turns the soft disk.
+fn sunShadow(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: vec2f) -> f32 {
+    let mode = u.lightParams.z;
+    if (mode == 0) { return 1.0; }
+
+    var cascade = 2u;
+    if (viewDepth < 16.0) { cascade = 0u; } else if (viewDepth < 44.0) { cascade = 1u; }
+
+    // To the map's texels: x right, y down (render targets are top-first).
+    // The depth is already 0..1, the same number as GL's z * 0.5 + 0.5, so
+    // GL's biases carry over.
+    let clip = u.shadowMatrices[cascade] * vec4f(relative, 1.0);
+    let uv = vec2f(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+    let z = min(clip.z, 1.0);
+    let reference = z - shadowBias(dotLightNormal, cascade);
+
+    // Hard: one tap (GL's shadowCalc).
+    if (mode == 1) { return shadowTap(cascade, uv, reference); }
+
+    // Soft: nine taps on a turned disk 1.5 texels wide; the outer five
+    // first, and when they agree the point is fully in or out of shadow and
+    // the rest are skipped. The power darkens the penumbra.
+    if (z > 0.99995) { return 1.0; }
+    let texel = 1.0 / shadowMapSize(cascade);
+    let sampleCount = 9;
+    let checkCount = 5;
+    let spread = 1.5;
+    let phi = interleavedGradientNoise(fragCoord) * 2.0 * PI;
+    var shadow = 0.0;
+    for (var i = sampleCount - 1; i >= sampleCount - checkCount; i--) {
+        shadow += shadowTap(cascade, uv + vogelDiskSample(i, sampleCount, phi) * texel * spread, reference);
+    }
+    if (shadow == 0.0 || shadow == f32(checkCount)) {
+        shadow /= f32(checkCount);
+    } else {
+        for (var i = sampleCount - checkCount - 1; i >= 0; i--) {
+            shadow += shadowTap(cascade, uv + vogelDiskSample(i, sampleCount, phi) * texel * spread, reference);
+        }
+        shadow /= f32(sampleCount);
+    }
+    return pow(clamp(shadow, 0.0, 1.0), 2.2);
+}
 
 // ---- The BRDF (defaultShader.frag, same names) ---------------------------
 
@@ -234,8 +336,8 @@ fn lightLevels(packed: u32) -> LightLevels {
 
 // The top of defaultShader.frag's main: the ambient light, linear.
 // `ambientMultiplier` is the orientation's fixed darkening (v_ambientMultiplier).
-fn computeAmbient(levels: LightLevels, faceNormal: vec3f, ambientMultiplier: f32, inWater: bool, ao: f32) -> vec3f {
-    let shadow = 1.0; // shadows off (milestone 13)
+fn computeAmbient(levels: LightLevels, faceNormal: vec3f, ambientMultiplier: f32, inWater: bool, ao: f32,
+    shadow: f32) -> vec3f {
     let baseAmbient = 0.20 + u.sunDirection.w;
     let multiplier = 0.70;
     let shadowStrength = 5.0;
@@ -288,8 +390,7 @@ fn pointLights(levels: LightLevels, blockPos: vec3i, inBlock: vec3f, metallic: f
 
 // The sun (or moon) on a face that sees the sky.
 fn sunLight(levels: LightLevels, metallic: f32, roughness: f32, V: vec3f, albedo: vec3f, N: vec3f,
-    F0: vec3f, ao: f32) -> vec3f {
-    let shadow = 1.0;
+    F0: vec3f, ao: f32, shadow: f32) -> vec3f {
     if (levels.skyUnchanged <= 3) { return vec3f(0.0); }
     var color = u.sunLightColor.rgb * 1.9;
     // Less where little sky light reaches, and a little less at full light.

@@ -143,6 +143,11 @@ namespace wgpuWorld
 		bool useLights = true;               // the useLights setting
 		int maxLights = 40;                  // the maxLights setting
 		uint32_t aoTexture = 0;              // ao.png, a wgpu2d texture id
+		// Milestone 13: the shadows setting (0 off, 1 hard, 2 soft) and,
+		// when on, each cascade's sun matrix as GL builds it: OpenGL clip
+		// space (-1..1 deep) from world coordinates. Nearest cascade first.
+		int shadows = 0;
+		glm::dmat4 shadowCascades[3] = { glm::dmat4(1.0), glm::dmat4(1.0), glm::dmat4(1.0) };
 	};
 
 	// Records the world's opaque pass for this frame and prepares the

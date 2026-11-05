@@ -26,8 +26,13 @@ struct Uniforms {
     sunLightColor: vec4f,
     ambientColor: vec4f,
     // x GL's u_skyLightIntensity (0-15, the time of day's sky light), y the
-    // point lights in `lights` (0 with lights off), zw unused.
+    // point lights in `lights` (0 with lights off), z the shadows setting
+    // (0 off, 1 hard, 2 soft; milestone 13), w unused.
     lightParams: vec4i,
+    // The sun's shadow cascades (GL's u_cascadedShadowMatrix), nearest
+    // first: camera-relative positions to each shadow map's clip space,
+    // depth 0..1. Valid while lightParams.z is not 0.
+    shadowMatrices: array<mat4x4f, 3>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

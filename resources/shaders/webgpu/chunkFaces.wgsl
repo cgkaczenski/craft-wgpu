@@ -140,8 +140,9 @@ fn cornerShape(row: i32, corner: u32) -> vec3f {
     return vec3f(vertexData[base], vertexData[base + 1u], vertexData[base + 2u]);
 }
 
-@vertex
-fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOutput {
+// One corner of a face, placed by the camera: what every vertex entry point
+// starts from.
+fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     let orientation = face.orientationAndTexture.x;
     let textureIndex = u32(face.orientationAndTexture.y) & 0x07FFu;
     let colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
@@ -209,6 +210,24 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
     return out;
 }
 
+@vertex
+fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOutput {
+    return faceVertex(vertexIndex, face);
+}
+
+// Milestone 13: the sun's shadow maps (renderShadow, zpass.vert with the
+// cascade's matrix). The same corner, placed by a cascade's matrix instead
+// of the camera's; fs_depth's alpha test lets leaves and grass cast their
+// cut-out shapes. Each cascade is its own pipeline, picked by this override.
+override shadowCascade: u32 = 0u;
+
+@vertex
+fn vs_shadow(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOutput {
+    var out = faceVertex(vertexIndex, face);
+    out.position = u.shadowMatrices[shadowCascade] * vec4f(out.relative, 1.0);
+    return out;
+}
+
 // The depth prepass (zpass.frag): no color, only the alpha test.
 @fragment
 fn fs_depth(in: VertexOutput) {
@@ -249,12 +268,18 @@ struct Shaded {
     dotNV: f32,
 };
 
-// defaultShader.frag's lit path (u_shaders on), shadow and fog aside.
+// defaultShader.frag's lit path (u_shaders on), fog aside.
 fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     let levels = lightLevels(in.light);
     let water = isWater(in);
     let ao = aoFromTexel(in.flags, t.ao);
-    let ambient = computeAmbient(levels, in.normal, in.ambientMultiplier, (in.flags & 2u) != 0u, ao);
+
+    // The sun's shadow, with the face's own normal (GL's v_normal) and the
+    // distance ahead of the camera that picks the cascade.
+    let viewDepth = -(u.view * vec4f(in.relative, 1.0)).z;
+    let shadow = sunShadow(in.relative, viewDepth, dot(u.sunDirection.xyz, in.normal), in.position.xy);
+
+    let ambient = computeAmbient(levels, in.normal, in.ambientMultiplier, (in.flags & 2u) != 0u, ao, shadow);
 
     var m = material(t.material);
     var albedo = toLinear(t.albedo.rgb);
@@ -276,7 +301,7 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     if (water) { F0 = vec3f(0.021, 0.021, 0.05); }
 
     var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0);
-    color += sunLight(levels, m.metallic, m.roughness, V, albedo, N, F0, ao);
+    color += sunLight(levels, m.metallic, m.roughness, V, albedo, N, F0, ao, shadow);
 
     var s: Shaded;
     s.dotNV = dot(N, V);

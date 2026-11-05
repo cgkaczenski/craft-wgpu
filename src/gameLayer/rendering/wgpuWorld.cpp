@@ -34,6 +34,7 @@
 #include "rendering/wgpuWorld.h"
 #include "rendering/camera.h"
 #include "chunk.h"
+#include "rendering/frustumCulling.h"
 
 #include <render/wgpuFrame.h>
 #include <render/wgpu2d.h>
@@ -64,8 +65,8 @@ namespace wgpuWorld
 
 namespace
 {
-	// Must match the WGSL Uniforms struct in chunkFaces.wgsl: a mat4x4f, then
-	// a vec4i and three vec4f, 128 bytes with no padding.
+	// Must match the WGSL Uniforms struct in world.wgsl, member for member:
+	// every member is 16-byte aligned, so there is no padding.
 	struct Uniforms
 	{
 		glm::mat4 viewProjection;
@@ -77,9 +78,15 @@ namespace
 		glm::vec4 sunDirection;  // xyz toward the sun or moon; w GL's u_baseAmbientExtra
 		glm::vec4 sunLightColor; // rgb
 		glm::vec4 ambientColor;  // rgb
-		glm::ivec4 lightParams;  // x sky light intensity, y point lights
+		glm::ivec4 lightParams;  // x sky light intensity, y point lights, z shadows setting
+		glm::mat4 shadowMatrices[3]; // camera-relative to each cascade's clip space, 0..1 deep
 	};
-	static_assert(sizeof(Uniforms) == 256, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 448, "uniform layout must match world.wgsl");
+
+	// Milestone 13: the sun's shadow cascades, GL's SunShadow sizes, nearest
+	// first.
+	constexpr int shadowCascades = 3;
+	constexpr uint32_t shadowMapSizes[shadowCascades] = { 2048, 2048, 1024 };
 
 	// One face: short orientation, short texture, ivec3 position.
 	constexpr uint64_t faceBytes = 4 * sizeof(int);
@@ -249,6 +256,22 @@ namespace
 		uint32_t aoTextureId = 0;            // the wgpu2d texture bound at 7
 		Sampler aoSampler = nullptr;
 		TextureView boundAoView = nullptr;   // what the bind group names (not owned)
+
+		// Milestone 13: the sun's shadow maps, made the first frame shadows
+		// are on. A 1x1 depth stands in for them in the bind group until
+		// then, and always in `shadowPassBindGroup`, the copy the shadow
+		// passes bind: a pass may not draw into a texture it also binds.
+		bool shadowsWanted = false;          // render's setting, for updateResources
+		Texture shadowTextures[shadowCascades] = {};
+		TextureView shadowViews[shadowCascades] = {};
+		Texture blankDepthTexture = nullptr;
+		TextureView blankDepthView = nullptr;
+		Sampler shadowSampler = nullptr;     // comparison, nearest
+		TextureView boundShadowViews[shadowCascades] = {}; // not owned
+		BindGroup shadowPassBindGroup = nullptr;
+		RenderPipeline shadowPipelines[shadowCascades] = {};
+		uint64_t lastShadowFaces[shadowCascades] = {};
+		uint32_t lastShadowChunks[shadowCascades] = {};
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
@@ -450,7 +473,8 @@ namespace
 	{
 		ErrorScope scope("world bind group layout");
 
-		BindGroupLayoutEntry entries[9];
+		constexpr uint32_t worldBindings = 13;
+		BindGroupLayoutEntry entries[worldBindings];
 		entries[0] = Default;
 		entries[0].binding = 0;
 		entries[0].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
@@ -502,9 +526,21 @@ namespace
 		entries[8] = entries[5];
 		entries[8].binding = 8;
 
+		// 9-11: the sun's shadow maps, read as depth; 12: the comparison
+		// sampler (milestone 13, lighting.wgsl). Fragment stage.
+		for (uint32_t i = 9; i <= 11; i++)
+		{
+			entries[i] = entries[7];
+			entries[i].binding = i;
+			entries[i].texture.sampleType = TextureSampleType::Depth;
+		}
+		entries[12] = entries[5];
+		entries[12].binding = 12;
+		entries[12].sampler.type = SamplerBindingType::Comparison;
+
 		BindGroupLayoutDescriptor layoutDesc = Default;
 		layoutDesc.label = StringView("world bind group layout");
-		layoutDesc.entryCount = 9;
+		layoutDesc.entryCount = worldBindings;
 		layoutDesc.entries = entries;
 		w.bindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		if (!w.bindGroupLayout) { return false; }
@@ -706,6 +742,8 @@ namespace
 		CullMode cull = CullMode::Back;
 		int passMode = -1;        // the WGSL `passMode` override, -1 to leave it
 		float zBias = 0.f;        // the WGSL `zBias` override (vertex stage)
+		const char *vertexEntry = "vs_main";
+		int shadowCascade = -1;   // the WGSL `shadowCascade` override, -1 to leave it
 	};
 
 	RenderPipeline createFacePipeline(ShaderModule module, const FacePipelineDesc &p)
@@ -733,12 +771,25 @@ namespace
 		desc.label = StringView(p.label);
 		desc.layout = p.layout;
 		desc.vertex.module = module;
-		desc.vertex.entryPoint = StringView("vs_main");
-		ConstantEntry biasConstant = Default;
-		biasConstant.key = StringView("zBias");
-		biasConstant.value = (double)p.zBias;
-		desc.vertex.constantCount = p.zBias != 0.f ? 1 : 0;
-		desc.vertex.constants = p.zBias != 0.f ? &biasConstant : nullptr;
+		desc.vertex.entryPoint = StringView(p.vertexEntry);
+		ConstantEntry vertexConstants[2];
+		uint32_t vertexConstantCount = 0;
+		if (p.zBias != 0.f)
+		{
+			vertexConstants[vertexConstantCount] = Default;
+			vertexConstants[vertexConstantCount].key = StringView("zBias");
+			vertexConstants[vertexConstantCount].value = (double)p.zBias;
+			vertexConstantCount++;
+		}
+		if (p.shadowCascade >= 0)
+		{
+			vertexConstants[vertexConstantCount] = Default;
+			vertexConstants[vertexConstantCount].key = StringView("shadowCascade");
+			vertexConstants[vertexConstantCount].value = (double)p.shadowCascade;
+			vertexConstantCount++;
+		}
+		desc.vertex.constantCount = vertexConstantCount;
+		desc.vertex.constants = vertexConstantCount ? vertexConstants : nullptr;
 		desc.vertex.bufferCount = 1;
 		desc.vertex.buffers = &faceLayout;
 
@@ -831,6 +882,23 @@ namespace
 		prepass.targets = ColorTargets::GBufferMasked;
 		w.prepassPipeline = createFacePipeline(module, prepass);
 
+		// Milestone 13: the sun's shadow maps, one pipeline per cascade.
+		// Depth only, no color attachment at all; the prepass's alpha test;
+		// culled as GL leaves it (GL_CULL_FACE on, back faces).
+		const char *const shadowLabels[shadowCascades] =
+			{ "world sun shadow, cascade 0", "world sun shadow, cascade 1", "world sun shadow, cascade 2" };
+		for (int i = 0; i < shadowCascades; i++)
+		{
+			FacePipelineDesc shadow;
+			shadow.label = shadowLabels[i];
+			shadow.layout = w.pipelineLayout;
+			shadow.vertexEntry = "vs_shadow";
+			shadow.shadowCascade = i;
+			shadow.fragmentEntry = "fs_depth";
+			shadow.targets = ColorTargets::None;
+			w.shadowPipelines[i] = createFacePipeline(module, shadow);
+		}
+
 		FacePipelineDesc opaque;
 		opaque.label = "world opaque faces";
 		opaque.layout = w.pipelineLayout;
@@ -889,7 +957,8 @@ namespace
 		const bool invalid = scope.failed(); // a rejected pipeline can still be non-null
 		module.release();
 		return w.pipeline && w.waterDepthPipeline && w.peelPipeline && w.finalPeelPipeline
-			&& w.finalPlainPipeline && w.decalPipeline && !invalid;
+			&& w.finalPlainPipeline && w.decalPipeline && w.shadowPipelines[0] && w.shadowPipelines[1]
+			&& w.shadowPipelines[2] && !invalid;
 	}
 
 	// The dropped block cubes and the gizmo lines (entities.wgsl).
@@ -1568,6 +1637,64 @@ namespace
 	bool ensureBuffer(Buffer &buffer, uint64_t &capacity, uint64_t needed, uint64_t unitBytes,
 		BufferUsage usage, const char *label, bool &remade);
 	bool ensureWhiteTexture();
+	Texture createTarget(const char *label, TextureFormat format, TextureUsage usage, int width, int height);
+	TextureView createTargetView(Texture texture, const char *label, TextureFormat format,
+		TextureAspect aspect, TextureUsage usage);
+
+	// The shadow sampler and the 1x1 stand-in always; the three maps once
+	// `maps` asks for them (they stay after shadows are switched off).
+	bool ensureShadowResources(bool maps)
+	{
+		if (!w.shadowSampler)
+		{
+			// GL's GL_NEAREST, compared in hardware: LessEqual returns 1
+			// where the reference is no deeper than the stored depth.
+			SamplerDescriptor samplerDesc = Default;
+			samplerDesc.label = StringView("world shadow sampler");
+			samplerDesc.addressModeU = AddressMode::ClampToEdge;
+			samplerDesc.addressModeV = AddressMode::ClampToEdge;
+			samplerDesc.addressModeW = AddressMode::ClampToEdge;
+			samplerDesc.magFilter = FilterMode::Nearest;
+			samplerDesc.minFilter = FilterMode::Nearest;
+			samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
+			samplerDesc.lodMinClamp = 0.0f;
+			samplerDesc.lodMaxClamp = 32.0f;
+			samplerDesc.compare = CompareFunction::LessEqual;
+			samplerDesc.maxAnisotropy = 1;
+			w.shadowSampler = wgpuDevice().createSampler(samplerDesc);
+			if (!w.shadowSampler) { return false; }
+		}
+		if (!w.blankDepthView)
+		{
+			w.blankDepthTexture = createTarget("world blank shadow map", depthFormat,
+				TextureUsage::TextureBinding, 1, 1);
+			if (!w.blankDepthTexture) { return false; }
+			w.blankDepthView = createTargetView(w.blankDepthTexture, "world blank shadow map view", depthFormat,
+				TextureAspect::DepthOnly, TextureUsage::TextureBinding);
+			if (!w.blankDepthView) { return false; }
+		}
+		if (maps && !w.shadowViews[0])
+		{
+			const char *const labels[shadowCascades] =
+				{ "world sun shadow map 0", "world sun shadow map 1", "world sun shadow map 2" };
+			for (int i = 0; i < shadowCascades; i++)
+			{
+				const TextureUsage usage = TextureUsage::RenderAttachment | TextureUsage::TextureBinding;
+				w.shadowTextures[i] = createTarget(labels[i], depthFormat, usage,
+					(int)shadowMapSizes[i], (int)shadowMapSizes[i]);
+				if (!w.shadowTextures[i]) { return false; }
+				w.shadowViews[i] = createTargetView(w.shadowTextures[i], labels[i], depthFormat,
+					TextureAspect::DepthOnly, usage);
+				if (!w.shadowViews[i]) { return false; }
+			}
+		}
+		return true;
+	}
+
+	TextureView shadowBindView(int cascade)
+	{
+		return w.shadowViews[cascade] ? w.shadowViews[cascade] : w.blankDepthView;
+	}
 
 	bool updateResources()
 	{
@@ -1625,14 +1752,22 @@ namespace
 		}
 		if (aoView != w.boundAoView) { changed = true; }
 
-		if (!changed && w.bindGroup) { return true; }
+		if (!ensureShadowResources(w.shadowsWanted)) { return false; }
+		for (int i = 0; i < shadowCascades; i++)
+		{
+			if (shadowBindView(i) != w.boundShadowViews[i]) { changed = true; }
+		}
+
+		if (!changed && w.bindGroup && w.shadowPassBindGroup) { return true; }
 		if (!w.blockGeometryBuffer || !w.textureArrayView) { return false; }
 
 		ErrorScope scope("world bind group");
 		if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
+		if (w.shadowPassBindGroup) { w.shadowPassBindGroup.release(); w.shadowPassBindGroup = nullptr; }
 
-		BindGroupEntry entries[9];
-		for (int i = 0; i < 9; i++) { entries[i] = Default; entries[i].binding = i; }
+		constexpr uint32_t worldBindings = 13;
+		BindGroupEntry entries[worldBindings];
+		for (uint32_t i = 0; i < worldBindings; i++) { entries[i] = Default; entries[i].binding = i; }
 		entries[0].buffer = w.uniformBuffer;
 		entries[0].size = sizeof(Uniforms);
 		entries[1].buffer = w.blockGeometryBuffer;
@@ -1648,14 +1783,25 @@ namespace
 		entries[7].textureView = aoView;
 		entries[8].sampler = w.aoSampler;
 		w.boundAoView = aoView;
+		for (int i = 0; i < shadowCascades; i++)
+		{
+			entries[9 + i].textureView = shadowBindView(i);
+			w.boundShadowViews[i] = shadowBindView(i);
+		}
+		entries[12].sampler = w.shadowSampler;
 
 		BindGroupDescriptor groupDesc = Default;
 		groupDesc.label = StringView("world bind group");
 		groupDesc.layout = w.bindGroupLayout;
-		groupDesc.entryCount = 9;
+		groupDesc.entryCount = worldBindings;
 		groupDesc.entries = entries;
 		w.bindGroup = wgpuDevice().createBindGroup(groupDesc);
-		return w.bindGroup && !scope.failed();
+
+		// The same with the stand-in for the maps, for the shadow passes.
+		for (int i = 0; i < shadowCascades; i++) { entries[9 + i].textureView = w.blankDepthView; }
+		groupDesc.label = StringView("world shadow pass bind group");
+		w.shadowPassBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		return w.bindGroup && w.shadowPassBindGroup && !scope.failed();
 	}
 
 	Texture createTarget(const char *label, TextureFormat format, TextureUsage usage, int width, int height)
@@ -2279,8 +2425,11 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		}
 	}
 	w.aoTextureId = lighting.aoTexture;
+	const int shadows = std::clamp(lighting.shadows, 0, 2);
+	w.shadowsWanted = shadows != 0;
 
 	if (!updateResources()) { return; }
+	const bool drawShadows = shadows != 0 && w.shadowViews[0];
 
 	int width = 0, height = 0;
 	wgpuSurfaceSize(width, height);
@@ -2313,7 +2462,22 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.sunLightColor = glm::vec4(lighting.sunLightColor, 0.f);
 	uniforms.ambientColor = glm::vec4(lighting.ambientColor, 0.f);
 	uniforms.lightParams = glm::ivec4(lighting.skyLightIntensity,
-		(int)std::min<size_t>(w.frameLights.size(), (size_t)std::max(lighting.maxLights, 0)), 0, 0);
+		(int)std::min<size_t>(w.frameLights.size(), (size_t)std::max(lighting.maxLights, 0)),
+		drawShadows ? shadows : 0, 0);
+
+	// Milestone 13: the sun's cascades, camera-relative. GL's matrices
+	// take world positions to -1..1 depth; here the camera position is
+	// folded in, in double, so the floats stay small however far out the
+	// player is, and the depth goes to 0..1 by z / 2 + 1/2: the very
+	// numbers GL's shader compares, so its biases still fit.
+	glm::dmat4 depthToZeroOne(1.0);
+	depthToZeroOne[2][2] = 0.5;
+	depthToZeroOne[3][2] = 0.5;
+	const glm::dmat4 fromCamera = glm::translate(glm::dmat4(1.0), camera.position);
+	for (int i = 0; i < shadowCascades; i++)
+	{
+		uniforms.shadowMatrices[i] = glm::mat4(depthToZeroOne * lighting.shadowCascades[i] * fromCamera);
+	}
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
 
 	const auto recordStart = std::chrono::steady_clock::now();
@@ -2357,7 +2521,39 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	}
 	const uint32_t finalFirst = peelFirst + peelCount;
 	const uint32_t finalCount = (uint32_t)w.drawArgs.size() - finalFirst;
-	const uint32_t drawCalls = opaqueCount * (depthPrepass ? 2 : 1) + (waterPeel ? 2 * peelCount : 0) + finalCount;
+
+	// Then each shadow cascade's run: every loaded chunk's opaque faces
+	// (not just the camera's visible ones: what is behind the camera can
+	// shade what is in front), culled against that cascade's box, as GL's
+	// renderShadow loops over loadedChunks.
+	uint32_t shadowFirst[shadowCascades] = {};
+	uint32_t shadowCount[shadowCascades] = {};
+	for (int i = 0; i < shadowCascades && drawShadows; i++)
+	{
+		const FrustumVolume box(lighting.shadowCascades[i]);
+		shadowFirst[i] = (uint32_t)w.drawArgs.size();
+		uint64_t faces = 0;
+		for (const auto &[chunk, range] : w.chunks)
+		{
+			if (const_cast<Chunk *>(chunk)->isDontDrawYet()) { continue; }
+			AABBVolume bounds;
+			bounds.minVertex = { chunk->data.x * CHUNK_SIZE, 0, chunk->data.z * CHUNK_SIZE };
+			bounds.maxVertex = { (chunk->data.x + 1) * CHUNK_SIZE, CHUNK_HEIGHT + 1, (chunk->data.z + 1) * CHUNK_SIZE };
+			if (!CheckFrustumVsAABB(box, bounds)) { continue; }
+			w.drawArgs.push_back(DrawArgs{ 4, range.faceCount, 0, range.firstFace });
+			faces += range.faceCount;
+		}
+		shadowCount[i] = (uint32_t)w.drawArgs.size() - shadowFirst[i];
+		w.lastShadowFaces[i] = faces;
+		w.lastShadowChunks[i] = shadowCount[i];
+	}
+	if (!drawShadows)
+	{
+		for (int i = 0; i < shadowCascades; i++) { w.lastShadowFaces[i] = 0; w.lastShadowChunks[i] = 0; }
+	}
+
+	const uint32_t drawCalls = opaqueCount * (depthPrepass ? 2 : 1) + (waterPeel ? 2 * peelCount : 0) + finalCount
+		+ shadowCount[0] + shadowCount[1] + shadowCount[2];
 
 	DrawMode mode = w.drawMode;
 	if (mode != DrawMode::Direct && !w.drawArgs.empty())
@@ -2380,6 +2576,44 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	{
 		CommandEncoder encoder = wgpuFrameEncoder();
 		if (!encoder) { return; }
+
+		// The sun's shadow maps first (milestone 13): a pass per cascade
+		// with no color attachment, only the map as depth, cleared to the
+		// far plane. The stand-in bind group: the lit group binds the maps.
+		const char *const shadowPassLabels[shadowCascades] =
+			{ "world sun shadow pass 0", "world sun shadow pass 1", "world sun shadow pass 2" };
+		for (int i = 0; i < shadowCascades && drawShadows; i++)
+		{
+			RenderPassDepthStencilAttachment shadowDepth = Default;
+			shadowDepth.view = w.shadowViews[i];
+			shadowDepth.depthLoadOp = LoadOp::Clear;
+			shadowDepth.depthStoreOp = StoreOp::Store;
+			shadowDepth.depthClearValue = depthClear;
+			shadowDepth.depthReadOnly = false;
+			shadowDepth.stencilLoadOp = LoadOp::Undefined;
+			shadowDepth.stencilStoreOp = StoreOp::Undefined;
+			shadowDepth.stencilClearValue = 0;
+			shadowDepth.stencilReadOnly = false;
+
+			RenderPassDescriptor shadowPassDesc = Default;
+			shadowPassDesc.label = StringView(shadowPassLabels[i]);
+			shadowPassDesc.colorAttachmentCount = 0;
+			shadowPassDesc.colorAttachments = nullptr;
+			shadowPassDesc.depthStencilAttachment = &shadowDepth;
+			shadowPassDesc.occlusionQuerySet = nullptr;
+			shadowPassDesc.timestampWrites = nullptr;
+			RenderPassEncoder shadowPass = encoder.beginRenderPass(shadowPassDesc);
+			if (w.arena && shadowCount[i])
+			{
+				shadowPass.setPipeline(w.shadowPipelines[i]);
+				shadowPass.setBindGroup(0, w.shadowPassBindGroup, 0, nullptr);
+				shadowPass.setVertexBuffer(0, w.arena, 0, w.arenaFaces * faceBytes);
+				drawRecords(shadowPass, mode, shadowFirst[i], shadowCount[i]);
+			}
+			shadowPass.end();
+			shadowPass.release();
+		}
+
 		RenderPassEncoder pass = beginGBufferPass(encoder, true, "world opaque pass");
 		if (w.arena && opaqueCount)
 		{
@@ -2775,7 +3009,9 @@ void shutdown()
 			<< w.freeRanges.size() << " free ranges; entities " << w.lastModelDraws << " model and "
 			<< w.lastItemDraws << " item draws, "
 			<< w.meshes.size() << " meshes; " << w.frameLights.size() << " point lights from "
-			<< w.chunkLights.size() << " chunks with lights\n";
+			<< w.chunkLights.size() << " chunks with lights; sun shadow cascades "
+			<< w.lastShadowChunks[0] << "/" << w.lastShadowChunks[1] << "/" << w.lastShadowChunks[2] << " chunks, "
+			<< w.lastShadowFaces[0] << "/" << w.lastShadowFaces[1] << "/" << w.lastShadowFaces[2] << " faces\n";
 		if (w.timedFrames)
 		{
 			std::cout << "WebGPU world timing (" << drawModeName(w.drawMode) << ", " << w.timedFrames
@@ -2806,6 +3042,17 @@ void shutdown()
 	if (w.lightBuffer) { w.lightBuffer.release(); w.lightBuffer = nullptr; w.lightCapacity = 0; }
 	if (w.aoSampler) { w.aoSampler.release(); w.aoSampler = nullptr; }
 	w.boundAoView = nullptr;
+	for (int i = 0; i < shadowCascades; i++)
+	{
+		if (w.shadowPipelines[i]) { w.shadowPipelines[i].release(); w.shadowPipelines[i] = nullptr; }
+		if (w.shadowViews[i]) { w.shadowViews[i].release(); w.shadowViews[i] = nullptr; }
+		if (w.shadowTextures[i]) { w.shadowTextures[i].destroy(); w.shadowTextures[i].release(); w.shadowTextures[i] = nullptr; }
+		w.boundShadowViews[i] = nullptr;
+	}
+	if (w.blankDepthView) { w.blankDepthView.release(); w.blankDepthView = nullptr; }
+	if (w.blankDepthTexture) { w.blankDepthTexture.destroy(); w.blankDepthTexture.release(); w.blankDepthTexture = nullptr; }
+	if (w.shadowSampler) { w.shadowSampler.release(); w.shadowSampler = nullptr; }
+	if (w.shadowPassBindGroup) { w.shadowPassBindGroup.release(); w.shadowPassBindGroup = nullptr; }
 	w.chunkLights.clear();
 	w.previewsDrawn = 0;
 	for (RenderPipeline *pipeline : { &w.cubePipeline, &w.decalPipeline, &w.linePipeline, &w.iconPipeline })
