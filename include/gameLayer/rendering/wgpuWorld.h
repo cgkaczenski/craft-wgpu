@@ -204,6 +204,15 @@ namespace wgpuWorld
 		bool ssao = true;
 		float aoViewDistance = 128;
 		bool ssr = true;
+
+		// Milestone 18: under water (`underWater` above), GL's shading
+		// settings for the darkening (used as GL uses them, unconverted) and
+		// the warp's clock (the renderer's timeGrass).
+		glm::vec3 underWaterColor = glm::vec3(0, 17, 25) / 255.f;
+		float underwaterDarkenStrength = 0.94f;
+		float underwaterDarkenDistance = 29;
+		float fogGradientUnderWater = 1.9f;
+		float warpTime = 0;
 	};
 
 	// Records the world's opaque pass for this frame and prepares the
@@ -228,6 +237,11 @@ namespace wgpuWorld
 	// the renderer updates averageLuminosity only when there is a new one,
 	// as GL does when its pixel buffer maps.
 	bool takeExposureColor(glm::vec3 &color);
+
+	// Milestone 18: how many of the sun's full-size pixels were in front of
+	// the sky, a few frames ago: what GL's sunFlareQueries count
+	// (GL_SAMPLES_PASSED), for the lens flare.
+	int sunVisibleSamples();
 
 	// Milestone 11's debug views of the G-buffer, for ImGui: view `view`
 	// (0 to gBufferViewCountTotal() - 1, named by gBufferViewName) as a

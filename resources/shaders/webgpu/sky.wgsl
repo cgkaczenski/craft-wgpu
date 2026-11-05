@@ -12,6 +12,9 @@
 //   vs_sun    every frame, after the entities: the sun and the moon,
 //   fs_sun    textured quads at the far plane, added onto what is left of
 //             the sky. Instance 0 is the sun, 1 the moon.
+//   fs_sunRays  milestone 18: the two again (instances 2 and 3, with GL's
+//             god-ray settings) at half size, for the god rays; the sun
+//             also counts its pixels in front of the sky, for the flare.
 
 // ---- The bake (atmosphericScattering.frag) --------------------------------
 
@@ -116,6 +119,10 @@ struct SkyUniforms {
     // x u_sunset, y u_colorMultiplier, for the sun then the moon.
     sunParams: vec4f,
     moonParams: vec4f,
+    // The same for the god rays' sun and moon (milestone 18): GL draws
+    // them again with the twilight at least 0.5 and the moon at 0.35.
+    raySunParams: vec4f,
+    rayMoonParams: vec4f,
 };
 @group(0) @binding(0) var<uniform> sky: SkyUniforms;
 @group(0) @binding(1) var daySky: texture_cube<f32>;
@@ -160,7 +167,7 @@ struct SunOutput {
 fn vs_sun(@builtin(vertex_index) index: u32, @builtin(instance_index) instance: u32) -> SunOutput {
     let corner = vec2f(f32(index & 1u) * 2.0 - 1.0, f32(index >> 1u) * 2.0 - 1.0);
     var matrix = sky.sunMatrix;
-    if (instance == 1u) { matrix = sky.moonMatrix; }
+    if ((instance & 1u) == 1u) { matrix = sky.moonMatrix; }
     var out: SunOutput;
     out.position = matrix * vec4f(corner, -4.0, 1.0);
     out.position.z = out.position.w;
@@ -195,14 +202,16 @@ struct SunTargets {
 };
 
 // sun.frag: the texture's hue turned toward red at twilight, brightened.
-@fragment
-fn fs_sun(in: SunOutput) -> SunTargets {
+// Instances 0 and 1 are the sun and moon, 2 and 3 their god-ray copies.
+fn sunColor(in: SunOutput) -> vec4f {
     // Both read, one kept: textureSample must stay in uniform control flow.
     let sunTexel = textureSample(sunTexture, skySampler, in.uv);
     let moonTexel = textureSample(moonTexture, skySampler, in.uv);
     var c = sunTexel;
     var params = sky.sunParams;
     if (in.instance == 1u) { c = moonTexel; params = sky.moonParams; }
+    if (in.instance == 2u) { params = sky.raySunParams; }
+    if (in.instance == 3u) { c = moonTexel; params = sky.rayMoonParams; }
 
     var hsv = rgbToHsv(c.rgb);
     hsv.x -= params.x * 30.0 / 180.0;
@@ -210,12 +219,49 @@ fn fs_sun(in: SunOutput) -> SunTargets {
     hsv.y += params.x * 2.0 / 180.0;
     if (hsv.y > 1.0) { hsv.x = 1.0; } // as GL (it sets the hue, not the saturation)
     var color = vec4f(hsvToRgb(hsv), c.a);
-    color = vec4f(color.rgb * 1.5 * params.y, color.a);
+    return vec4f(color.rgb * 1.5 * params.y, color.a);
+}
 
+@fragment
+fn fs_sun(in: SunOutput) -> SunTargets {
+    let color = sunColor(in);
     var out: SunTargets;
     out.color = color;
     out.position = vec4f(0.0);
     out.normal = vec4u(0u);
     out.bloom = vec4f(color.rgb * 0.014, 0.0);
     return out;
+}
+
+// ---- Milestone 18: the god rays' sun and moon, and the flare's count -----
+
+// The scene's depth (opaque and entities: GL draws this before the
+// transparent faces) and the count of the sun's visible pixels.
+@group(1) @binding(0) var sceneDepth: texture_depth_2d;
+@group(1) @binding(1) var<storage, read_write> sunSamples: atomic<u32>;
+
+// GL draws these with blending off and no depth test, into a half-size
+// target cleared to black (fboSunForGodRays), so the color is written as is.
+// The sun's quad also stands in for GL's occlusion query (GL_SAMPLES_PASSED
+// around the full-size sun, depth LessEqual at the far plane): WebGPU's
+// occlusion queries only promise zero or not, so each half-size pixel
+// counts the full-size pixels under it where the depth is the far plane's,
+// the depth test done by hand (a shader that writes memory cannot rely on
+// the test having run first).
+@fragment
+fn fs_sunRays(in: SunOutput) -> @location(0) vec4f {
+    let color = sunColor(in);
+    if (in.instance == 2u) {
+        let size = vec2i(textureDimensions(sceneDepth));
+        let base = vec2i(in.position.xy) * 2;
+        var visible = 0u;
+        for (var y = 0; y < 2; y++) {
+            for (var x = 0; x < 2; x++) {
+                let texel = base + vec2i(x, y);
+                if (all(texel < size) && textureLoad(sceneDepth, texel, 0) >= 1.0) { visible += 1u; }
+            }
+        }
+        if (visible > 0u) { atomicAdd(&sunSamples, visible); }
+    }
+    return vec4f(color.rgb, 1.0);
 }

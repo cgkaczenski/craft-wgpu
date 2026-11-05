@@ -14,9 +14,9 @@
 //   shadow    the sun's cascaded shadow maps (milestone 13), on the sun term
 //             and on the sky part of the ambient: sunShadow
 //
-// The fog toward the sky (milestone 14) and the reflections (milestone 17)
-// are chunkFaces.wgsl's. Not here yet: the underwater tint and caustics
-// (18), and animated water normals. GL's BRDF LUT only feeds its physically accurate ambient, which a
+// The fog toward the sky (milestone 14), the reflections (milestone 17) and
+// the underwater darkening (milestone 18) are chunkFaces.wgsl's. Not here
+// yet: caustics and animated water normals (they move with the water). GL's BRDF LUT only feeds its physically accurate ambient, which a
 // constant switches off (physicallyAccurateReflections), so its output never
 // reads the LUT and neither does this.
 

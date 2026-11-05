@@ -83,8 +83,10 @@ namespace
 		glm::mat4 shadowMatrices[3]; // camera-relative to each cascade's clip space, 0..1 deep
 		glm::vec4 fogParams;         // x fog distance, y near fog gradient, z underwater
 		glm::mat4 projection;        // view to clip space, for the reflections (milestone 17)
+		glm::vec4 underWaterColor;   // rgb the color, w darken strength (milestone 18)
+		glm::vec4 underWaterParams;  // x darken distance, y fog gradient under water
 	};
-	static_assert(sizeof(Uniforms) == 528, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 560, "uniform layout must match world.wgsl");
 
 	// Milestone 17: hbao.wgsl's HbaoUniforms.
 	struct HbaoUniforms
@@ -104,8 +106,21 @@ namespace
 		glm::mat4 moonMatrix;
 		glm::vec4 sunParams;             // x twilight, y color multiplier
 		glm::vec4 moonParams;
+		glm::vec4 raySunParams;          // the same for the god rays' copies (milestone 18)
+		glm::vec4 rayMoonParams;
 	};
-	static_assert(sizeof(SkyUniforms) == 240, "must match sky.wgsl's SkyUniforms");
+	static_assert(sizeof(SkyUniforms) == 272, "must match sky.wgsl's SkyUniforms");
+
+	// Milestone 18: godRays.wgsl's RayUniforms and underwater.wgsl's WarpUniforms.
+	struct RayUniforms
+	{
+		glm::vec4 center; // xy the sun on screen, GL's texture coordinates
+	};
+	struct WarpUniforms
+	{
+		glm::vec4 color;  // rgb the underwater color
+		glm::vec4 params; // x time
+	};
 
 	struct SkyBakeParams
 	{
@@ -409,7 +424,7 @@ namespace
 		BindGroup colorSourceGroup = nullptr;
 		BindGroup bloomSourceGroup = nullptr;
 		BindGroup bloomApplyGroup = nullptr;
-		TextureView boundApplyViews[4] = {};           // what bloomApplyGroup names (not owned)
+		TextureView boundApplyViews[6] = {};           // what bloomApplyGroup names (not owned)
 		// The exposure's average: rgba16float, level 0 half the surface,
 		// down to 1x1 (GL's glGenerateMipmap of fboMain.color), then that
 		// texel copied into a mappable buffer and read a few frames later.
@@ -448,6 +463,44 @@ namespace
 		TextureView lastColorView = nullptr;
 		Texture lastPositionsTexture = nullptr;
 		TextureView lastPositionsView = nullptr;
+
+		// Milestone 18: the god rays (sky.wgsl's fs_sunRays, godRays.wgsl),
+		// the flare's count of visible sun pixels, and the underwater warp
+		// (underwater.wgsl).
+		BindGroupLayout sunCountBindGroupLayout = nullptr; // the scene depth, the counter
+		PipelineLayout sunRaysPipelineLayout = nullptr;    // the sky's group, then that one
+		RenderPipeline sunRaysPipeline = nullptr;
+		BindGroupLayout rayMaskBindGroupLayout = nullptr;  // the scene depth
+		BindGroupLayout rayBlurBindGroupLayout = nullptr;  // uniforms, the masked sun, sampler
+		PipelineLayout rayMaskPipelineLayout = nullptr;
+		PipelineLayout rayBlurPipelineLayout = nullptr;
+		RenderPipeline rayMaskPipeline = nullptr;
+		RenderPipeline rayBlurPipeline = nullptr;
+		Buffer rayUniformBuffer = nullptr;
+		Buffer sunCountBuffer = nullptr;   // an atomic, cleared each frame
+		Buffer sunReadBuffer = nullptr;    // its copy, mapped
+		Readback sunReadState = Readback::Idle;
+		uint32_t sunSamples = 0;           // the latest count, full-size pixels
+		uint32_t sunReadings = 0;          // for the shutdown line
+		BindGroupLayout warpBindGroupLayout = nullptr;
+		PipelineLayout warpPipelineLayout = nullptr;
+		RenderPipeline warpPipeline = nullptr;
+		Buffer warpUniformBuffer = nullptr;
+		bool underWater = false;           // this frame's camera
+		// Sized with the targets: the half-size sun and its blur (GL's
+		// fboSunForGodRays and ...Second, R11F_G11F_B10F), the warp's
+		// output, and their groups.
+		Texture sunRaysTexture = nullptr;
+		TextureView sunRaysView = nullptr;
+		Texture sunRaysBlurTexture = nullptr;
+		TextureView sunRaysBlurView = nullptr;
+		Texture warpTexture = nullptr;
+		TextureView warpView = nullptr;
+		BindGroup sunCountBindGroup = nullptr;
+		BindGroup rayMaskBindGroup = nullptr;
+		BindGroup rayBlurBindGroup = nullptr;
+		BindGroup warpBindGroup = nullptr;
+		BindGroup toneMapWarpBindGroup = nullptr; // the tone mapper reading the warp
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
@@ -555,6 +608,10 @@ namespace
 	bool ensureBloomTargets(int width, int height);
 	void releaseBloomTargets();
 	bool ensureHbaoTargets(int width, int height);
+	bool ensureRayTargets(int width, int height);
+	BindGroupLayoutEntry textureEntry(uint32_t binding, TextureSampleType type);
+	BindGroupLayoutEntry emptyEntry(uint32_t binding);
+	BindGroupLayout makeLayout(const char *label, const BindGroupLayoutEntry *entries, uint32_t count);
 
 	// ---- The face arena -------------------------------------------------
 
@@ -1470,68 +1527,82 @@ namespace
 		w.exposureState = World::Readback::Copied;
 	}
 
-	// The last frame's copy, now submitted, asked for; the device polled so
-	// a finished mapping calls back; a mapped reading taken and the buffer
-	// freed. Called at the start of render, so a few frames pass from the
-	// copy to the reading (GL's pixel buffer takes one or two).
-	void serviceExposureReadback()
+	// One readback (milestone 16): the copy an earlier frame made, now
+	// submitted, asked for; the device polled so a finished mapping calls
+	// back; a mapped reading given to `read` and the buffer freed. Called at
+	// the start of render, so a few frames pass from the copy to the
+	// reading (GL's pixel buffer and queries take one to three).
+	template <class Read>
+	void serviceReadback(Buffer buffer, World::Readback &state, size_t size, Read read)
 	{
-		if (!w.exposureReadBuffer) { return; }
-		if (w.exposureState == World::Readback::Copied)
+		if (!buffer) { return; }
+		if (state == World::Readback::Copied)
 		{
 			WGPUBufferMapCallbackInfo info = {};
 			info.nextInChain = nullptr;
 			info.mode = WGPUCallbackMode_AllowProcessEvents;
-			info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *state, void *)
+			info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *target, void *)
 			{
 				// Only the state changes here: no webgpu call may be made
 				// from inside the poll that calls this.
-				*static_cast<World::Readback *>(state) = status == WGPUMapAsyncStatus_Success
+				*static_cast<World::Readback *>(target) = status == WGPUMapAsyncStatus_Success
 					? World::Readback::Mapped : World::Readback::Idle;
 			};
-			info.userdata1 = &w.exposureState;
+			info.userdata1 = &state;
 			info.userdata2 = nullptr;
-			w.exposureState = World::Readback::Mapping;
-			wgpuBufferMapAsync(w.exposureReadBuffer, WGPUMapMode_Read, 0, 256, info);
+			state = World::Readback::Mapping;
+			wgpuBufferMapAsync(buffer, WGPUMapMode_Read, 0, size, info);
 		}
-		if (w.exposureState == World::Readback::Mapping)
+		if (state == World::Readback::Mapping)
 		{
 			wgpuDevicePoll(wgpuDevice(), false, nullptr);
 		}
-		if (w.exposureState == World::Readback::Mapped)
+		if (state == World::Readback::Mapped)
 		{
-			const uint16_t *half = static_cast<const uint16_t *>(
-				wgpuBufferGetConstMappedRange(w.exposureReadBuffer, 0, 8));
-			if (half)
-			{
-				w.exposureColor = glm::vec3(glm::unpackHalf1x16(half[0]), glm::unpackHalf1x16(half[1]),
-					glm::unpackHalf1x16(half[2]));
-				w.exposureFresh = true;
-				w.exposureReadings++;
-			}
-			w.exposureReadBuffer.unmap();
-			w.exposureState = World::Readback::Idle;
+			if (const void *data = wgpuBufferGetConstMappedRange(buffer, 0, size)) { read(data); }
+			buffer.unmap();
+			state = World::Readback::Idle;
 		}
+	}
+
+	void serviceReadbacks()
+	{
+		// The exposure's texel: three halves (and an alpha).
+		serviceReadback(w.exposureReadBuffer, w.exposureState, 256, [](const void *data)
+		{
+			const uint16_t *half = static_cast<const uint16_t *>(data);
+			w.exposureColor = glm::vec3(glm::unpackHalf1x16(half[0]), glm::unpackHalf1x16(half[1]),
+				glm::unpackHalf1x16(half[2]));
+			w.exposureFresh = true;
+			w.exposureReadings++;
+		});
+		// Milestone 18: the sun's visible pixels.
+		serviceReadback(w.sunReadBuffer, w.sunReadState, 4, [](const void *data)
+		{
+			w.sunSamples = *static_cast<const uint32_t *>(data);
+			w.sunReadings++;
+		});
 	}
 
 	// The apply's group: the blurred bloom (whichever buffer the sequence
 	// ends in) and the three dirt textures, black where one is missing.
 	BindGroup bloomApplyGroup(TextureView bloomView)
 	{
-		TextureView views[4] = { bloomView, nullptr, nullptr, nullptr };
+		TextureView views[6] = { bloomView, nullptr, nullptr, nullptr, w.sunRaysBlurView, w.depthSampleView };
 		for (int i = 0; i < 3; i++)
 		{
 			views[i + 1] = w.dirtTextures[i] ? wgpuTextureView(w.dirtTextures[i]) : nullptr;
 			if (!views[i + 1]) { views[i + 1] = w.blackView; }
 		}
+		if (!views[4] || !views[5]) { return nullptr; }
 		if (w.bloomApplyGroup && std::equal(std::begin(views), std::end(views), std::begin(w.boundApplyViews)))
 		{
 			return w.bloomApplyGroup;
 		}
 		if (w.bloomApplyGroup) { w.bloomApplyGroup.release(); w.bloomApplyGroup = nullptr; }
 
-		BindGroupEntry entries[7];
-		for (uint32_t i = 0; i < 7; i++) { entries[i] = Default; entries[i].binding = i; }
+		BindGroupEntry entries[9];
+		for (uint32_t i = 0; i < 9; i++) { entries[i] = Default; entries[i].binding = i; }
 		entries[0].buffer = w.bloomUniformBuffer;
 		entries[0].size = sizeof(BloomUniforms);
 		entries[1].textureView = views[0];
@@ -1540,10 +1611,12 @@ namespace
 		entries[4].textureView = views[2];
 		entries[5].textureView = views[3];
 		entries[6].sampler = w.dirtSampler;
+		entries[7].textureView = views[4]; // milestone 18: the god rays
+		entries[8].textureView = views[5]; // and the depth
 		BindGroupDescriptor desc = Default;
 		desc.label = StringView("world bloom apply bind group");
 		desc.layout = w.bloomApplyBindGroupLayout;
-		desc.entryCount = 7;
+		desc.entryCount = 9;
 		desc.entries = entries;
 		w.bloomApplyGroup = wgpuDevice().createBindGroup(desc);
 		std::copy(std::begin(views), std::end(views), std::begin(w.boundApplyViews));
@@ -1657,6 +1730,11 @@ namespace
 				recordBloom(encoder);
 				recordHbao(encoder);
 				recordBloomApply(encoder);
+				if (w.underWater && w.warpBindGroup)
+				{
+					// Milestone 18: GL's warp, after the bloom, into its own texture.
+					fullscreenPass(encoder, w.warpView, false, w.warpPipeline, w.warpBindGroup, "world underwater warp");
+				}
 				recordLastFrame(encoder);
 			}
 		}
@@ -1703,6 +1781,8 @@ namespace
 		// surface; or, with FXAA off, the tone map onto the surface. A
 		// WGPU_GBUFFER_VIEW other than 0 shows that attachment instead.
 		const bool chain = w.compositeView == 0;
+		// Under water the tone mapper reads the warp's output (milestone 18).
+		BindGroup toneMapGroup = w.underWater && w.toneMapWarpBindGroup ? w.toneMapWarpBindGroup : w.toneMapBindGroup;
 		if (chain && w.fxaa)
 		{
 			CommandEncoder encoder = wgpuFrameEncoder();
@@ -1723,7 +1803,7 @@ namespace
 			passDesc.timestampWrites = nullptr;
 			RenderPassEncoder toneMapPass = encoder.beginRenderPass(passDesc);
 			toneMapPass.setPipeline(w.toneMapToTexturePipeline);
-			toneMapPass.setBindGroup(0, w.toneMapBindGroup, 0, nullptr);
+			toneMapPass.setBindGroup(0, toneMapGroup, 0, nullptr);
 			toneMapPass.draw(3, 1, 0, 0);
 			toneMapPass.end();
 			toneMapPass.release();
@@ -1744,7 +1824,7 @@ namespace
 		else
 		{
 			pass.setPipeline(w.toneMapToSurfacePipeline);
-			pass.setBindGroup(0, w.toneMapBindGroup, 0, nullptr);
+			pass.setBindGroup(0, toneMapGroup, 0, nullptr);
 		}
 		pass.draw(3, 1, 0, 0);
 		// The 2D pass is wgpu2d's: it ends it, and its own draws rebind.
@@ -2297,17 +2377,20 @@ namespace
 	{
 		releaseBloomTargets();
 		for (BindGroup *group : { &w.peelBindGroup, &w.viewBindGroup, &w.toneMapBindGroup, &w.fxaaBindGroup,
-			&w.hbaoBindGroup, &w.hbaoApplyBindGroup })
+			&w.hbaoBindGroup, &w.hbaoApplyBindGroup, &w.sunCountBindGroup, &w.rayMaskBindGroup, &w.rayBlurBindGroup,
+			&w.warpBindGroup, &w.toneMapWarpBindGroup })
 		{
 			if (*group) { group->release(); *group = nullptr; }
 		}
 		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView, &w.depthSampleView, &w.skyView,
-			&w.fxaaInputView, &w.hbaoView, &w.lastColorView, &w.lastPositionsView })
+			&w.fxaaInputView, &w.hbaoView, &w.lastColorView, &w.lastPositionsView, &w.sunRaysView, &w.sunRaysBlurView,
+			&w.warpView })
 		{
 			if (*view) { view->release(); *view = nullptr; }
 		}
 		for (Texture *texture : { &w.depthTexture, &w.peelDepthTexture, &w.peelColorTexture, &w.skyTexture,
-			&w.fxaaInputTexture, &w.hbaoTexture, &w.lastColorTexture, &w.lastPositionsTexture })
+			&w.fxaaInputTexture, &w.hbaoTexture, &w.lastColorTexture, &w.lastPositionsTexture, &w.sunRaysTexture,
+			&w.sunRaysBlurTexture, &w.warpTexture })
 		{
 			if (*texture) { texture->destroy(); texture->release(); *texture = nullptr; }
 		}
@@ -2384,6 +2467,8 @@ namespace
 		// Milestone 17: the AO target and last frame's copies, before the
 		// frame group that reads the copies.
 		if (!ensureHbaoTargets(width, height) || scope.failed()) { return false; }
+		// Milestone 18: the god rays' and the warp's.
+		if (!ensureRayTargets(width, height) || scope.failed()) { return false; }
 
 		// The frame group: the peel's copies, the sky and last frame's
 		// color and positions, all the size of the surface, so remade with
@@ -2429,7 +2514,9 @@ namespace
 		};
 		w.toneMapBindGroup = postGroup(w.gBufferViews[GColor], "world tone map bind group");
 		w.fxaaBindGroup = postGroup(w.fxaaInputView, "world FXAA bind group");
-		if (!w.toneMapBindGroup || !w.fxaaBindGroup) { return false; }
+		// Milestone 18: under water the tone mapper reads the warp's output.
+		w.toneMapWarpBindGroup = postGroup(w.warpView, "world tone map bind group, under water");
+		if (!w.toneMapBindGroup || !w.fxaaBindGroup || !w.toneMapWarpBindGroup) { return false; }
 
 		// What the composite and the debug views read: the four targets,
 		// the depth, the uniforms.
@@ -2864,8 +2951,8 @@ namespace
 
 		// Uniforms, one source, its sampler; the apply adds three dirt
 		// textures and their sampler.
-		BindGroupLayoutEntry entries[7];
-		for (uint32_t i = 0; i < 7; i++)
+		BindGroupLayoutEntry entries[9];
+		for (uint32_t i = 0; i < 9; i++)
 		{
 			entries[i] = Default;
 			entries[i].binding = i;
@@ -2886,7 +2973,9 @@ namespace
 			}
 			else
 			{
-				entries[i].texture.sampleType = TextureSampleType::Float;
+				// 8: milestone 18's depth, the rest color textures.
+				entries[i].texture.sampleType = i == 8 ? TextureSampleType(TextureSampleType::Depth)
+					: TextureSampleType(TextureSampleType::Float);
 				entries[i].texture.viewDimension = TextureViewDimension::_2D;
 				entries[i].texture.multisampled = false;
 			}
@@ -2897,7 +2986,7 @@ namespace
 		layoutDesc.entries = entries;
 		w.bloomBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		layoutDesc.label = StringView("world bloom apply bind group layout");
-		layoutDesc.entryCount = 7;
+		layoutDesc.entryCount = 9;
 		w.bloomApplyBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		if (!w.bloomBindGroupLayout || !w.bloomApplyBindGroupLayout) { module.release(); return false; }
 		w.bloomPipelineLayout = createPipelineLayout("world bloom pipeline layout", &w.bloomBindGroupLayout, 1);
@@ -3235,6 +3324,198 @@ namespace
 		return w.hbaoBindGroup && w.hbaoApplyBindGroup;
 	}
 
+	// ---- Milestone 18: the god rays and the underwater warp ---------------
+
+	// A fullscreen pipeline of `module` into one target.
+	RenderPipeline fullscreenPipeline(ShaderModule module, const char *label, const char *fragmentEntry,
+		TextureFormat format, PipelineLayout layout)
+	{
+		ColorTargetState target = Default;
+		target.format = format;
+		target.blend = nullptr;
+		target.writeMask = ColorWriteMask::All;
+		FragmentState fragment = Default;
+		fragment.module = module;
+		fragment.entryPoint = StringView(fragmentEntry);
+		fragment.targetCount = 1;
+		fragment.targets = &target;
+		RenderPipelineDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.layout = layout;
+		desc.vertex.module = module;
+		desc.vertex.entryPoint = StringView("vs_fullscreen");
+		desc.vertex.bufferCount = 0;
+		desc.vertex.buffers = nullptr;
+		desc.primitive.topology = PrimitiveTopology::TriangleList;
+		desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+		desc.primitive.frontFace = FrontFace::CCW;
+		desc.primitive.cullMode = CullMode::None;
+		desc.depthStencil = nullptr;
+		desc.fragment = &fragment;
+		desc.multisample.count = 1;
+		desc.multisample.mask = 0xFFFFFFFFu;
+		desc.multisample.alphaToCoverageEnabled = false;
+		return wgpuDevice().createRenderPipeline(desc);
+	}
+
+	// A fragment-stage layout entry with nothing set.
+	BindGroupLayoutEntry emptyEntry(uint32_t binding)
+	{
+		BindGroupLayoutEntry e = Default;
+		e.binding = binding;
+		e.visibility = ShaderStage::Fragment;
+		e.buffer.type = BufferBindingType::BindingNotUsed;
+		e.sampler.type = SamplerBindingType::BindingNotUsed;
+		e.texture.sampleType = TextureSampleType::BindingNotUsed;
+		e.storageTexture.access = StorageTextureAccess::BindingNotUsed;
+		return e;
+	}
+
+	BindGroupLayoutEntry textureEntry(uint32_t binding, TextureSampleType type)
+	{
+		BindGroupLayoutEntry e = emptyEntry(binding);
+		e.texture.sampleType = type;
+		e.texture.viewDimension = TextureViewDimension::_2D;
+		e.texture.multisampled = false;
+		return e;
+	}
+
+	BindGroupLayoutEntry uniformEntry(uint32_t binding, uint64_t size)
+	{
+		BindGroupLayoutEntry e = emptyEntry(binding);
+		e.buffer.type = BufferBindingType::Uniform;
+		e.buffer.hasDynamicOffset = false;
+		e.buffer.minBindingSize = size;
+		return e;
+	}
+
+	BindGroupLayoutEntry samplerEntry(uint32_t binding)
+	{
+		BindGroupLayoutEntry e = emptyEntry(binding);
+		e.sampler.type = SamplerBindingType::Filtering;
+		return e;
+	}
+
+	BindGroupLayout makeLayout(const char *label, const BindGroupLayoutEntry *entries, uint32_t count)
+	{
+		BindGroupLayoutDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.entryCount = count;
+		desc.entries = entries;
+		return wgpuDevice().createBindGroupLayout(desc);
+	}
+
+	Buffer makeUniformBuffer(const char *label, uint64_t size)
+	{
+		BufferDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
+		desc.size = size;
+		desc.mappedAtCreation = false;
+		return wgpuDevice().createBuffer(desc);
+	}
+
+	bool createRaysAndWarp()
+	{
+		ShaderModule rays = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/godRays.wgsl");
+		ShaderModule warp = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/underwater.wgsl");
+		if (!rays || !warp)
+		{
+			if (rays) { rays.release(); }
+			if (warp) { warp.release(); }
+			return false;
+		}
+		ErrorScope scope("world god rays and warp");
+
+		w.rayUniformBuffer = makeUniformBuffer("world god ray uniforms", sizeof(RayUniforms));
+		w.warpUniformBuffer = makeUniformBuffer("world warp uniforms", sizeof(WarpUniforms));
+
+		const BindGroupLayoutEntry maskEntries[1] = { textureEntry(3, TextureSampleType::Depth) };
+		w.rayMaskBindGroupLayout = makeLayout("world god ray mask bind group layout", maskEntries, 1);
+		const BindGroupLayoutEntry blurEntries[3] = { uniformEntry(0, sizeof(RayUniforms)),
+			textureEntry(1, TextureSampleType::Float), samplerEntry(2) };
+		w.rayBlurBindGroupLayout = makeLayout("world god ray blur bind group layout", blurEntries, 3);
+		const BindGroupLayoutEntry warpEntries[4] = { uniformEntry(0, sizeof(WarpUniforms)),
+			textureEntry(1, TextureSampleType::Float), textureEntry(2, TextureSampleType::Float), samplerEntry(3) };
+		w.warpBindGroupLayout = makeLayout("world warp bind group layout", warpEntries, 4);
+		if (!w.rayUniformBuffer || !w.warpUniformBuffer || !w.rayMaskBindGroupLayout || !w.rayBlurBindGroupLayout
+			|| !w.warpBindGroupLayout)
+		{
+			rays.release();
+			warp.release();
+			return false;
+		}
+		w.rayMaskPipelineLayout = createPipelineLayout("world god ray mask pipeline layout", &w.rayMaskBindGroupLayout, 1);
+		w.rayBlurPipelineLayout = createPipelineLayout("world god ray blur pipeline layout", &w.rayBlurBindGroupLayout, 1);
+		w.warpPipelineLayout = createPipelineLayout("world warp pipeline layout", &w.warpBindGroupLayout, 1);
+
+		w.rayMaskPipeline = fullscreenPipeline(rays, "world god ray mask", "fs_mask", w.hdrFormat, w.rayMaskPipelineLayout);
+		w.rayBlurPipeline = fullscreenPipeline(rays, "world god ray blur", "fs_radialBlur", w.hdrFormat,
+			w.rayBlurPipelineLayout);
+		w.warpPipeline = fullscreenPipeline(warp, "world underwater warp", "fs_warp", w.hdrFormat, w.warpPipelineLayout);
+
+		const bool invalid = scope.failed();
+		rays.release();
+		warp.release();
+		return w.rayMaskPipeline && w.rayBlurPipeline && w.warpPipeline && !invalid;
+	}
+
+	// The half-size god ray targets, the warp's output, and their groups.
+	bool ensureRayTargets(int width, int height)
+	{
+		const int halfWidth = std::max(1, width / 2), halfHeight = std::max(1, height / 2);
+		const TextureUsage usage = TextureUsage::RenderAttachment | TextureUsage::TextureBinding;
+		w.sunRaysTexture = createTarget("world god rays sun", w.hdrFormat, usage, halfWidth, halfHeight);
+		w.sunRaysBlurTexture = createTarget("world god rays", w.hdrFormat, usage, halfWidth, halfHeight);
+		w.warpTexture = createTarget("world underwater warp", w.hdrFormat, usage, width, height);
+		if (!w.sunRaysTexture || !w.sunRaysBlurTexture || !w.warpTexture) { return false; }
+		w.sunRaysView = createTargetView(w.sunRaysTexture, "world god rays sun view", w.hdrFormat, TextureAspect::All, usage);
+		w.sunRaysBlurView = createTargetView(w.sunRaysBlurTexture, "world god rays view", w.hdrFormat, TextureAspect::All, usage);
+		w.warpView = createTargetView(w.warpTexture, "world underwater warp view", w.hdrFormat, TextureAspect::All, usage);
+		if (!w.sunRaysView || !w.sunRaysBlurView || !w.warpView) { return false; }
+
+		auto group = [](BindGroupLayout layout, BindGroupEntry *entries, uint32_t count, const char *label)
+		{
+			BindGroupDescriptor desc = Default;
+			desc.label = StringView(label);
+			desc.layout = layout;
+			desc.entryCount = count;
+			desc.entries = entries;
+			return wgpuDevice().createBindGroup(desc);
+		};
+
+		BindGroupEntry count[2];
+		for (uint32_t i = 0; i < 2; i++) { count[i] = Default; count[i].binding = i; }
+		count[0].textureView = w.depthSampleView;
+		count[1].buffer = w.sunCountBuffer;
+		count[1].size = 4;
+		w.sunCountBindGroup = group(w.sunCountBindGroupLayout, count, 2, "world sun count bind group");
+
+		BindGroupEntry mask = Default;
+		mask.binding = 3;
+		mask.textureView = w.depthSampleView;
+		w.rayMaskBindGroup = group(w.rayMaskBindGroupLayout, &mask, 1, "world god ray mask bind group");
+
+		BindGroupEntry blur[3];
+		for (uint32_t i = 0; i < 3; i++) { blur[i] = Default; blur[i].binding = i; }
+		blur[0].buffer = w.rayUniformBuffer;
+		blur[0].size = sizeof(RayUniforms);
+		blur[1].textureView = w.sunRaysView;
+		blur[2].sampler = w.postSampler;
+		w.rayBlurBindGroup = group(w.rayBlurBindGroupLayout, blur, 3, "world god ray blur bind group");
+
+		BindGroupEntry warpEntries[4];
+		for (uint32_t i = 0; i < 4; i++) { warpEntries[i] = Default; warpEntries[i].binding = i; }
+		warpEntries[0].buffer = w.warpUniformBuffer;
+		warpEntries[0].size = sizeof(WarpUniforms);
+		warpEntries[1].textureView = w.gBufferViews[GColor];
+		warpEntries[2].textureView = w.gBufferViews[GPosition];
+		warpEntries[3].sampler = w.postSampler;
+		w.warpBindGroup = group(w.warpBindGroupLayout, warpEntries, 4, "world warp bind group");
+
+		return w.sunCountBindGroup && w.rayMaskBindGroup && w.rayBlurBindGroup && w.warpBindGroup;
+	}
+
 	// ---- Milestone 14: the sky (sky.wgsl) -------------------------------
 
 	BindGroupLayoutEntry skyLayoutEntry(uint32_t binding, ShaderStage visibility)
@@ -3450,9 +3731,31 @@ namespace
 		w.sunPipeline = pipeline("world sun and moon", w.skyPipelineLayout, "vs_sun", "fs_sun",
 			sunTargets, GBufferSlots, &depth, PrimitiveTopology::TriangleStrip);
 
+		// Milestone 18: the god rays' sun and moon, into one half-size
+		// target, no blending or depth (GL's state for them), with a second
+		// group: the scene's depth and the flare's counter.
+		BindGroupLayoutEntry countEntries[2] = { textureEntry(0, TextureSampleType::Depth), emptyEntry(1) };
+		countEntries[1].buffer.type = BufferBindingType::Storage;
+		countEntries[1].buffer.hasDynamicOffset = false;
+		countEntries[1].buffer.minBindingSize = 4;
+		w.sunCountBindGroupLayout = makeLayout("world sun count bind group layout", countEntries, 2);
+		bufferDesc.label = StringView("world sun count");
+		bufferDesc.usage = BufferUsage::Storage | BufferUsage::CopySrc | BufferUsage::CopyDst;
+		bufferDesc.size = 4;
+		w.sunCountBuffer = wgpuDevice().createBuffer(bufferDesc);
+		bufferDesc.label = StringView("world sun count readback");
+		bufferDesc.usage = BufferUsage::MapRead | BufferUsage::CopyDst;
+		w.sunReadBuffer = wgpuDevice().createBuffer(bufferDesc);
+		if (!w.sunCountBindGroupLayout || !w.sunCountBuffer || !w.sunReadBuffer) { module.release(); return false; }
+		BindGroupLayout rayGroups[2] = { w.skyBindGroupLayout, w.sunCountBindGroupLayout };
+		w.sunRaysPipelineLayout = createPipelineLayout("world sun rays pipeline layout", rayGroups, 2);
+		w.sunRaysPipeline = pipeline("world sun and moon for the god rays", w.sunRaysPipelineLayout, "vs_sun",
+			"fs_sunRays", one, 1, nullptr, PrimitiveTopology::TriangleStrip);
+
 		const bool invalid = scope.failed();
 		module.release();
-		return w.skyBakePipeline && w.skyPipeline && w.sunPipeline && w.skyBakeBindGroup && !invalid;
+		return w.skyBakePipeline && w.skyPipeline && w.sunPipeline && w.sunRaysPipeline && w.skyBakeBindGroup
+			&& !invalid;
 	}
 
 	// GL's three skies (SkyBoxLoaderAndDrawer::createSkyTextures), baked
@@ -3579,19 +3882,70 @@ namespace
 
 	// The sun and the moon (renderSun), onto the G-buffer after the
 	// entities and before the transparent passes, as GL draws them.
+	// Milestone 18: renderSun's god ray passes, against the depth as the
+	// opaque faces and entities left it (the transparent ones come after,
+	// so water does not block the rays). At half size: the sun and moon
+	// again (the sun also counting its visible pixels for the flare), the
+	// geometry masked out, then the radial blur. Always run, so the rays
+	// clear when the sun cannot be drawn.
+	void recordSunRays(CommandEncoder encoder, bool drawable)
+	{
+		if (!w.sunRaysView || !w.sunRaysBlurView || !w.rayMaskBindGroup || !w.rayBlurBindGroup) { return; }
+		encoder.clearBuffer(w.sunCountBuffer, 0, 4);
+
+		RenderPassColorAttachment color = Default;
+		color.view = w.sunRaysView;
+		color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+		color.resolveTarget = nullptr;
+		color.loadOp = LoadOp::Clear;
+		color.storeOp = StoreOp::Store;
+		color.clearValue = Color{ 0.0, 0.0, 0.0, 0.0 };
+		RenderPassDescriptor passDesc = Default;
+		passDesc.label = StringView("world god rays sun pass");
+		passDesc.colorAttachmentCount = 1;
+		passDesc.colorAttachments = &color;
+		passDesc.depthStencilAttachment = nullptr;
+		passDesc.occlusionQuerySet = nullptr;
+		passDesc.timestampWrites = nullptr;
+		RenderPassEncoder pass = encoder.beginRenderPass(passDesc);
+		if (drawable && w.sunCountBindGroup)
+		{
+			pass.setPipeline(w.sunRaysPipeline);
+			pass.setBindGroup(0, w.skyBindGroup, 0, nullptr);
+			pass.setBindGroup(1, w.sunCountBindGroup, 0, nullptr);
+			pass.draw(4, 2, 0, 2); // instance 2 the sun, 3 the moon
+		}
+		pass.end();
+		pass.release();
+
+		fullscreenPass(encoder, w.sunRaysView, true, w.rayMaskPipeline, w.rayMaskBindGroup, "world god rays mask");
+		fullscreenPass(encoder, w.sunRaysBlurView, false, w.rayBlurPipeline, w.rayBlurBindGroup, "world god rays blur");
+
+		// The count out, when no earlier one is still in flight.
+		if (w.sunReadState == World::Readback::Idle)
+		{
+			encoder.copyBufferToBuffer(w.sunCountBuffer, 0, w.sunReadBuffer, 0, 4);
+			w.sunReadState = World::Readback::Copied;
+		}
+	}
+
 	void drawSunAndMoon()
 	{
 		if (!w.sunPending) { return; }
 		w.sunPending = false;
-		if (!w.sunDrawable || !w.skyBindGroup) { return; }
 		CommandEncoder encoder = wgpuFrameEncoder();
 		if (!encoder) { return; }
-		RenderPassEncoder pass = beginGBufferPass(encoder, false, "world sun and moon pass");
-		pass.setPipeline(w.sunPipeline);
-		pass.setBindGroup(0, w.skyBindGroup, 0, nullptr);
-		pass.draw(4, 2, 0, 0); // instance 0 the sun, 1 the moon
-		pass.end();
-		pass.release();
+		const bool drawable = w.sunDrawable && w.skyBindGroup;
+		if (drawable)
+		{
+			RenderPassEncoder pass = beginGBufferPass(encoder, false, "world sun and moon pass");
+			pass.setPipeline(w.sunPipeline);
+			pass.setBindGroup(0, w.skyBindGroup, 0, nullptr);
+			pass.draw(4, 2, 0, 0); // instance 0 the sun, 1 the moon
+			pass.end();
+			pass.release();
+		}
+		recordSunRays(encoder, drawable);
 	}
 
 	bool initialize()
@@ -3609,7 +3963,8 @@ namespace
 		}
 
 		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines()
-			|| !createSky() || !createPost() || !createBloom() || !createHbao())
+			|| !createSky() || !createPost() || !createBloom() || !createHbao()
+			|| !createRaysAndWarp())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -3798,8 +4153,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 {
 	if (!initialize()) { return; }
 
-	// Milestone 16: an exposure reading copied out in an earlier frame.
-	serviceExposureReadback();
+	// Milestones 16 and 18: readings copied out in earlier frames.
+	serviceReadbacks();
 
 	// The point lights, as GL gathers them: the visible chunks' lists,
 	// nearest chunk first (the list's end), until maxLights is reached
@@ -3857,6 +4212,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		(int)std::min<size_t>(w.frameLights.size(), (size_t)std::max(lighting.maxLights, 0)),
 		drawShadows ? shadows : 0, lighting.ssr ? 1 : 0);
 	uniforms.projection = projection;
+	uniforms.underWaterColor = glm::vec4(lighting.underWaterColor, lighting.underwaterDarkenStrength);
+	uniforms.underWaterParams = glm::vec4(lighting.underwaterDarkenDistance, lighting.fogGradientUnderWater, 0.f, 0.f);
 
 	// Milestone 13: the sun's cascades, camera-relative. GL's matrices
 	// take world positions to -1..1 depth; here the camera position is
@@ -3884,6 +4241,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	sky.moonMatrix = sunMatrix(camera, -lighting.sunPosition, 0.6f);
 	sky.sunParams = glm::vec4(lighting.sunTwilight, 1.f, 0.f, 0.f);
 	sky.moonParams = glm::vec4(0.f, 1.f, 0.f, 0.f);
+	// renderSun's second drawing, for the god rays.
+	sky.raySunParams = glm::vec4(std::max(lighting.sunTwilight, 0.5f), 1.f, 0.f, 0.f);
+	sky.rayMoonParams = glm::vec4(0.f, 0.35f, 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.skyUniformBuffer, 0, &sky, sizeof(sky));
 
 	// Milestone 15: the post chain's settings, for the composite.
@@ -3914,6 +4274,19 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	hbao.params = glm::vec4(lighting.aoViewDistance, 0.f, 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.hbaoUniformBuffer, 0, &hbao, sizeof(hbao));
 	w.ssao = lighting.ssao;
+
+	// Milestone 18: where the sun is on screen (GL's sunPositionScreenSpaceUV,
+	// from the sun's direction as a point; the projection's x, y and w rows
+	// are GL's), and the warp's color and time.
+	RayUniforms rayUniforms;
+	const glm::vec4 sunClip = projection * camera.getViewMatrix() * glm::vec4(lighting.sunPosition, 1.f);
+	rayUniforms.center = glm::vec4(glm::vec2(sunClip) / sunClip.w * 0.5f + 0.5f, 0.f, 0.f);
+	wgpuQueue().writeBuffer(w.rayUniformBuffer, 0, &rayUniforms, sizeof(rayUniforms));
+	WarpUniforms warpUniforms;
+	warpUniforms.color = glm::vec4(lighting.underWaterColor, 0.f);
+	warpUniforms.params = glm::vec4(lighting.warpTime, 0.f, 0.f, 0.f);
+	wgpuQueue().writeBuffer(w.warpUniformBuffer, 0, &warpUniforms, sizeof(warpUniforms));
+	w.underWater = lighting.underWater;
 
 	const auto recordStart = std::chrono::steady_clock::now();
 
@@ -4384,6 +4757,11 @@ void renderTransparent()
 	compositeFrame();
 }
 
+int sunVisibleSamples()
+{
+	return (int)w.sunSamples;
+}
+
 bool takeExposureColor(glm::vec3 &color)
 {
 	if (!w.exposureFresh) { return false; }
@@ -4493,7 +4871,8 @@ void shutdown()
 			<< w.lastShadowFaces[0] << "/" << w.lastShadowFaces[1] << "/" << w.lastShadowFaces[2] << " faces; bloom "
 			<< (w.bloom ? std::to_string(w.bloomMips + 1) + " levels" : std::string("off")) << "; "
 			<< w.exposureReadings << " exposure readings, the last (" << w.exposureColor.x << ", "
-			<< w.exposureColor.y << ", " << w.exposureColor.z << ")\n";
+			<< w.exposureColor.y << ", " << w.exposureColor.z << "); " << w.sunReadings
+			<< " sun counts, the last " << w.sunSamples << " pixels\n";
 		if (w.timedFrames)
 		{
 			std::cout << "WebGPU world timing (" << drawModeName(w.drawMode) << ", " << w.timedFrames
@@ -4599,6 +4978,27 @@ void shutdown()
 		if (*layout) { layout->release(); *layout = nullptr; }
 	}
 	if (w.hbaoUniformBuffer) { w.hbaoUniformBuffer.release(); w.hbaoUniformBuffer = nullptr; }
+	// Milestone 18.
+	if (w.sunReadBuffer && w.sunReadState == World::Readback::Mapped) { w.sunReadBuffer.unmap(); }
+	w.sunReadState = World::Readback::Idle;
+	for (RenderPipeline *pipeline : { &w.sunRaysPipeline, &w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	for (PipelineLayout *layout : { &w.sunRaysPipelineLayout, &w.rayMaskPipelineLayout, &w.rayBlurPipelineLayout,
+		&w.warpPipelineLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (BindGroupLayout *layout : { &w.sunCountBindGroupLayout, &w.rayMaskBindGroupLayout, &w.rayBlurBindGroupLayout,
+		&w.warpBindGroupLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (Buffer *buffer : { &w.rayUniformBuffer, &w.warpUniformBuffer, &w.sunCountBuffer, &w.sunReadBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
 	if (w.blackView) { w.blackView.release(); w.blackView = nullptr; }
 	if (w.blackTexture) { w.blackTexture.destroy(); w.blackTexture.release(); w.blackTexture = nullptr; }
 	for (RenderPipeline *pipeline : { &w.toneMapToTexturePipeline, &w.toneMapToSurfacePipeline, &w.fxaaPipeline })

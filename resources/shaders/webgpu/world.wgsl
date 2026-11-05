@@ -43,6 +43,11 @@ struct Uniforms {
     // u_cameraProjection, whose x, y and w rows are the same), view space
     // to clip space, for the reflections' ray march.
     projection: mat4x4f,
+    // Milestone 18, under water (fogParams.z): rgb GL's u_underWaterColor
+    // (as GL uses it, unconverted), w u_underwaterDarkenStrength; and x
+    // u_underwaterDarkenDistance, y u_fogGradientUnderWater.
+    underWaterColor: vec4f,
+    underWaterParams: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

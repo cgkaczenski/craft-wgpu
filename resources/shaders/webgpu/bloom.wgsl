@@ -142,12 +142,14 @@ fn fs_blur(in: BloomOutput) -> @location(0) vec4f {
     return vec4f(c, 1.0);
 }
 
-// applyBloomData.frag, without the SSGR term (milestone 18; GL's adds 0
-// while the god rays are off).
+// applyBloomData.frag, with milestone 18's god rays (godRays.wgsl's
+// half-size result, GL's u_SSGR) and the depth they are weighed by.
 @group(0) @binding(3) var lensDirt: texture_2d<f32>;
 @group(0) @binding(4) var hitDirt: texture_2d<f32>;
 @group(0) @binding(5) var waterDirt: texture_2d<f32>;
 @group(0) @binding(6) var dirtSampler: sampler; // nearest (gl2d's pixelated)
+@group(0) @binding(7) var godRays: texture_2d<f32>;
+@group(0) @binding(8) var sceneDepth: texture_depth_2d;
 
 fn addLensBlur(c: vec3f, presence: f32, strength: f32) -> vec3f {
     return reinhard(c * presence) * strength;
@@ -162,11 +164,21 @@ fn fs_apply(in: BloomOutput) -> @location(0) vec4f {
     let dirtIntensity = textureSample(lensDirt, dirtSampler, dirtUv).rgb;
     let hitIntensity = textureSample(hitDirt, dirtSampler, dirtUv).rgb;
     let waterIntensity = textureSample(waterDirt, dirtSampler, dirtUv).rgb;
+    let ssgr = textureSample(godRays, sourceSampler, in.uv).rgb;
+    let depthSize = textureDimensions(sceneDepth);
+    let depth = textureLoad(sceneDepth, min(vec2u(in.uv * vec2f(depthSize)), depthSize - 1u), 0);
 
     c = min(c, vec3f(2.0));
     c += addLensBlur(dirtIntensity * c, 1.5, 2.1);
     c += addLensBlur(hitIntensity * c, bloom.dirt.x * 8.0, 5.0);
     c += addLensBlur(waterIntensity * c, 6.0 * bloom.dirt.y, 4.0);
+    // The rays: squared (fainter) over the sky, as they are over geometry
+    // linearly.
+    if (depth == 1.0) {
+        c += pow(ssgr * 0.4, vec3f(2.0));
+    } else {
+        c += ssgr * 0.4;
+    }
     return vec4f(c, 1.0);
 }
 

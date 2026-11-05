@@ -3189,6 +3189,12 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	lighting.ssao = programData.renderer.ssao;
 	lighting.aoViewDistance = (chunkSystem.squareSize / 2.f) * 16.f;
 	lighting.ssr = getShadingSettings().SSR != 0;
+	// Milestone 18: under water, and the warp's clock.
+	lighting.underWaterColor = defaultShader.shadingSettings.underWaterColor;
+	lighting.underwaterDarkenStrength = defaultShader.shadingSettings.underwaterDarkenStrength;
+	lighting.underwaterDarkenDistance = defaultShader.shadingSettings.underwaterDarkenDistance;
+	lighting.fogGradientUnderWater = defaultShader.shadingSettings.fogGradientUnderWater;
+	lighting.warpTime = timeGrass;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif
@@ -4610,6 +4616,10 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 				//std::cout << "MAX: " << int(maxSize * screenX) * int(maxSize * screenX) * 4 << " ";
 				maxSize = int(maxSize * screenX) * int(maxSize * screenX) * 4;
 			}
+		#if RENDERER_WEBGPU
+			// The GL queries are stubs here; the WebGPU world counts the same.
+			queryDataForSunFlare = wgpuWorld::sunVisibleSamples();
+		#endif
 			float sunOcclusionFactor = glm::clamp(queryDataForSunFlare / maxSize, 0.f, 1.f);
 			sunOcclusionFactor *= sunOcclusionFactor;
 

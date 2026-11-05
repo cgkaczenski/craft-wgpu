@@ -59,7 +59,8 @@
 // the water's surface, not the lake bed.
 //
 // Conventions (docs/roadmap.md): positions camera-relative, depth 0..1.
-// No animation yet (grass, leaves sway and water waves in defaultShader.vert).
+// No animation yet (grass, leaves sway and water waves in defaultShader.vert),
+// and so no caustics (their coordinates move with the water's).
 
 #include "world.wgsl"
 #include "lighting.wgsl"
@@ -324,10 +325,19 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
 
     var s: Shaded;
     s.dotNV = dot(N, V);
+    // Milestone 18: under water, the color darkens toward the underwater
+    // color with distance (GL's computeFogUnderWater), before the
+    // reflections and the water's own mix, as in GL.
+    var lit = color + albedo * ambient;
+    if (u.fogParams.z != 0.0) {
+        let fog = pow(exp(-pow(length(in.relative) / u.underWaterParams.x, u.underWaterParams.y)), 4.0);
+        let strength = u.underWaterColor.w;
+        lit = mix(u.underWaterColor.rgb, lit, vec3f(fog * strength + (1.0 - strength)));
+    }
     s.alpha = 1.0 - (1.0 - t.albedo.a) * s.dotNV;
     // GL's ambient without its physically accurate reflections (switched
     // off by a constant): the albedo in the ambient light.
-    s.color = color + albedo * ambient;
+    s.color = lit;
     s.normal = N;
     s.roughness = m.roughness;
     s.bloom = m.emissive * 0.12 * albedo;
