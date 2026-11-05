@@ -42,6 +42,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
+#include <glm/gtc/packing.hpp>
 
 #include <algorithm>
 #include <array>
@@ -116,6 +117,14 @@ namespace
 		glm::ivec4 mode; // x tone mapper
 	};
 	static_assert(sizeof(PostUniforms) == 80, "must match post.wgsl's PostUniforms");
+
+	// Milestone 16: bloom.wgsl's BloomUniforms.
+	struct BloomUniforms
+	{
+		glm::vec4 params; // exposure, threshold, multiplier
+		glm::vec4 dirt;   // hit intensity, water drops
+	};
+	static_assert(sizeof(BloomUniforms) == 32, "must match bloom.wgsl's BloomUniforms");
 
 	// GL's three skies, each a cubemap of 128x128 faces.
 	enum SkyKind { DaySky, TwilightSky, NightSky, SkyKinds };
@@ -358,6 +367,52 @@ namespace
 		BindGroup fxaaBindGroup = nullptr;      // reads the FXAA input
 		bool fxaa = true;                       // this frame's setting
 
+		// Milestone 16: bloom and the auto exposure (bloom.wgsl). Every
+		// pass reads one mip through one of these groups (uniforms, the
+		// view, the sampler); the apply's group adds the lens dirt.
+		BindGroupLayout bloomBindGroupLayout = nullptr;
+		BindGroupLayout bloomApplyBindGroupLayout = nullptr;
+		PipelineLayout bloomPipelineLayout = nullptr;
+		PipelineLayout bloomApplyPipelineLayout = nullptr;
+		RenderPipeline bloomFilterPipeline = nullptr;  // into the G-buffer's bloom, added
+		RenderPipeline bloomDownPipeline = nullptr;
+		RenderPipeline bloomTentPipeline = nullptr;    // the copy at each level
+		RenderPipeline bloomUpPipeline = nullptr;      // the same, added onto the level above
+		RenderPipeline bloomBlurPipelines[2] = {};     // vertical, horizontal (GL's u_horizontal)
+		RenderPipeline bloomApplyPipeline = nullptr;   // onto the HDR color, added
+		RenderPipeline exposurePipeline = nullptr;     // one level of the average
+		Buffer bloomUniformBuffer = nullptr;
+		Sampler dirtSampler = nullptr;                 // nearest: gl2d loads the dirt pixelated
+		Texture blackTexture = nullptr;                // a missing dirt texture adds nothing
+		TextureView blackView = nullptr;
+		bool bloom = false;                            // this frame's setting
+		uint32_t dirtTextures[3] = {};                 // lens, hit, water: wgpu2d ids
+		// Sized with the targets: GL's bluredColorBuffer[2], mip 0 half the
+		// surface, bloomMips + 1 levels (GL's currentMips), a view and a
+		// group per level; the groups reading the HDR color and the
+		// G-buffer's bloom; and the apply's group, remade when its views
+		// change (it reads whichever buffer the sequence ends in).
+		int bloomMips = 0;
+		Texture blurTextures[2] = {};
+		std::vector<TextureView> blurViews[2];
+		std::vector<BindGroup> blurGroups[2];
+		BindGroup colorSourceGroup = nullptr;
+		BindGroup bloomSourceGroup = nullptr;
+		BindGroup bloomApplyGroup = nullptr;
+		TextureView boundApplyViews[4] = {};           // what bloomApplyGroup names (not owned)
+		// The exposure's average: rgba16float, level 0 half the surface,
+		// down to 1x1 (GL's glGenerateMipmap of fboMain.color), then that
+		// texel copied into a mappable buffer and read a few frames later.
+		Texture exposureTexture = nullptr;
+		std::vector<TextureView> exposureViews;
+		std::vector<BindGroup> exposureGroups;     // each reading its level
+		Buffer exposureReadBuffer = nullptr;
+		enum class Readback { Idle, Copied, Mapping, Mapped };
+		Readback exposureState = Readback::Idle;
+		glm::vec3 exposureColor = {0, 0, 0};
+		bool exposureFresh = false;                // a reading takeExposureColor has not given out
+		uint32_t exposureReadings = 0;             // for the shutdown line
+
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
 
@@ -459,6 +514,10 @@ namespace
 	};
 
 	World w;
+
+	// Defined with the bloom (milestone 16), used by the targets.
+	bool ensureBloomTargets(int width, int height);
+	void releaseBloomTargets();
 
 	// ---- The face arena -------------------------------------------------
 
@@ -1331,6 +1390,191 @@ namespace
 		return encoder.beginRenderPass(passDesc);
 	}
 
+	// ---- Milestone 16: bloom and the auto exposure, each frame -----------
+
+	// A fullscreen triangle into one view (one mip), reading `group`. Loads
+	// what is there when the pipeline adds onto it.
+	void fullscreenPass(CommandEncoder encoder, TextureView target, bool load, RenderPipeline pipeline,
+		BindGroup group, const char *label)
+	{
+		RenderPassColorAttachment color = Default;
+		color.view = target;
+		color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+		color.resolveTarget = nullptr;
+		color.loadOp = load ? LoadOp::Load : LoadOp::Clear;
+		color.storeOp = StoreOp::Store;
+		color.clearValue = Color{ 0.0, 0.0, 0.0, 1.0 };
+		RenderPassDescriptor passDesc = Default;
+		passDesc.label = StringView(label);
+		passDesc.colorAttachmentCount = 1;
+		passDesc.colorAttachments = &color;
+		passDesc.depthStencilAttachment = nullptr;
+		passDesc.occlusionQuerySet = nullptr;
+		passDesc.timestampWrites = nullptr;
+		RenderPassEncoder pass = encoder.beginRenderPass(passDesc);
+		pass.setPipeline(pipeline);
+		pass.setBindGroup(0, group, 0, nullptr);
+		pass.draw(3, 1, 0, 0);
+		pass.end();
+		pass.release();
+	}
+
+	// The exposure's average: the HDR color halved level by level to 1x1,
+	// that texel copied out. Only while no reading is in flight: the buffer
+	// may not be used by a submit while it is mapped or being mapped.
+	void recordExposure(CommandEncoder encoder)
+	{
+		if (w.exposureState != World::Readback::Idle || w.exposureViews.empty() || !w.exposureReadBuffer) { return; }
+		for (size_t level = 0; level < w.exposureViews.size(); level++)
+		{
+			fullscreenPass(encoder, w.exposureViews[level], false, w.exposurePipeline,
+				level == 0 ? w.colorSourceGroup : w.exposureGroups[level - 1], "world exposure average");
+		}
+
+		TexelCopyTextureInfo from = Default;
+		from.texture = w.exposureTexture;
+		from.mipLevel = (uint32_t)w.exposureViews.size() - 1;
+		from.origin = { 0, 0, 0 };
+		from.aspect = TextureAspect::All;
+		TexelCopyBufferInfo to = Default;
+		to.buffer = w.exposureReadBuffer;
+		to.layout.offset = 0;
+		to.layout.bytesPerRow = 256;
+		to.layout.rowsPerImage = 1;
+		Extent3D size = { 1, 1, 1 };
+		encoder.copyTextureToBuffer(from, to, size);
+		w.exposureState = World::Readback::Copied;
+	}
+
+	// The last frame's copy, now submitted, asked for; the device polled so
+	// a finished mapping calls back; a mapped reading taken and the buffer
+	// freed. Called at the start of render, so a few frames pass from the
+	// copy to the reading (GL's pixel buffer takes one or two).
+	void serviceExposureReadback()
+	{
+		if (!w.exposureReadBuffer) { return; }
+		if (w.exposureState == World::Readback::Copied)
+		{
+			WGPUBufferMapCallbackInfo info = {};
+			info.nextInChain = nullptr;
+			info.mode = WGPUCallbackMode_AllowProcessEvents;
+			info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *state, void *)
+			{
+				// Only the state changes here: no webgpu call may be made
+				// from inside the poll that calls this.
+				*static_cast<World::Readback *>(state) = status == WGPUMapAsyncStatus_Success
+					? World::Readback::Mapped : World::Readback::Idle;
+			};
+			info.userdata1 = &w.exposureState;
+			info.userdata2 = nullptr;
+			w.exposureState = World::Readback::Mapping;
+			wgpuBufferMapAsync(w.exposureReadBuffer, WGPUMapMode_Read, 0, 256, info);
+		}
+		if (w.exposureState == World::Readback::Mapping)
+		{
+			wgpuDevicePoll(wgpuDevice(), false, nullptr);
+		}
+		if (w.exposureState == World::Readback::Mapped)
+		{
+			const uint16_t *half = static_cast<const uint16_t *>(
+				wgpuBufferGetConstMappedRange(w.exposureReadBuffer, 0, 8));
+			if (half)
+			{
+				w.exposureColor = glm::vec3(glm::unpackHalf1x16(half[0]), glm::unpackHalf1x16(half[1]),
+					glm::unpackHalf1x16(half[2]));
+				w.exposureFresh = true;
+				w.exposureReadings++;
+			}
+			w.exposureReadBuffer.unmap();
+			w.exposureState = World::Readback::Idle;
+		}
+	}
+
+	// The apply's group: the blurred bloom (whichever buffer the sequence
+	// ends in) and the three dirt textures, black where one is missing.
+	BindGroup bloomApplyGroup(TextureView bloomView)
+	{
+		TextureView views[4] = { bloomView, nullptr, nullptr, nullptr };
+		for (int i = 0; i < 3; i++)
+		{
+			views[i + 1] = w.dirtTextures[i] ? wgpuTextureView(w.dirtTextures[i]) : nullptr;
+			if (!views[i + 1]) { views[i + 1] = w.blackView; }
+		}
+		if (w.bloomApplyGroup && std::equal(std::begin(views), std::end(views), std::begin(w.boundApplyViews)))
+		{
+			return w.bloomApplyGroup;
+		}
+		if (w.bloomApplyGroup) { w.bloomApplyGroup.release(); w.bloomApplyGroup = nullptr; }
+
+		BindGroupEntry entries[7];
+		for (uint32_t i = 0; i < 7; i++) { entries[i] = Default; entries[i].binding = i; }
+		entries[0].buffer = w.bloomUniformBuffer;
+		entries[0].size = sizeof(BloomUniforms);
+		entries[1].textureView = views[0];
+		entries[2].sampler = w.postSampler;
+		entries[3].textureView = views[1];
+		entries[4].textureView = views[2];
+		entries[5].textureView = views[3];
+		entries[6].sampler = w.dirtSampler;
+		BindGroupDescriptor desc = Default;
+		desc.label = StringView("world bloom apply bind group");
+		desc.layout = w.bloomApplyBindGroupLayout;
+		desc.entryCount = 7;
+		desc.entries = entries;
+		w.bloomApplyGroup = wgpuDevice().createBindGroup(desc);
+		std::copy(std::begin(views), std::end(views), std::begin(w.boundApplyViews));
+		return w.bloomApplyGroup;
+	}
+
+	// GL's bloom, pass for pass: the bright pixels added into the G-buffer's
+	// bloom; then, level by level, a downsample, a copy, and a Gaussian each
+	// way, ping-ponging between the two buffers; the levels added back up,
+	// smallest first; and the result, with its lens dirt, added onto the HDR
+	// color. `horizontal`, `firstTime` and `last` (GL's lastBloomChannel)
+	// run as in GL, so each pass reads and writes what GL's does.
+	void recordBloom(CommandEncoder encoder)
+	{
+		if (!w.bloom || w.blurViews[0].empty() || w.blurViews[1].empty()) { return; }
+
+		fullscreenPass(encoder, w.gBufferViews[GBloom], true, w.bloomFilterPipeline, w.colorSourceGroup,
+			"world bloom filter");
+
+		bool horizontal = false;
+		bool firstTime = true;
+		int last = 1;
+		for (int i = 0; i <= w.bloomMips; i++)
+		{
+			fullscreenPass(encoder, w.blurViews[horizontal][i], false, w.bloomDownPipeline,
+				firstTime ? w.bloomSourceGroup : w.blurGroups[last][i - 1], "world bloom down");
+			last = horizontal;
+
+			fullscreenPass(encoder, w.blurViews[!horizontal][i], false, w.bloomTentPipeline,
+				w.blurGroups[last][i], "world bloom copy");
+			last = !horizontal;
+
+			for (int j = 0; j < 2; j++)
+			{
+				fullscreenPass(encoder, w.blurViews[horizontal][i], false, w.bloomBlurPipelines[horizontal],
+					w.blurGroups[last][i], "world bloom blur");
+				last = horizontal;
+				horizontal = !horizontal;
+				firstTime = false;
+			}
+			horizontal = !horizontal;
+		}
+
+		for (int finalMip = w.bloomMips; finalMip > 0; finalMip--)
+		{
+			fullscreenPass(encoder, w.blurViews[!last][finalMip - 1], true, w.bloomUpPipeline,
+				w.blurGroups[last][finalMip], "world bloom up");
+			last = !last;
+		}
+
+		BindGroup apply = bloomApplyGroup(w.blurViews[last][0]);
+		if (!apply) { return; }
+		fullscreenPass(encoder, w.gBufferViews[GColor], true, w.bloomApplyPipeline, apply, "world bloom apply");
+	}
+
 	// The asked-for debug views, each into its own small wgpu2d target, and
 	// then the composite: the HDR color (or WGPU_GBUFFER_VIEW's attachment)
 	// onto the screen, in the frame's 2D pass, under the UI. The views go
@@ -1339,6 +1583,17 @@ namespace
 	{
 		if (!w.frameRendered || !w.viewBindGroup) { return; }
 		w.frameRendered = false;
+
+		// Milestone 16: the exposure's average, of the HDR color as the
+		// world left it (GL reads it before the bloom), then the bloom.
+		{
+			CommandEncoder encoder = wgpuFrameEncoder();
+			if (encoder)
+			{
+				recordExposure(encoder);
+				recordBloom(encoder);
+			}
+		}
 
 		const uint32_t wanted = w.previewsWanted;
 		w.previewsWanted = 0;
@@ -1974,6 +2229,7 @@ namespace
 
 	void releaseTargets()
 	{
+		releaseBloomTargets();
 		for (BindGroup *group : { &w.peelBindGroup, &w.viewBindGroup, &w.toneMapBindGroup, &w.fxaaBindGroup })
 		{
 			if (*group) { group->release(); *group = nullptr; }
@@ -2114,6 +2370,9 @@ namespace
 		viewGroupDesc.entries = viewEntries;
 		w.viewBindGroup = wgpuDevice().createBindGroup(viewGroupDesc);
 		if (!w.viewBindGroup || scope.failed()) { return false; }
+
+		// Milestone 16: bloom's two blur chains and the exposure's average.
+		if (!ensureBloomTargets(width, height) || scope.failed()) { return false; }
 
 		w.depthWidth = width;
 		w.depthHeight = height;
@@ -2476,6 +2735,283 @@ namespace
 		const bool invalid = scope.failed();
 		module.release();
 		return w.toneMapToTexturePipeline && w.toneMapToSurfacePipeline && w.fxaaPipeline && !invalid;
+	}
+
+	// ---- Milestone 16: bloom and the auto exposure (bloom.wgsl) ----------
+
+	bool createBloom()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/bloom.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world bloom");
+
+		BufferDescriptor bufferDesc = Default;
+		bufferDesc.label = StringView("world bloom uniforms");
+		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
+		bufferDesc.size = sizeof(BloomUniforms);
+		bufferDesc.mappedAtCreation = false;
+		w.bloomUniformBuffer = wgpuDevice().createBuffer(bufferDesc);
+
+		// The exposure's reading: one texel, in a row padded to the 256
+		// bytes a texture-to-buffer copy asks of each row.
+		bufferDesc.label = StringView("world exposure readback");
+		bufferDesc.usage = BufferUsage::MapRead | BufferUsage::CopyDst;
+		bufferDesc.size = 256;
+		w.exposureReadBuffer = wgpuDevice().createBuffer(bufferDesc);
+
+		SamplerDescriptor samplerDesc = Default;
+		samplerDesc.label = StringView("world lens dirt sampler");
+		samplerDesc.addressModeU = AddressMode::ClampToEdge;
+		samplerDesc.addressModeV = AddressMode::ClampToEdge;
+		samplerDesc.addressModeW = AddressMode::ClampToEdge;
+		samplerDesc.magFilter = FilterMode::Nearest;
+		samplerDesc.minFilter = FilterMode::Nearest;
+		samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
+		samplerDesc.lodMinClamp = 0.0f;
+		samplerDesc.lodMaxClamp = 32.0f;
+		samplerDesc.compare = CompareFunction::Undefined;
+		samplerDesc.maxAnisotropy = 1;
+		w.dirtSampler = wgpuDevice().createSampler(samplerDesc);
+
+		// Black, as WebGPU zeroes a new texture.
+		w.blackTexture = createTarget("world black", TextureFormat::RGBA8Unorm, TextureUsage::TextureBinding, 1, 1);
+		if (w.blackTexture)
+		{
+			w.blackView = createTargetView(w.blackTexture, "world black view", TextureFormat::RGBA8Unorm,
+				TextureAspect::All, TextureUsage::TextureBinding);
+		}
+		if (!w.bloomUniformBuffer || !w.exposureReadBuffer || !w.dirtSampler || !w.blackView)
+		{
+			module.release();
+			return false;
+		}
+
+		// Uniforms, one source, its sampler; the apply adds three dirt
+		// textures and their sampler.
+		BindGroupLayoutEntry entries[7];
+		for (uint32_t i = 0; i < 7; i++)
+		{
+			entries[i] = Default;
+			entries[i].binding = i;
+			entries[i].visibility = ShaderStage::Fragment;
+			entries[i].buffer.type = BufferBindingType::BindingNotUsed;
+			entries[i].sampler.type = SamplerBindingType::BindingNotUsed;
+			entries[i].texture.sampleType = TextureSampleType::BindingNotUsed;
+			entries[i].storageTexture.access = StorageTextureAccess::BindingNotUsed;
+			if (i == 0)
+			{
+				entries[i].buffer.type = BufferBindingType::Uniform;
+				entries[i].buffer.hasDynamicOffset = false;
+				entries[i].buffer.minBindingSize = sizeof(BloomUniforms);
+			}
+			else if (i == 2 || i == 6)
+			{
+				entries[i].sampler.type = SamplerBindingType::Filtering;
+			}
+			else
+			{
+				entries[i].texture.sampleType = TextureSampleType::Float;
+				entries[i].texture.viewDimension = TextureViewDimension::_2D;
+				entries[i].texture.multisampled = false;
+			}
+		}
+		BindGroupLayoutDescriptor layoutDesc = Default;
+		layoutDesc.label = StringView("world bloom bind group layout");
+		layoutDesc.entryCount = 3;
+		layoutDesc.entries = entries;
+		w.bloomBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
+		layoutDesc.label = StringView("world bloom apply bind group layout");
+		layoutDesc.entryCount = 7;
+		w.bloomApplyBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
+		if (!w.bloomBindGroupLayout || !w.bloomApplyBindGroupLayout) { module.release(); return false; }
+		w.bloomPipelineLayout = createPipelineLayout("world bloom pipeline layout", &w.bloomBindGroupLayout, 1);
+		w.bloomApplyPipelineLayout = createPipelineLayout("world bloom apply pipeline layout",
+			&w.bloomApplyBindGroupLayout, 1);
+
+		// Each pass a fullscreen triangle into one target; GL's
+		// glBlendFunc(GL_ONE, GL_ONE) where it adds.
+		BlendState add = Default;
+		add.color.operation = BlendOperation::Add;
+		add.color.srcFactor = BlendFactor::One;
+		add.color.dstFactor = BlendFactor::One;
+		add.alpha = add.color;
+		auto pass = [&](const char *label, const char *fragmentEntry, TextureFormat format, bool blend,
+			PipelineLayout layout, const ConstantEntry *constant)
+		{
+			ColorTargetState target = Default;
+			target.format = format;
+			target.blend = blend ? &add : nullptr;
+			target.writeMask = ColorWriteMask::All;
+			FragmentState fragment = Default;
+			fragment.module = module;
+			fragment.entryPoint = StringView(fragmentEntry);
+			fragment.constantCount = constant ? 1 : 0;
+			fragment.constants = constant;
+			fragment.targetCount = 1;
+			fragment.targets = &target;
+			RenderPipelineDescriptor desc = Default;
+			desc.label = StringView(label);
+			desc.layout = layout;
+			desc.vertex.module = module;
+			desc.vertex.entryPoint = StringView("vs_fullscreen");
+			desc.vertex.bufferCount = 0;
+			desc.vertex.buffers = nullptr;
+			desc.primitive.topology = PrimitiveTopology::TriangleList;
+			desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+			desc.primitive.frontFace = FrontFace::CCW;
+			desc.primitive.cullMode = CullMode::None;
+			desc.depthStencil = nullptr;
+			desc.fragment = &fragment;
+			desc.multisample.count = 1;
+			desc.multisample.mask = 0xFFFFFFFFu;
+			desc.multisample.alphaToCoverageEnabled = false;
+			return wgpuDevice().createRenderPipeline(desc);
+		};
+		const PipelineLayout layout = w.bloomPipelineLayout;
+		w.bloomFilterPipeline = pass("world bloom filter", "fs_filter", w.hdrFormat, true, layout, nullptr);
+		w.bloomDownPipeline = pass("world bloom down", "fs_down", w.hdrFormat, false, layout, nullptr);
+		w.bloomTentPipeline = pass("world bloom copy", "fs_tent", w.hdrFormat, false, layout, nullptr);
+		w.bloomUpPipeline = pass("world bloom up", "fs_tent", w.hdrFormat, true, layout, nullptr);
+		for (int h = 0; h < 2; h++)
+		{
+			ConstantEntry constant = Default;
+			constant.key = StringView("horizontal");
+			constant.value = h;
+			w.bloomBlurPipelines[h] = pass(h ? "world bloom blur, horizontal" : "world bloom blur, vertical",
+				"fs_blur", w.hdrFormat, false, layout, &constant);
+		}
+		w.bloomApplyPipeline = pass("world bloom apply", "fs_apply", w.hdrFormat, true,
+			w.bloomApplyPipelineLayout, nullptr);
+		w.exposurePipeline = pass("world exposure average", "fs_average", TextureFormat::RGBA16Float, false,
+			layout, nullptr);
+
+		const bool invalid = scope.failed();
+		module.release();
+		return w.bloomFilterPipeline && w.bloomDownPipeline && w.bloomTentPipeline && w.bloomUpPipeline
+			&& w.bloomBlurPipelines[0] && w.bloomBlurPipelines[1] && w.bloomApplyPipeline && w.exposurePipeline
+			&& !invalid;
+	}
+
+	// A bloom group: the uniforms, one view, the linear sampler.
+	BindGroup bloomGroup(TextureView view, const char *label)
+	{
+		BindGroupEntry entries[3];
+		for (uint32_t i = 0; i < 3; i++) { entries[i] = Default; entries[i].binding = i; }
+		entries[0].buffer = w.bloomUniformBuffer;
+		entries[0].size = sizeof(BloomUniforms);
+		entries[1].textureView = view;
+		entries[2].sampler = w.postSampler;
+		BindGroupDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.layout = w.bloomBindGroupLayout;
+		desc.entryCount = 3;
+		desc.entries = entries;
+		return wgpuDevice().createBindGroup(desc);
+	}
+
+	// One texture with `levels` mips, a view and a reading group per mip.
+	Texture mipChain(const char *label, TextureFormat format, int width, int height, int levels,
+		std::vector<TextureView> &views, std::vector<BindGroup> &groups)
+	{
+		TextureDescriptor desc = Default;
+		desc.label = StringView(label);
+		desc.usage = TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc;
+		desc.dimension = TextureDimension::_2D;
+		desc.size = { (uint32_t)width, (uint32_t)height, 1 };
+		desc.format = format;
+		desc.mipLevelCount = (uint32_t)levels;
+		desc.sampleCount = 1;
+		desc.viewFormatCount = 0;
+		desc.viewFormats = nullptr;
+		Texture texture = wgpuDevice().createTexture(desc);
+		if (!texture) { return nullptr; }
+		for (int m = 0; m < levels; m++)
+		{
+			TextureViewDescriptor viewDesc = Default;
+			viewDesc.label = StringView(label);
+			viewDesc.format = format;
+			viewDesc.dimension = TextureViewDimension::_2D;
+			viewDesc.baseMipLevel = (uint32_t)m;
+			viewDesc.mipLevelCount = 1;
+			viewDesc.baseArrayLayer = 0;
+			viewDesc.arrayLayerCount = 1;
+			viewDesc.aspect = TextureAspect::All;
+			viewDesc.usage = TextureUsage::RenderAttachment | TextureUsage::TextureBinding;
+			views.push_back(texture.createView(viewDesc));
+			groups.push_back(views.back() ? bloomGroup(views.back(), label) : nullptr);
+		}
+		return texture;
+	}
+
+	// GL's bloom levels for a surface size: from half the surface, halving
+	// while both sides stay above 4 and one at least 12 (the last level
+	// kept is the one before that test fails).
+	int bloomMipsFor(int width, int height)
+	{
+		int mips = 0;
+		int mipW = width / 2;
+		int mipH = height / 2;
+		for (int i = 0; i < 16; i++)
+		{
+			if (mipW <= 4 || mipH <= 4 || (mipW < 12 && mipH < 12)) { break; }
+			mipW /= 2;
+			mipH /= 2;
+			mips = i;
+		}
+		return mips;
+	}
+
+	bool ensureBloomTargets(int width, int height)
+	{
+		releaseBloomTargets();
+		if (!w.bloomBindGroupLayout) { return false; }
+		// Too small to halve: no bloom, no exposure readings (both skip
+		// empty chains), the frame itself still drawn.
+		if (width < 2 || height < 2) { return true; }
+
+		w.colorSourceGroup = bloomGroup(w.gBufferViews[GColor], "world bloom source: HDR color");
+		w.bloomSourceGroup = bloomGroup(w.gBufferViews[GBloom], "world bloom source: G-buffer bloom");
+
+		w.bloomMips = bloomMipsFor(width, height);
+		for (int k = 0; k < 2; k++)
+		{
+			w.blurTextures[k] = mipChain(k ? "world bloom blur 1" : "world bloom blur 0", w.hdrFormat,
+				width / 2, height / 2, w.bloomMips + 1, w.blurViews[k], w.blurGroups[k]);
+		}
+
+		// floor(log2) of the larger side: from half the surface down to 1x1.
+		int levels = 0;
+		while ((std::max(width, height) >> (levels + 1)) > 0) { levels++; }
+		w.exposureTexture = mipChain("world exposure average", TextureFormat::RGBA16Float, width / 2, height / 2,
+			levels, w.exposureViews, w.exposureGroups);
+
+		auto all = [](const auto &list) { return std::all_of(list.begin(), list.end(), [](const auto &x) { return bool(x); }); };
+		return w.colorSourceGroup && w.bloomSourceGroup && w.blurTextures[0] && w.blurTextures[1]
+			&& w.exposureTexture && all(w.blurViews[0]) && all(w.blurViews[1]) && all(w.blurGroups[0])
+			&& all(w.blurGroups[1]) && all(w.exposureViews) && all(w.exposureGroups);
+	}
+
+	void releaseBloomTargets()
+	{
+		if (w.bloomApplyGroup) { w.bloomApplyGroup.release(); w.bloomApplyGroup = nullptr; }
+		std::fill(std::begin(w.boundApplyViews), std::end(w.boundApplyViews), nullptr);
+		for (BindGroup *group : { &w.colorSourceGroup, &w.bloomSourceGroup })
+		{
+			if (*group) { group->release(); *group = nullptr; }
+		}
+		auto releaseChain = [](Texture &texture, std::vector<TextureView> &views, std::vector<BindGroup> &groups)
+		{
+			for (BindGroup &group : groups) { if (group) { group.release(); } }
+			for (TextureView &view : views) { if (view) { view.release(); } }
+			groups.clear();
+			views.clear();
+			if (texture) { texture.destroy(); texture.release(); texture = nullptr; }
+		};
+		releaseChain(w.blurTextures[0], w.blurViews[0], w.blurGroups[0]);
+		releaseChain(w.blurTextures[1], w.blurViews[1], w.blurGroups[1]);
+		// A copy recorded into the old chain but not yet submitted is still
+		// fine: the texture is destroyed only once the queue is done with it.
+		releaseChain(w.exposureTexture, w.exposureViews, w.exposureGroups);
 	}
 
 	// ---- Milestone 14: the sky (sky.wgsl) -------------------------------
@@ -2852,7 +3388,7 @@ namespace
 		}
 
 		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines()
-			|| !createSky() || !createPost())
+			|| !createSky() || !createPost() || !createBloom())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -3041,6 +3577,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 {
 	if (!initialize()) { return; }
 
+	// Milestone 16: an exposure reading copied out in an earlier frame.
+	serviceExposureReadback();
+
 	// The point lights, as GL gathers them: the visible chunks' lists,
 	// nearest chunk first (the list's end), until maxLights is reached
 	// (the chunk that crosses it still counts whole; the shader reads at
@@ -3134,6 +3673,17 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	post.mode = glm::ivec4(std::clamp(lighting.tonemapper, 0, 4), 0, 0, 0);
 	wgpuQueue().writeBuffer(w.postUniformBuffer, 0, &post, sizeof(post));
 	w.fxaa = lighting.fxaa;
+
+	// Milestone 16: bloom's settings and lens dirt, for the composite.
+	BloomUniforms bloom;
+	bloom.params = glm::vec4(lighting.bloomExposure, std::max(lighting.bloomThreshold, 1e-6f),
+		lighting.bloomMultiplier, 0.f);
+	bloom.dirt = glm::vec4(lighting.hitLensDirt, lighting.waterDrops, 0.f, 0.f);
+	wgpuQueue().writeBuffer(w.bloomUniformBuffer, 0, &bloom, sizeof(bloom));
+	w.bloom = lighting.bloom;
+	w.dirtTextures[0] = lighting.lensDirtTexture;
+	w.dirtTextures[1] = lighting.hitDirtTexture;
+	w.dirtTextures[2] = lighting.waterDirtTexture;
 
 	const auto recordStart = std::chrono::steady_clock::now();
 
@@ -3604,6 +4154,14 @@ void renderTransparent()
 	compositeFrame();
 }
 
+bool takeExposureColor(glm::vec3 &color)
+{
+	if (!w.exposureFresh) { return false; }
+	w.exposureFresh = false;
+	color = w.exposureColor;
+	return true;
+}
+
 uint32_t gBufferPreview(int view)
 {
 	if (view < 0 || view >= gBufferViewCount) { return 0; }
@@ -3702,7 +4260,10 @@ void shutdown()
 			<< w.meshes.size() << " meshes; " << w.frameLights.size() << " point lights from "
 			<< w.chunkLights.size() << " chunks with lights; sun shadow cascades "
 			<< w.lastShadowChunks[0] << "/" << w.lastShadowChunks[1] << "/" << w.lastShadowChunks[2] << " chunks, "
-			<< w.lastShadowFaces[0] << "/" << w.lastShadowFaces[1] << "/" << w.lastShadowFaces[2] << " faces\n";
+			<< w.lastShadowFaces[0] << "/" << w.lastShadowFaces[1] << "/" << w.lastShadowFaces[2] << " faces; bloom "
+			<< (w.bloom ? std::to_string(w.bloomMips + 1) + " levels" : std::string("off")) << "; "
+			<< w.exposureReadings << " exposure readings, the last (" << w.exposureColor.x << ", "
+			<< w.exposureColor.y << ", " << w.exposureColor.z << ")\n";
 		if (w.timedFrames)
 		{
 			std::cout << "WebGPU world timing (" << drawModeName(w.drawMode) << ", " << w.timedFrames
@@ -3771,6 +4332,31 @@ void shutdown()
 		if (*buffer) { buffer->release(); *buffer = nullptr; }
 	}
 	if (w.skySampler) { w.skySampler.release(); w.skySampler = nullptr; }
+	// Milestone 16. A reading still mapped is unmapped first; one being
+	// mapped is aborted by the release (its callback only sets the state).
+	if (w.exposureReadBuffer && w.exposureState == World::Readback::Mapped) { w.exposureReadBuffer.unmap(); }
+	w.exposureState = World::Readback::Idle;
+	for (RenderPipeline *pipeline : { &w.bloomFilterPipeline, &w.bloomDownPipeline, &w.bloomTentPipeline,
+		&w.bloomUpPipeline, &w.bloomBlurPipelines[0], &w.bloomBlurPipelines[1], &w.bloomApplyPipeline,
+		&w.exposurePipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	for (PipelineLayout *layout : { &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (BindGroupLayout *layout : { &w.bloomBindGroupLayout, &w.bloomApplyBindGroupLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (Buffer *buffer : { &w.bloomUniformBuffer, &w.exposureReadBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
+	if (w.dirtSampler) { w.dirtSampler.release(); w.dirtSampler = nullptr; }
+	if (w.blackView) { w.blackView.release(); w.blackView = nullptr; }
+	if (w.blackTexture) { w.blackTexture.destroy(); w.blackTexture.release(); w.blackTexture = nullptr; }
 	for (RenderPipeline *pipeline : { &w.toneMapToTexturePipeline, &w.toneMapToSurfacePipeline, &w.fxaaPipeline })
 	{
 		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }

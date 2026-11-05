@@ -3166,6 +3166,25 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	lighting.lift = getShadingSettings().toneMapLift * glm::vec3(0.2f) - glm::vec3(0.1f);
 	lighting.gain = getShadingSettings().toneMapGain * glm::vec3(0.4f) + glm::vec3(0.8f);
 	lighting.fxaa = getShadingSettings().FXAA;
+	// Milestone 16: bloom's uniforms, by the expressions of the bloom
+	// filter and apply passes below (GL's run after this frame's exposure
+	// update; these use the last frame's luminosity, a frame apart), and the
+	// lens dirt.
+	lighting.bloom = getShadingSettings().bloom && getShadingSettings().bloomMultiplier > 0;
+	{
+		float threshold = getShadingSettings().bloomTresshold / 100.f;
+		threshold *= linearRemap(pow(adaptiveExposure.getLuminosityOrDefaultValueIfDisabeled(), 2.2), 0, 1, 0.8, 1.8);
+		float multiplier = getShadingSettings().bloomMultiplier * (2.f / 5.f);
+		multiplier *= linearRemap(pow(adaptiveExposure.getLuminosityOrDefaultValueIfDisabeled(), 2.0), 0, 1, 1.2, 0.6);
+		lighting.bloomExposure = defaultShader.shadingSettings.exposure;
+		lighting.bloomThreshold = underWater ? threshold / 2 : threshold;
+		lighting.bloomMultiplier = multiplier / 10000.f;
+	}
+	lighting.lensDirtTexture = programData.lensDirtTexture.id;
+	lighting.hitDirtTexture = programData.hitDirtTexture.id;
+	lighting.waterDirtTexture = programData.waterDirtTexture.id;
+	lighting.hitLensDirt = getHitLensDirt();
+	lighting.waterDrops = waterDropsStrength;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif
@@ -4101,13 +4120,18 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 
 		//update automatic exposure
 	#if RENDERER_WEBGPU
-		// The readback above is GL stubs here, so averageLuminosity never
-		// moves from 0 and the exposure would climb to its maximum. Until
-		// milestone 16 ports the readback, the exposure stays where it
-		// starts (1.6, no ambient bonus).
-	#else
-		adaptiveExposure.update(deltaTime, averageLuminosity);
+		// The readback above is GL stubs here (its map gives nothing); the
+		// WebGPU world's reading stands in, with GL's arithmetic.
+		{
+			glm::vec3 average;
+			if (wgpuWorld::takeExposureColor(average))
+			{
+				glm::vec3 screenColor = glm::pow(average, glm::vec3(1.f / 2.2f));
+				averageLuminosity = glm::dot(screenColor, glm::vec3(0.2126, 0.7152, 0.0722));
+			}
+		}
 	#endif
+		adaptiveExposure.update(deltaTime, averageLuminosity);
 
 	}
 #pragma endregion

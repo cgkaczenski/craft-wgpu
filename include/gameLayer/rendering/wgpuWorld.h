@@ -181,6 +181,22 @@ namespace wgpuWorld
 		glm::vec3 lift = {0, 0, 0};
 		glm::vec3 gain = {1, 1, 1};
 		bool fxaa = true;
+
+		// Milestone 16: bloom, when the bloom setting is on and its
+		// multiplier above 0, with filterBloomData's and applyBloomData's
+		// uniforms as the renderer computes them: the exposure (the
+		// adaptive one plus the setting), the threshold (already halved
+		// under water) and the multiplier (already / 10000); the lens dirt
+		// textures (wgpu2d ids: lens, hit, water) and their strengths.
+		bool bloom = false;
+		float bloomExposure = 1;
+		float bloomThreshold = 0.005f;
+		float bloomMultiplier = 0;
+		uint32_t lensDirtTexture = 0;
+		uint32_t hitDirtTexture = 0;
+		uint32_t waterDirtTexture = 0;
+		float hitLensDirt = 0;    // getHitLensDirt()
+		float waterDrops = 0;     // waterDropsStrength
 	};
 
 	// Records the world's opaque pass for this frame and prepares the
@@ -198,6 +214,13 @@ namespace wgpuWorld
 	void render(Camera &camera, const std::vector<Chunk *> &visibleChunks,
 		const std::vector<BlockCube> &blockCubes, const glm::vec3 &waterColor, bool waterPeel,
 		bool depthPrepass, const Lighting &lighting);
+
+	// Milestone 16: the auto exposure's input. The HDR color averaged to
+	// one texel (GL's last mip of fboMain.color), linear. A reading takes a
+	// few frames to come back; true, with the color, once for each one, so
+	// the renderer updates averageLuminosity only when there is a new one,
+	// as GL does when its pixel buffer maps.
+	bool takeExposureColor(glm::vec3 &color);
 
 	// Milestone 11's debug views of the G-buffer, for ImGui: view `view`
 	// (0 to gBufferViewCountTotal() - 1, named by gBufferViewName) as a
