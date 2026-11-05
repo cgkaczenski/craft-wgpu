@@ -1,5 +1,3 @@
-// No OpenGL header: the window is a WebGPU surface (wgpuWindow).
-#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <stb_image/stb_image.h>
 #include <stb_truetype/stb_truetype.h>
@@ -25,7 +23,6 @@
 #include "wgpuWindow.h"
 #include "wgpuImgui.h"
 #include "rendering/wgpuWorld.h"
-#include "nullGL.h"
 
 
 #ifdef _WIN32
@@ -516,10 +513,8 @@ int main()
 	glfwSetCharCallback(wind, characterCallback);
 	glfwSetScrollCallback(wind, scrollCallback);
 
-	// WebGPU owns the window. gl2d and glui draw through wgpu2d and ImGui
-	// through wgpuImgui; the 3D renderer still calls OpenGL, and with no
-	// context those calls go to nullGL's do-nothing stubs until later
-	// milestones port it.
+	// WebGPU owns the window: gl2d and glui draw through wgpu2d, ImGui
+	// through wgpuImgui and the world through wgpuWorld.
 	if (!wgpuWindow::init(wind))
 	{
 		std::cout << "WebGPU initialization failed.\n";
@@ -527,7 +522,6 @@ int main()
 		glfwTerminate();
 		return 1;
 	}
-	nullGL::install();
 
 #pragma endregion
 

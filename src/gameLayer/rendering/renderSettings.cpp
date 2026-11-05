@@ -1538,27 +1538,3 @@ void ShadingSettings::normalize()
 	glm::vec3 toneMapGain = glm::clamp(toneMapGain, glm::vec3(0.f), glm::vec3(1));
 
 }
-
-#define GET_STR(x) "c_" #x
-
-#define ADD_TO_RESULT(x) result += ("#define " GET_STR(x) " ") + std::to_string(x) + "\n"
-#define ADD_TO_RESULT_VEC3(x) result += ("#define " GET_STR(x) " vec3(") + std::to_string(x.r) + "," + std::to_string(x.g) + "," + std::to_string(x.b) + ")\n"
-
-
-std::string ShadingSettings::formatIntoGLSLcode()
-{
-	normalize();
-
-	std::string result;
-	result.reserve(500);
-
-
-	ADD_TO_RESULT(shadows);
-	ADD_TO_RESULT(PBR);
-	ADD_TO_RESULT(SSR);
-	ADD_TO_RESULT(useLights);
-
-
-
-	return result;
-}

@@ -48,4 +48,4 @@ target_link_libraries(wgpu2d PUBLIC webgpu glm PRIVATE stb_image stb_truetype)
 # gl2d/gl2d.h makes `gl2d` another name for `wgpu2d`.
 add_library(gl2dShim INTERFACE)
 target_include_directories(gl2dShim INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/gl2dShim/")
-target_link_libraries(gl2dShim INTERFACE wgpu2d glad stb_image stb_truetype)
+target_link_libraries(gl2dShim INTERFACE wgpu2d stb_image stb_truetype)

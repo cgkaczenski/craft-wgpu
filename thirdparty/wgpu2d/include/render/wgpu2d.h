@@ -302,8 +302,8 @@ namespace wgpu2d
 		void createFromFileData(const unsigned char *image_file_data, const size_t image_file_size,
 			bool pixelated = false, bool useMipMaps = true);
 
-		// gl2d bound the texture for raw GL calls that follow. Those calls
-		// go to nullGL on this path, so there is nothing to bind.
+		// gl2d bound the texture for raw GL calls that followed. There are
+		// none here, so there is nothing to bind.
 		void bind(const unsigned int sample = 0) {}
 
 		// One mip level's texels read back from the GPU: RGBA, rows

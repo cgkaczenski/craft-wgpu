@@ -88,8 +88,6 @@ struct ShadingSettings
 	{
 		return !(*this == other);
 	}
-
-	std::string formatIntoGLSLcode();
 };
 
 ShadingSettings &getShadingSettings();

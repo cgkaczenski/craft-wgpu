@@ -108,8 +108,6 @@ FetchContent_MakeAvailable(glfw webgpu glfw3webgpu)
 add_subdirectory(thirdparty/wgpu2d)
 set(GL2D_TARGET gl2dShim)
 
-# glad stays until milestone 19d deletes the null GL scaffold it carries.
-add_subdirectory(thirdparty/glad)
 add_subdirectory(thirdparty/stb_image)
 # PNG output for WGPU_SCREENSHOT_FRAME (wgpuWindow.cpp).
 add_subdirectory(thirdparty/stb_image_write)
@@ -142,6 +140,8 @@ set_property(TARGET "${CMAKE_PROJECT_NAME}" PROPERTY CXX_STANDARD 17)
 
 target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RESOURCES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/resources/") # This is useful to get an ASSETS_PATH in your IDE during development but you should comment this if you compile a release version and uncomment the next line
 #target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RESOURCES_PATH="./resources/") # Uncomment this line to setup the ASSETS_PATH macro to the final assets directory when you share the game
+# No OpenGL header from GLFW: the window is a WebGPU surface (wgpuWindow).
+target_compile_definitions("${CMAKE_PROJECT_NAME}" PRIVATE GLFW_INCLUDE_NONE)
 
 
 target_sources("${CMAKE_PROJECT_NAME}" PRIVATE ${MY_SOURCES} ${SHARED_SOURCES} )
@@ -171,7 +171,7 @@ target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURC
 target_include_directories("${CMAKE_PROJECT_NAME}" PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/")
 
 
-target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw glad stb_image stb_image_write stb_truetype 
+target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw stb_image stb_image_write stb_truetype 
 	${GL2D_TARGET} raudio imgui fastNoiseSIMD FastNoise2 enet glui
 	magic_enum safeSave profilerLib
 	libzstd_static assimp)

@@ -2,7 +2,6 @@
 #include <memory.h>
 #include <vector>
 #include <stdint.h>
-#include <glad/glad.h>
 #include <glm/vec3.hpp>
 constexpr static float BLOCK_DEFAULT_FRICTION = 8.f;
 

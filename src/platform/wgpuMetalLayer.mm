@@ -4,8 +4,7 @@
 
 #if defined(__APPLE__)
 
-#define GLFW_INCLUDE_NONE
-#define GLFW_EXPOSE_NATIVE_COCOA
+#define GLFW_EXPOSE_NATIVE_COCOA // GLFW_INCLUDE_NONE comes from CMake
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 

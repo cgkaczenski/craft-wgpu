@@ -7,8 +7,7 @@
 
 #include "wgpuWindow.h"
 
-#define GLFW_INCLUDE_NONE
-#include <GLFW/glfw3.h>
+#include <GLFW/glfw3.h> // GLFW_INCLUDE_NONE comes from CMake
 #include <glfw3webgpu.h>
 
 #include <stb_image_write/stb_image_write.h>
