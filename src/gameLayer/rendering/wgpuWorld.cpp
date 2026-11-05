@@ -80,8 +80,35 @@ namespace
 		glm::vec4 ambientColor;  // rgb
 		glm::ivec4 lightParams;  // x sky light intensity, y point lights, z shadows setting
 		glm::mat4 shadowMatrices[3]; // camera-relative to each cascade's clip space, 0..1 deep
+		glm::vec4 fogParams;         // x fog distance, y near fog gradient, z underwater
 	};
-	static_assert(sizeof(Uniforms) == 448, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 464, "uniform layout must match world.wgsl");
+
+	// Milestone 14: sky.wgsl's SkyUniforms and BakeParams.
+	struct SkyUniforms
+	{
+		glm::mat4 inverseViewProjection; // a pixel back to its direction
+		glm::vec4 weights;               // day, twilight, night
+		glm::mat4 sunMatrix;             // SunRenderer's, GL clip space
+		glm::mat4 moonMatrix;
+		glm::vec4 sunParams;             // x twilight, y color multiplier
+		glm::vec4 moonParams;
+	};
+	static_assert(sizeof(SkyUniforms) == 240, "must match sky.wgsl's SkyUniforms");
+
+	struct SkyBakeParams
+	{
+		glm::vec4 lightPos;
+		glm::vec4 color1;
+		glm::vec4 color2;
+		glm::vec4 groundColor; // w: g
+		glm::uvec4 flags;      // x: use the ground color
+	};
+	static_assert(sizeof(SkyBakeParams) == 80, "must match sky.wgsl's BakeParams");
+
+	// GL's three skies, each a cubemap of 128x128 faces.
+	enum SkyKind { DaySky, TwilightSky, NightSky, SkyKinds };
+	constexpr uint32_t skyCubeSize = 128;
 
 	// Milestone 13: the sun's shadow cascades, GL's SunShadow sizes, nearest
 	// first.
@@ -272,6 +299,36 @@ namespace
 		RenderPipeline shadowPipelines[shadowCascades] = {};
 		uint64_t lastShadowFaces[shadowCascades] = {};
 		uint32_t lastShadowChunks[shadowCascades] = {};
+
+		// Milestone 14: the sky (sky.wgsl). The three baked skies, each a
+		// 2D texture of six layers: one Cube view to sample it, and a 2D
+		// view of each layer to draw that face.
+		Texture skyCubes[SkyKinds] = {};
+		TextureView skyCubeViews[SkyKinds] = {};
+		TextureView skyFaceViews[SkyKinds][6] = {};
+		bool skyBaked = false;
+		glm::vec3 bakedDayColor = {}, bakedDayHorizon = {};
+		float bakedDayG = -1;
+		Buffer skyBakeBuffer = nullptr;
+		Buffer skyUniformBuffer = nullptr;
+		BindGroupLayout skyBakeBindGroupLayout = nullptr;
+		BindGroupLayout skyBindGroupLayout = nullptr;
+		PipelineLayout skyBakePipelineLayout = nullptr;
+		PipelineLayout skyPipelineLayout = nullptr;
+		RenderPipeline skyBakePipeline = nullptr;
+		RenderPipeline skyPipeline = nullptr;
+		RenderPipeline sunPipeline = nullptr;
+		BindGroup skyBakeBindGroup = nullptr;
+		BindGroup skyBindGroup = nullptr;
+		Sampler skySampler = nullptr;
+		TextureView boundSunView = nullptr;  // what skyBindGroup names (not owned)
+		TextureView boundMoonView = nullptr;
+		bool sunDrawable = false;            // both textures loaded
+		bool sunPending = false;             // render drew the sky; renderTransparent adds the sun
+		// The sky behind the world, the size of the surface (GL's
+		// fboSkyBox): what the fog mixes toward.
+		Texture skyTexture = nullptr;
+		TextureView skyView = nullptr;
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
@@ -547,8 +604,8 @@ namespace
 
 		// Group 1 of the transparent pipelines: the peel's depth and color
 		// copies, read with textureLoad (no sampler).
-		BindGroupLayoutEntry peelEntries[2];
-		for (uint32_t i = 0; i < 2; i++)
+		BindGroupLayoutEntry peelEntries[3];
+		for (uint32_t i = 0; i < 3; i++)
 		{
 			peelEntries[i] = Default;
 			peelEntries[i].binding = i;
@@ -561,10 +618,14 @@ namespace
 		}
 		peelEntries[0].texture.sampleType = TextureSampleType::Depth;
 		peelEntries[1].texture.sampleType = TextureSampleType::Float;
+		// 3: the sky behind the world, for the fog (milestone 14). Binding 2
+		// is the decal's crack texture, in the decal's own group 1.
+		peelEntries[2].binding = 3;
+		peelEntries[2].texture.sampleType = TextureSampleType::Float;
 
 		BindGroupLayoutDescriptor peelLayoutDesc = Default;
-		peelLayoutDesc.label = StringView("world peel bind group layout");
-		peelLayoutDesc.entryCount = 2;
+		peelLayoutDesc.label = StringView("world frame bind group layout");
+		peelLayoutDesc.entryCount = 3;
 		peelLayoutDesc.entries = peelEntries;
 		w.peelBindGroupLayout = wgpuDevice().createBindGroupLayout(peelLayoutDesc);
 		if (!w.peelBindGroupLayout) { return false; }
@@ -899,9 +960,10 @@ namespace
 			w.shadowPipelines[i] = createFacePipeline(module, shadow);
 		}
 
+		// Both with the frame group as well: the fog reads the sky in it.
 		FacePipelineDesc opaque;
 		opaque.label = "world opaque faces";
-		opaque.layout = w.pipelineLayout;
+		opaque.layout = w.transparentPipelineLayout;
 		opaque.depthCompare = CompareFunction::Equal;
 		opaque.depthWrite = false;
 		w.pipeline = createFacePipeline(module, opaque);
@@ -1170,7 +1232,9 @@ namespace
 
 	// A render pass on the G-buffer's five targets and the depth: the opaque
 	// pass (clearing them) and the entity pass (keeping what is there).
-	RenderPassEncoder beginGBufferPass(CommandEncoder encoder, bool clear, const char *label)
+	// With `keepColor`, a clearing pass still loads the HDR color: the sky
+	// pass has drawn it (milestone 14).
+	RenderPassEncoder beginGBufferPass(CommandEncoder encoder, bool clear, const char *label, bool keepColor = false)
 	{
 		RenderPassColorAttachment colors[GBufferSlots];
 		for (int i = 0; i < GBufferSlots; i++)
@@ -1179,10 +1243,10 @@ namespace
 			colors[i].view = w.gBufferViews[i];
 			colors[i].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
 			colors[i].resolveTarget = nullptr;
-			colors[i].loadOp = clear ? LoadOp::Clear : LoadOp::Load;
+			colors[i].loadOp = clear && !(keepColor && i == GColor) ? LoadOp::Clear : LoadOp::Load;
 			colors[i].storeOp = StoreOp::Store;
-			// Black where nothing is drawn (the sky comes in milestone 14);
-			// for the normals, 0 is "no normal".
+			// Nothing drawn: no position, no bloom; for the normals, 0 is
+			// "no normal". The color is the sky's.
 			colors[i].clearValue = Color{ 0.0, 0.0, 0.0, 0.0 };
 		}
 
@@ -1843,11 +1907,11 @@ namespace
 		{
 			if (*group) { group->release(); *group = nullptr; }
 		}
-		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView, &w.depthSampleView })
+		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView, &w.depthSampleView, &w.skyView })
 		{
 			if (*view) { view->release(); *view = nullptr; }
 		}
-		for (Texture *texture : { &w.depthTexture, &w.peelDepthTexture, &w.peelColorTexture })
+		for (Texture *texture : { &w.depthTexture, &w.peelDepthTexture, &w.peelColorTexture, &w.skyTexture })
 		{
 			if (*texture) { texture->destroy(); texture->release(); *texture = nullptr; }
 		}
@@ -1879,7 +1943,11 @@ namespace
 		// copy keeps the format; it cannot convert).
 		w.peelColorTexture = createTarget("world peel color", w.hdrFormat,
 			TextureUsage::CopyDst | TextureUsage::TextureBinding, width, height);
-		if (!w.depthTexture || !w.peelDepthTexture || !w.peelColorTexture) { return false; }
+		// The sky behind the world (milestone 14, GL's fboSkyBox): drawn by
+		// the sky pass beside the HDR color, then read by the fog.
+		w.skyTexture = createTarget("world sky", w.hdrFormat,
+			TextureUsage::RenderAttachment | TextureUsage::TextureBinding, width, height);
+		if (!w.depthTexture || !w.peelDepthTexture || !w.peelColorTexture || !w.skyTexture) { return false; }
 
 		// The G-buffer: drawn into, then read by the debug views (and, from
 		// milestone 12 on, the lighting). The HDR color is also the peel's
@@ -1906,19 +1974,26 @@ namespace
 			TextureAspect::DepthOnly, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
 		w.peelColorView = createTargetView(w.peelColorTexture, "world peel color view", w.hdrFormat,
 			TextureAspect::All, TextureUsage::TextureBinding);
-		if (!w.depthView || !w.peelDepthView || !w.peelColorView) { return false; }
+		w.skyView = createTargetView(w.skyTexture, "world sky view", w.hdrFormat,
+			TextureAspect::All, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+		if (!w.depthView || !w.peelDepthView || !w.peelColorView || !w.skyView) { return false; }
 
-		BindGroupEntry entries[2];
+		// The frame group: the peel's copies and the sky, all the size of
+		// the surface, so remade with them.
+		BindGroupEntry entries[3];
 		entries[0] = Default;
 		entries[0].binding = 0;
 		entries[0].textureView = w.peelDepthView;
 		entries[1] = Default;
 		entries[1].binding = 1;
 		entries[1].textureView = w.peelColorView;
+		entries[2] = Default;
+		entries[2].binding = 3;
+		entries[2].textureView = w.skyView;
 		BindGroupDescriptor groupDesc = Default;
-		groupDesc.label = StringView("world peel bind group");
+		groupDesc.label = StringView("world frame bind group");
 		groupDesc.layout = w.peelBindGroupLayout;
-		groupDesc.entryCount = 2;
+		groupDesc.entryCount = 3;
 		groupDesc.entries = entries;
 		w.peelBindGroup = wgpuDevice().createBindGroup(groupDesc);
 		if (!w.peelBindGroup || scope.failed()) { return false; }
@@ -2206,6 +2281,365 @@ namespace
 		return true;
 	}
 
+	// ---- Milestone 14: the sky (sky.wgsl) -------------------------------
+
+	BindGroupLayoutEntry skyLayoutEntry(uint32_t binding, ShaderStage visibility)
+	{
+		BindGroupLayoutEntry e = Default;
+		e.binding = binding;
+		e.visibility = visibility;
+		e.buffer.type = BufferBindingType::BindingNotUsed;
+		e.sampler.type = SamplerBindingType::BindingNotUsed;
+		e.texture.sampleType = TextureSampleType::BindingNotUsed;
+		e.storageTexture.access = StorageTextureAccess::BindingNotUsed;
+		return e;
+	}
+
+	// The cubemaps, their views, the layouts, the three pipelines, the
+	// buffers and the sampler. The bake happens on the first frame.
+	bool createSky()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/sky.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world sky");
+
+		// A cubemap is a 2D texture with six layers, +X -X +Y -Y +Z -Z.
+		// It is sampled through one view of dimension Cube, and each face
+		// is drawn into through a 2D view of that one layer.
+		const char *const skyNames[SkyKinds] = { "world day sky", "world twilight sky", "world night sky" };
+		for (int k = 0; k < SkyKinds; k++)
+		{
+			TextureDescriptor desc = Default;
+			desc.label = StringView(skyNames[k]);
+			desc.usage = TextureUsage::RenderAttachment | TextureUsage::TextureBinding;
+			desc.dimension = TextureDimension::_2D;
+			desc.size = { skyCubeSize, skyCubeSize, 6 };
+			desc.format = w.hdrFormat; // GL's GL_R11F_G11F_B10F
+			desc.mipLevelCount = 1;
+			desc.sampleCount = 1;
+			desc.viewFormatCount = 0;
+			desc.viewFormats = nullptr;
+			w.skyCubes[k] = wgpuDevice().createTexture(desc);
+			if (!w.skyCubes[k]) { module.release(); return false; }
+
+			TextureViewDescriptor viewDesc = Default;
+			viewDesc.label = StringView(skyNames[k]);
+			viewDesc.format = w.hdrFormat;
+			viewDesc.dimension = TextureViewDimension::Cube;
+			viewDesc.baseMipLevel = 0;
+			viewDesc.mipLevelCount = 1;
+			viewDesc.baseArrayLayer = 0;
+			viewDesc.arrayLayerCount = 6;
+			viewDesc.aspect = TextureAspect::All;
+			viewDesc.usage = TextureUsage::TextureBinding;
+			w.skyCubeViews[k] = w.skyCubes[k].createView(viewDesc);
+
+			for (uint32_t face = 0; face < 6; face++)
+			{
+				viewDesc.dimension = TextureViewDimension::_2D;
+				viewDesc.baseArrayLayer = face;
+				viewDesc.arrayLayerCount = 1;
+				viewDesc.usage = TextureUsage::RenderAttachment;
+				w.skyFaceViews[k][face] = w.skyCubes[k].createView(viewDesc);
+			}
+		}
+
+		BufferDescriptor bufferDesc = Default;
+		bufferDesc.label = StringView("world sky bake settings");
+		bufferDesc.usage = BufferUsage::Storage | BufferUsage::CopyDst;
+		bufferDesc.size = sizeof(SkyBakeParams) * SkyKinds;
+		bufferDesc.mappedAtCreation = false;
+		w.skyBakeBuffer = wgpuDevice().createBuffer(bufferDesc);
+		bufferDesc.label = StringView("world sky uniforms");
+		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
+		bufferDesc.size = sizeof(SkyUniforms);
+		w.skyUniformBuffer = wgpuDevice().createBuffer(bufferDesc);
+		if (!w.skyBakeBuffer || !w.skyUniformBuffer) { module.release(); return false; }
+
+		// Linear and clamped: GL's cubemap parameters, and gl2d's for the
+		// sun and moon (loaded without pixelation or mipmaps).
+		SamplerDescriptor samplerDesc = Default;
+		samplerDesc.label = StringView("world sky sampler");
+		samplerDesc.addressModeU = AddressMode::ClampToEdge;
+		samplerDesc.addressModeV = AddressMode::ClampToEdge;
+		samplerDesc.addressModeW = AddressMode::ClampToEdge;
+		samplerDesc.magFilter = FilterMode::Linear;
+		samplerDesc.minFilter = FilterMode::Linear;
+		samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
+		samplerDesc.lodMinClamp = 0.0f;
+		samplerDesc.lodMaxClamp = 32.0f;
+		samplerDesc.compare = CompareFunction::Undefined;
+		samplerDesc.maxAnisotropy = 1;
+		w.skySampler = wgpuDevice().createSampler(samplerDesc);
+		if (!w.skySampler) { module.release(); return false; }
+
+		// The bake's group: the three skies' settings.
+		BindGroupLayoutEntry bakeEntry = skyLayoutEntry(0, ShaderStage::Fragment);
+		bakeEntry.buffer.type = BufferBindingType::ReadOnlyStorage;
+		bakeEntry.buffer.hasDynamicOffset = false;
+		bakeEntry.buffer.minBindingSize = 0;
+		BindGroupLayoutDescriptor bakeLayoutDesc = Default;
+		bakeLayoutDesc.label = StringView("world sky bake bind group layout");
+		bakeLayoutDesc.entryCount = 1;
+		bakeLayoutDesc.entries = &bakeEntry;
+		w.skyBakeBindGroupLayout = wgpuDevice().createBindGroupLayout(bakeLayoutDesc);
+
+		// The sky's and the sun's group: the uniforms, the three cubes, the
+		// sampler, the sun and moon textures.
+		BindGroupLayoutEntry skyEntries[7];
+		skyEntries[0] = skyLayoutEntry(0, ShaderStage::Vertex | ShaderStage::Fragment);
+		skyEntries[0].buffer.type = BufferBindingType::Uniform;
+		skyEntries[0].buffer.hasDynamicOffset = false;
+		skyEntries[0].buffer.minBindingSize = sizeof(SkyUniforms);
+		for (uint32_t i = 1; i <= 3; i++)
+		{
+			skyEntries[i] = skyLayoutEntry(i, ShaderStage::Fragment);
+			skyEntries[i].texture.sampleType = TextureSampleType::Float;
+			skyEntries[i].texture.viewDimension = TextureViewDimension::Cube;
+			skyEntries[i].texture.multisampled = false;
+		}
+		skyEntries[4] = skyLayoutEntry(4, ShaderStage::Fragment);
+		skyEntries[4].sampler.type = SamplerBindingType::Filtering;
+		for (uint32_t i = 5; i <= 6; i++)
+		{
+			skyEntries[i] = skyLayoutEntry(i, ShaderStage::Fragment);
+			skyEntries[i].texture.sampleType = TextureSampleType::Float;
+			skyEntries[i].texture.viewDimension = TextureViewDimension::_2D;
+			skyEntries[i].texture.multisampled = false;
+		}
+		BindGroupLayoutDescriptor skyLayoutDesc = Default;
+		skyLayoutDesc.label = StringView("world sky bind group layout");
+		skyLayoutDesc.entryCount = 7;
+		skyLayoutDesc.entries = skyEntries;
+		w.skyBindGroupLayout = wgpuDevice().createBindGroupLayout(skyLayoutDesc);
+		if (!w.skyBakeBindGroupLayout || !w.skyBindGroupLayout) { module.release(); return false; }
+
+		w.skyBakePipelineLayout = createPipelineLayout("world sky bake pipeline layout", &w.skyBakeBindGroupLayout, 1);
+		w.skyPipelineLayout = createPipelineLayout("world sky pipeline layout", &w.skyBindGroupLayout, 1);
+
+		BindGroupEntry bakeGroupEntry = Default;
+		bakeGroupEntry.binding = 0;
+		bakeGroupEntry.buffer = w.skyBakeBuffer;
+		bakeGroupEntry.size = sizeof(SkyBakeParams) * SkyKinds;
+		BindGroupDescriptor bakeGroupDesc = Default;
+		bakeGroupDesc.label = StringView("world sky bake bind group");
+		bakeGroupDesc.layout = w.skyBakeBindGroupLayout;
+		bakeGroupDesc.entryCount = 1;
+		bakeGroupDesc.entries = &bakeGroupEntry;
+		w.skyBakeBindGroup = wgpuDevice().createBindGroup(bakeGroupDesc);
+
+		// Three pipelines, each a fullscreen triangle or a quad, no vertex
+		// buffers.
+		auto pipeline = [&](const char *label, PipelineLayout layout, const char *vertexEntry,
+			const char *fragmentEntry, ColorTargetState *targets, uint32_t targetCount,
+			const DepthStencilState *depth, PrimitiveTopology topology)
+		{
+			RenderPipelineDescriptor desc = Default;
+			desc.label = StringView(label);
+			desc.layout = layout;
+			desc.vertex.module = module;
+			desc.vertex.entryPoint = StringView(vertexEntry);
+			desc.vertex.bufferCount = 0;
+			desc.vertex.buffers = nullptr;
+			desc.primitive.topology = topology;
+			desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+			desc.primitive.frontFace = FrontFace::CCW;
+			desc.primitive.cullMode = CullMode::None;
+			desc.depthStencil = depth;
+			desc.multisample.count = 1;
+			desc.multisample.mask = 0xFFFFFFFFu;
+			desc.multisample.alphaToCoverageEnabled = false;
+			FragmentState fragment = Default;
+			fragment.module = module;
+			fragment.entryPoint = StringView(fragmentEntry);
+			fragment.targetCount = targetCount;
+			fragment.targets = targets;
+			desc.fragment = &fragment;
+			return wgpuDevice().createRenderPipeline(desc);
+		};
+
+		ColorTargetState one[GBufferSlots];
+		colorTargets(ColorTargets::Hdr, nullptr, one);
+		w.skyBakePipeline = pipeline("world sky bake", w.skyBakePipelineLayout, "vs_fullscreen", "fs_bake",
+			one, 1, nullptr, PrimitiveTopology::TriangleList);
+
+		// The sky copy and the HDR color: the same format, the same color.
+		ColorTargetState two[2] = { one[0], one[0] };
+		w.skyPipeline = pipeline("world sky", w.skyPipelineLayout, "vs_fullscreen", "fs_sky",
+			two, 2, nullptr, PrimitiveTopology::TriangleList);
+
+		// The sun and moon (renderSun): onto the G-buffer, the color added
+		// by alpha (GL_SRC_ALPHA, GL_ONE), positions and normals untouched,
+		// the bloom written over; at the far plane, LessEqual, so only
+		// where nothing was drawn; no depth writes.
+		BlendState add = Default;
+		add.color.operation = BlendOperation::Add;
+		add.color.srcFactor = BlendFactor::SrcAlpha;
+		add.color.dstFactor = BlendFactor::One;
+		add.alpha = add.color;
+		ColorTargetState sunTargets[GBufferSlots];
+		colorTargets(ColorTargets::GBuffer, nullptr, sunTargets);
+		sunTargets[GColor].blend = &add;
+		sunTargets[GPosition].writeMask = ColorWriteMask::None;
+		sunTargets[GNormal].writeMask = ColorWriteMask::None;
+		DepthStencilState depth = Default;
+		depth.format = depthFormat;
+		depth.depthWriteEnabled = OptionalBool::False;
+		depth.depthCompare = CompareFunction::LessEqual;
+		depth.stencilFront.compare = CompareFunction::Always;
+		depth.stencilFront.failOp = StencilOperation::Keep;
+		depth.stencilFront.depthFailOp = StencilOperation::Keep;
+		depth.stencilFront.passOp = StencilOperation::Keep;
+		depth.stencilBack = depth.stencilFront;
+		depth.stencilReadMask = 0;
+		depth.stencilWriteMask = 0;
+		w.sunPipeline = pipeline("world sun and moon", w.skyPipelineLayout, "vs_sun", "fs_sun",
+			sunTargets, GBufferSlots, &depth, PrimitiveTopology::TriangleStrip);
+
+		const bool invalid = scope.failed();
+		module.release();
+		return w.skyBakePipeline && w.skyPipeline && w.sunPipeline && w.skyBakeBindGroup && !invalid;
+	}
+
+	// GL's three skies (SkyBoxLoaderAndDrawer::createSkyTextures), baked
+	// into their cubemaps when first needed and again when the day sky's
+	// settings change (the ImGui "Sky" colors). Only the day sky takes
+	// them; twilight and night are fixed. GL's bake also convolves and
+	// prefilters each sky for image-based lighting; nothing reads those
+	// (only the physicallyAccurateReflections path would, and a constant
+	// turns it off), so they are not made.
+	void bakeSkies(CommandEncoder encoder, const Lighting &lighting)
+	{
+		if (w.skyBaked && w.bakedDayColor == lighting.daySkyColor && w.bakedDayHorizon == lighting.daySkyHorizon
+			&& w.bakedDayG == lighting.daySkyG) { return; }
+
+		SkyBakeParams params[SkyKinds];
+		params[DaySky].lightPos = glm::vec4(0, -1, 0, 0);
+		params[DaySky].color1 = glm::vec4(lighting.daySkyColor, 0);
+		params[DaySky].color2 = glm::vec4(lighting.daySkyHorizon, 0);
+		params[DaySky].groundColor = glm::vec4(1, 1, 1, lighting.daySkyG);
+		params[DaySky].flags = glm::uvec4(0);
+		params[TwilightSky].lightPos = glm::vec4(glm::normalize(glm::vec3(0, -0.1f, 1)), 0);
+		params[TwilightSky].color1 = glm::vec4(glm::vec3(22, 49, 111) * 0.9f / 255.f, 0);
+		params[TwilightSky].color2 = glm::vec4(glm::vec3(35, 22, 36) * 0.9f / 255.f, 0);
+		params[TwilightSky].groundColor = glm::vec4(1, 1, 1, 0.995f);
+		params[TwilightSky].flags = glm::uvec4(0);
+		params[NightSky].lightPos = glm::vec4(0, -1, 0, 0);
+		params[NightSky].color1 = glm::vec4(glm::vec3(9, 15, 23) / 255.f * 0.2f, 0);
+		params[NightSky].color2 = glm::vec4(glm::vec3(4, 8, 10) / 255.f * 0.2f, 0);
+		params[NightSky].groundColor = glm::vec4(1, 1, 1, 0.850f);
+		params[NightSky].flags = glm::uvec4(0);
+		wgpuQueue().writeBuffer(w.skyBakeBuffer, 0, params, sizeof(params));
+
+		// Eighteen small passes, a face each: the face's view is the
+		// target, and the draw's instance tells the shader which sky and
+		// which face (a direct draw may start at any instance).
+		for (uint32_t k = 0; k < SkyKinds; k++)
+		{
+			for (uint32_t face = 0; face < 6; face++)
+			{
+				RenderPassColorAttachment color = Default;
+				color.view = w.skyFaceViews[k][face];
+				color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+				color.resolveTarget = nullptr;
+				color.loadOp = LoadOp::Clear;
+				color.storeOp = StoreOp::Store;
+				color.clearValue = Color{ 0.0, 0.0, 0.0, 1.0 };
+				RenderPassDescriptor passDesc = Default;
+				passDesc.label = StringView("world sky bake pass");
+				passDesc.colorAttachmentCount = 1;
+				passDesc.colorAttachments = &color;
+				passDesc.depthStencilAttachment = nullptr;
+				passDesc.occlusionQuerySet = nullptr;
+				passDesc.timestampWrites = nullptr;
+				RenderPassEncoder pass = encoder.beginRenderPass(passDesc);
+				pass.setPipeline(w.skyBakePipeline);
+				pass.setBindGroup(0, w.skyBakeBindGroup, 0, nullptr);
+				pass.draw(3, 1, 0, k * 6 + face);
+				pass.end();
+				pass.release();
+			}
+		}
+
+		if (!w.skyBaked) { std::cout << "WebGPU world: baked the three skies, 6 x 128x128 faces each\n"; }
+		w.skyBaked = true;
+		w.bakedDayColor = lighting.daySkyColor;
+		w.bakedDayHorizon = lighting.daySkyHorizon;
+		w.bakedDayG = lighting.daySkyG;
+	}
+
+	// The sky's group, remade when the sun or moon texture changes.
+	bool ensureSkyBindGroup(uint32_t sunTexture, uint32_t moonTexture)
+	{
+		TextureView sunView = wgpuTextureView(sunTexture);
+		TextureView moonView = wgpuTextureView(moonTexture);
+		w.sunDrawable = sunView && moonView;
+		if (!sunView || !moonView)
+		{
+			if (!ensureWhiteTexture()) { return false; }
+			if (!sunView) { sunView = w.whiteView; }
+			if (!moonView) { moonView = w.whiteView; }
+		}
+		if (w.skyBindGroup && sunView == w.boundSunView && moonView == w.boundMoonView) { return true; }
+		if (w.skyBindGroup) { w.skyBindGroup.release(); w.skyBindGroup = nullptr; }
+
+		BindGroupEntry entries[7];
+		for (uint32_t i = 0; i < 7; i++) { entries[i] = Default; entries[i].binding = i; }
+		entries[0].buffer = w.skyUniformBuffer;
+		entries[0].size = sizeof(SkyUniforms);
+		for (int k = 0; k < SkyKinds; k++) { entries[1 + k].textureView = w.skyCubeViews[k]; }
+		entries[4].sampler = w.skySampler;
+		entries[5].textureView = sunView;
+		entries[6].textureView = moonView;
+		BindGroupDescriptor desc = Default;
+		desc.label = StringView("world sky bind group");
+		desc.layout = w.skyBindGroupLayout;
+		desc.entryCount = 7;
+		desc.entries = entries;
+		w.skyBindGroup = wgpuDevice().createBindGroup(desc);
+		w.boundSunView = sunView;
+		w.boundMoonView = moonView;
+		return (bool)w.skyBindGroup;
+	}
+
+	// SunRenderer's createTBNMatrix: turns what faces (0, 0, -1) toward
+	// `direction`.
+	glm::mat4 sunFrame(const glm::vec3 &direction)
+	{
+		const glm::vec3 up(0.0f, 1.0f, 0.0f);
+		const glm::vec3 forward = -glm::normalize(direction);
+		const glm::vec3 right = glm::normalize(glm::cross(up, forward));
+		const glm::vec3 newUp = glm::cross(forward, right);
+		return glm::mat4(glm::mat3(right, newUp, forward));
+	}
+
+	// SunRenderer::render's matrix, scale included (GL scales two entries
+	// of the final matrix rather than the quad).
+	glm::mat4 sunMatrix(Camera &camera, const glm::vec3 &direction, float scale)
+	{
+		glm::mat4 m = camera.getProjectionMatrix() * camera.getViewMatrix() * sunFrame(direction);
+		m[0][0] *= scale;
+		m[1][1] *= scale;
+		return m;
+	}
+
+	// The sun and the moon (renderSun), onto the G-buffer after the
+	// entities and before the transparent passes, as GL draws them.
+	void drawSunAndMoon()
+	{
+		if (!w.sunPending) { return; }
+		w.sunPending = false;
+		if (!w.sunDrawable || !w.skyBindGroup) { return; }
+		CommandEncoder encoder = wgpuFrameEncoder();
+		if (!encoder) { return; }
+		RenderPassEncoder pass = beginGBufferPass(encoder, false, "world sun and moon pass");
+		pass.setPipeline(w.sunPipeline);
+		pass.setBindGroup(0, w.skyBindGroup, 0, nullptr);
+		pass.draw(4, 2, 0, 0); // instance 0 the sun, 1 the moon
+		pass.end();
+		pass.release();
+	}
+
 	bool initialize()
 	{
 		if (w.initialized) { return true; }
@@ -2220,7 +2654,8 @@ namespace
 			std::cout << "WebGPU world: the composite shows " << gBufferViewLabels[w.compositeView] << "\n";
 		}
 
-		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines())
+		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines()
+			|| !createSky())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -2478,7 +2913,20 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	{
 		uniforms.shadowMatrices[i] = glm::mat4(depthToZeroOne * lighting.shadowCascades[i] * fromCamera);
 	}
+	uniforms.fogParams = glm::vec4(lighting.fogDistance, lighting.fogGradient, lighting.underWater ? 1.f : 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
+
+	// Milestone 14: the sky's uniforms. The sun at sunPos and the moon
+	// opposite, at GL's sizes (renderSun's 0.9 and 0.6); the moon untinted.
+	if (!ensureSkyBindGroup(lighting.sunTexture, lighting.moonTexture)) { return; }
+	SkyUniforms sky;
+	sky.inverseViewProjection = glm::inverse(projection * camera.getViewMatrix());
+	sky.weights = glm::vec4(lighting.skyWeights, 0.f);
+	sky.sunMatrix = sunMatrix(camera, lighting.sunPosition, 0.9f);
+	sky.moonMatrix = sunMatrix(camera, -lighting.sunPosition, 0.6f);
+	sky.sunParams = glm::vec4(lighting.sunTwilight, 1.f, 0.f, 0.f);
+	sky.moonParams = glm::vec4(0.f, 1.f, 0.f, 0.f);
+	wgpuQueue().writeBuffer(w.skyUniformBuffer, 0, &sky, sizeof(sky));
 
 	const auto recordStart = std::chrono::steady_clock::now();
 
@@ -2614,7 +3062,40 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			shadowPass.release();
 		}
 
-		RenderPassEncoder pass = beginGBufferPass(encoder, true, "world opaque pass");
+		// The sky (milestone 14): baked when first needed, then drawn into
+		// the sky copy and the HDR color at once, before the world. The
+		// opaque pass then clears every target but the color.
+		bakeSkies(encoder, lighting);
+		{
+			RenderPassColorAttachment colors[2];
+			TextureView targets[2] = { w.skyView, w.gBufferViews[GColor] };
+			for (int i = 0; i < 2; i++)
+			{
+				colors[i] = Default;
+				colors[i].view = targets[i];
+				colors[i].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+				colors[i].resolveTarget = nullptr;
+				colors[i].loadOp = LoadOp::Clear;
+				colors[i].storeOp = StoreOp::Store;
+				colors[i].clearValue = Color{ 0.0, 0.0, 0.0, 1.0 };
+			}
+			RenderPassDescriptor skyPassDesc = Default;
+			skyPassDesc.label = StringView("world sky pass");
+			skyPassDesc.colorAttachmentCount = 2;
+			skyPassDesc.colorAttachments = colors;
+			skyPassDesc.depthStencilAttachment = nullptr;
+			skyPassDesc.occlusionQuerySet = nullptr;
+			skyPassDesc.timestampWrites = nullptr;
+			RenderPassEncoder skyPass = encoder.beginRenderPass(skyPassDesc);
+			skyPass.setPipeline(w.skyPipeline);
+			skyPass.setBindGroup(0, w.skyBindGroup, 0, nullptr);
+			skyPass.draw(3, 1, 0, 0);
+			skyPass.end();
+			skyPass.release();
+		}
+		w.sunPending = true;
+
+		RenderPassEncoder pass = beginGBufferPass(encoder, true, "world opaque pass", true);
 		if (w.arena && opaqueCount)
 		{
 			if (depthPrepass)
@@ -2622,7 +3103,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 				bindFaces(pass, w.prepassPipeline, false);
 				drawRecords(pass, mode, 0, opaqueCount);
 			}
-			bindFaces(pass, depthPrepass ? w.pipeline : w.solidLessPipeline, false);
+			bindFaces(pass, depthPrepass ? w.pipeline : w.solidLessPipeline, true);
 			drawRecords(pass, mode, 0, opaqueCount);
 		}
 
@@ -2838,6 +3319,9 @@ void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<Model
 
 void renderTransparent()
 {
+	// The sun and moon first: GL draws them after the entities and before
+	// the transparent geometry, so glass and water show them.
+	drawSunAndMoon();
 	if (!w.pendingTransparent) { compositeFrame(); return; }
 	w.pendingTransparent = false;
 
@@ -3053,6 +3537,37 @@ void shutdown()
 	if (w.blankDepthTexture) { w.blankDepthTexture.destroy(); w.blankDepthTexture.release(); w.blankDepthTexture = nullptr; }
 	if (w.shadowSampler) { w.shadowSampler.release(); w.shadowSampler = nullptr; }
 	if (w.shadowPassBindGroup) { w.shadowPassBindGroup.release(); w.shadowPassBindGroup = nullptr; }
+	for (int k = 0; k < SkyKinds; k++)
+	{
+		for (TextureView &face : w.skyFaceViews[k]) { if (face) { face.release(); face = nullptr; } }
+		if (w.skyCubeViews[k]) { w.skyCubeViews[k].release(); w.skyCubeViews[k] = nullptr; }
+		if (w.skyCubes[k]) { w.skyCubes[k].destroy(); w.skyCubes[k].release(); w.skyCubes[k] = nullptr; }
+	}
+	for (RenderPipeline *pipeline : { &w.skyBakePipeline, &w.skyPipeline, &w.sunPipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	for (BindGroup *group : { &w.skyBakeBindGroup, &w.skyBindGroup })
+	{
+		if (*group) { group->release(); *group = nullptr; }
+	}
+	for (PipelineLayout *layout : { &w.skyBakePipelineLayout, &w.skyPipelineLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (BindGroupLayout *layout : { &w.skyBakeBindGroupLayout, &w.skyBindGroupLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (Buffer *buffer : { &w.skyBakeBuffer, &w.skyUniformBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
+	if (w.skySampler) { w.skySampler.release(); w.skySampler = nullptr; }
+	w.boundSunView = nullptr;
+	w.boundMoonView = nullptr;
+	w.skyBaked = false;
+	w.sunPending = false;
 	w.chunkLights.clear();
 	w.previewsDrawn = 0;
 	for (RenderPipeline *pipeline : { &w.cubePipeline, &w.decalPipeline, &w.linePipeline, &w.iconPipeline })

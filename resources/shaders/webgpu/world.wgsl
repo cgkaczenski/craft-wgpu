@@ -33,6 +33,11 @@ struct Uniforms {
     // first: camera-relative positions to each shadow map's clip space,
     // depth 0..1. Valid while lightParams.z is not 0.
     shadowMatrices: array<mat4x4f, 3>,
+    // Milestone 14's fog (GL's ShadingSettings): x u_fogDistance, where the
+    // far fog closes (the view distance less a chunk), y u_fogCloseGradient
+    // (the fogGradient setting; 0 disables the near fog), z 1 underwater
+    // (GL fogs only above water), w unused.
+    fogParams: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

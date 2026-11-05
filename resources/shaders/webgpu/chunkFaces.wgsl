@@ -65,9 +65,12 @@
 // the 4x anisotropy WebGPU only allows with linear filtering.
 @group(0) @binding(5) var blockSampler: sampler;
 
-// The peel's inputs (transparent pipelines only).
+// The frame group: the peel's inputs (transparent passes) and the sky
+// behind the world, for the fog (milestone 14; GL's u_skyTexture, read at
+// the pixel). Bound for the opaque and transparent lit passes.
 @group(1) @binding(0) var peelDepth: texture_depth_2d;
 @group(1) @binding(1) var peelColor: texture_2d<f32>;
+@group(1) @binding(3) var skyColor: texture_2d<f32>;
 
 // The decal's crack.png: 10 frames side by side (milestone 10a).
 @group(1) @binding(2) var crackTexture: texture_2d<f32>;
@@ -315,6 +318,39 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     return s;
 }
 
+// defaultShader.frag's computeFog (after Sildur's shaders, as GL notes):
+// how much of the lit color is left at `dist` blocks from the camera, the
+// rest going to the sky behind. A near haze thickening with distance, more
+// so low down (airDensity grows with height above 60), and a hard edge at
+// u_fogDistance so the world's end fades into the sky. GL's rain and
+// time-of-day terms are constants there (rainStrength 0, tmult 0) and are
+// folded in. GL divides by the near fog's density, so its setting of 0
+// ("disables" the near fog, by the menu) makes a NaN; here 0 skips it.
+fn computeFog(distance: f32, fragmentHeight: f32) -> f32 {
+    let density = u.fogParams.y;
+    let airDensity = max(fragmentHeight / 10.0, 6.0);
+    let eyeBrightnessSmooth = 120.0;
+
+    var near = 1.0;
+    if (density > 0.0) {
+        let d = pow(distance * 0.8, 0.85);
+        let height = airDensity;
+        let haze = 2.625 / exp(-60.0 / 10.0 / density) * exp(-airDensity / density)
+            * (1.0 - exp(-pow(d, 2.712) * height / density / 6000.0 / 13.0)) / height;
+        near = 1.0 - clamp(haze, 0.0, 1.0) * clamp((eyeBrightnessSmooth / 255.0 - 2.0 / 16.0) * 4.0, 0.0, 1.0);
+    }
+
+    let far = pow(exp(-pow(distance / u.fogParams.x, 32.0)), 0.10);
+    return far * far * near;
+}
+
+// GL's last step: the color toward the sky behind it, above water.
+fn applyFog(in: VertexOutput, color: vec3f) -> vec3f {
+    if (u.fogParams.z != 0.0) { return color; }
+    let sky = textureLoad(skyColor, vec2i(in.position.xy), 0).rgb;
+    return mix(sky, color, computeFog(length(in.relative), f32(in.blockPos.y) + in.inBlock.y));
+}
+
 // fboMain's targets, in defaultShader.frag's order, GL's fifth (the
 // roughness, out_materials) in the positions' alpha.
 struct GBuffer {
@@ -334,7 +370,7 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> GBuffe
 
     let s = shade(in, t, frontFacing);
     var out: GBuffer;
-    out.color = vec4f(s.color, 1.0);
+    out.color = vec4f(applyFog(in, s.color), 1.0);
     out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, s.roughness);
     out.normal = packNormal(s.normal);
     out.bloom = vec4f(s.bloom, 0.0);
@@ -371,7 +407,7 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> @loca
     let s = shade(in, t, frontFacing);
 
     // Glass and ice: lit, with GL's alpha (more opaque at grazing angles).
-    if (!isWater(in)) { return vec4f(s.color, s.alpha); }
+    if (!isWater(in)) { return vec4f(applyFog(in, s.color), s.alpha); }
 
     // Water: the lit surface mixed, by the view angle, with what is under it.
     let mixFactor = clamp(pow(1.0 - clamp(s.dotNV, 0.0, 1.0), 2.0) * 0.8 + 0.1, 0.0, 1.0);
@@ -386,12 +422,12 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> @loca
         // animation.
         var under = textureLoad(peelColor, pixel, 0).rgb;
         under = mix(under, u.waterColor.rgb * 0.7, 0.6 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0));
-        return vec4f(mix(under, s.color, mixFactor), 1.0);
+        return vec4f(applyFog(in, mix(under, s.color, mixFactor)), 1.0);
     }
 
     // No peel: the water itself is see-through, more so looking down.
     let depthMix = 0.4 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0);
-    return vec4f(mix(s.color, u.waterColor.rgb * 0.7, depthMix), pow(mixFactor, 0.7));
+    return vec4f(applyFog(in, mix(s.color, u.waterColor.rgb * 0.7, depthMix)), pow(mixFactor, 0.7));
 }
 
 // The crack (decal.frag): frame planes.z of the strip, opaque where drawn.

@@ -2729,6 +2729,41 @@ static glm::dmat4 sunCascadeMatrix(Camera &c, glm::vec3 sunPos, double zEnd)
 		-(boxMax.z + depthMargin), -(boxMin.z - depthMargin));
 	return lightProjection * glm::mat4_cast(lightRotation);
 }
+
+// Milestone 14: SkyBoxLoaderAndDrawer::drawBefore's choice of two skies and
+// their mix, as one weight per sky (day, twilight, night).
+static glm::vec3 skyWeightsFor(float timeOfDay)
+{
+	if (timeOfDay > 1.f) { timeOfDay -= (int)timeOfDay; }
+	enum { Day, Twilight, Night };
+	const float bias = 2;
+	int first = Twilight, second = Day;
+	float mix = 0;
+	if (timeOfDay <= 0.25f)
+	{
+		first = Twilight; second = Day;
+		mix = std::powf(timeOfDay / 0.25f, 1.f / bias);
+	}
+	else if (timeOfDay <= 0.50f)
+	{
+		first = Day; second = Twilight;
+		mix = std::powf((timeOfDay - 0.25f) / 0.25f, bias);
+	}
+	else if (timeOfDay <= 0.75f)
+	{
+		first = Twilight; second = Night;
+		mix = std::powf((timeOfDay - 0.50f) / 0.25f, 1.f / bias);
+	}
+	else
+	{
+		first = Night; second = Twilight;
+		mix = std::powf((timeOfDay - 0.75f) / 0.25f, bias);
+	}
+	glm::vec3 weights(0.f);
+	weights[first] += 1.f - mix;
+	weights[second] += mix;
+	return weights;
+}
 #endif
 
 void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSystem, Camera &c,
@@ -3107,6 +3142,19 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 			lighting.shadowCascades[i] = sunCascadeMatrix(c, mainLightPosition, cascadeEnds[i]);
 		}
 	}
+	// Milestone 14: the sky, the sun and moon, and the fog, from what
+	// drawBefore, renderSun and the fog uniforms use.
+	lighting.skyWeights = skyWeightsFor(dayTime);
+	lighting.daySkyColor = programData.skyBoxLoaderAndDrawer.skyConfig.a1;
+	lighting.daySkyHorizon = programData.skyBoxLoaderAndDrawer.skyConfig.a2;
+	lighting.daySkyG = programData.skyBoxLoaderAndDrawer.skyConfig.g;
+	lighting.sunPosition = sunPos;
+	lighting.sunTwilight = sunTwilight;
+	lighting.sunTexture = programData.skyBoxLoaderAndDrawer.sunTexture.id;
+	lighting.moonTexture = programData.skyBoxLoaderAndDrawer.moonTexture.id;
+	lighting.fogDistance = (chunkSystem.squareSize / 2.f) * CHUNK_SIZE - CHUNK_SIZE;
+	lighting.fogGradient = getShadingSettings().fogGradient;
+	lighting.underWater = underWater;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif

@@ -148,6 +148,25 @@ namespace wgpuWorld
 		// space (-1..1 deep) from world coordinates. Nearest cascade first.
 		int shadows = 0;
 		glm::dmat4 shadowCascades[3] = { glm::dmat4(1.0), glm::dmat4(1.0), glm::dmat4(1.0) };
+
+		// Milestone 14: the sky. How much of each of GL's three baked skies
+		// (day, twilight, night) the time of day shows (drawBefore's two
+		// textures and mix, as weights); the day sky's settings
+		// (SkyBoxLoaderAndDrawer::skyConfig: sky color, horizon color, g),
+		// which re-bake it when changed; the sun's direction (sunPos, not
+		// the main light: the moon is drawn opposite it) and its twilight
+		// tint; the sun and moon textures (wgpu2d ids); and the fog.
+		glm::vec3 skyWeights = {1, 0, 0};
+		glm::vec3 daySkyColor = glm::vec3{9, 47, 116} / 255.f;
+		glm::vec3 daySkyHorizon = glm::vec3{33, 38, 44} / 255.f;
+		float daySkyG = 0.4f;
+		glm::vec3 sunPosition = {0, 1, 0};
+		float sunTwilight = 0;
+		uint32_t sunTexture = 0;
+		uint32_t moonTexture = 0;
+		float fogDistance = 100;  // GL's u_fogDistance: the view distance less a chunk
+		float fogGradient = 16;   // the fogGradient setting; 0 turns the near fog off
+		bool underWater = false;  // GL fogs only above water
 	};
 
 	// Records the world's opaque pass for this frame and prepares the
