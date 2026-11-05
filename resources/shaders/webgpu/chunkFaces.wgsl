@@ -1,6 +1,6 @@
-// Milestones 6-9: chunk faces, textured and unlit. The WebGPU counterpart of
-// the position and albedo parts of rendering/defaultShader.vert and .frag,
-// and (milestone 9) of their transparency and water peel.
+// Milestones 6-12: chunk faces. The WebGPU counterpart of
+// rendering/defaultShader.vert and .frag: positions and albedo (6-8), their
+// transparency and water peel (9), the G-buffer (11) and the lighting (12).
 //
 // One instance per block face, read from the face arena with instance step
 // mode: the same 16 bytes Chunk::bake writes for OpenGL (bigGpuBuffer.cpp's
@@ -41,39 +41,22 @@
 //
 // G-buffer (milestone 11): the opaque faces are drawn twice into fboMain's
 // targets (four here: the roughness rides in the positions' alpha, see
-// wgpuWorld.cpp's GBufferSlot). fs_depth is the depth prepass (zpass.frag: depth only, the
-// alpha test still cutting leaves); fs_main then runs once per visible pixel,
-// with depth compare Equal, writing GBuffer below. Both passes must compute
-// the same depth for Equal to hold, hence @invariant on the position.
+// wgpuWorld.cpp's GBufferSlot). fs_depth is the depth prepass (zpass.frag:
+// depth only, the alpha test still cutting leaves); fs_main then runs once
+// per visible pixel, with depth compare Equal, writing GBuffer below. Both
+// passes must compute the same depth for Equal to hold, hence @invariant on
+// the position.
 //
-// Color: the HDR target holds linear light, as GL's does. This world is
-// still unlit, so each fragment does its old math on texture colors as they
-// are (sRGB) and converts the result with toLinear; wgpuWorld's composite
-// converts back for the screen. Blending therefore happens in linear light,
-// as in GL.
+// Lighting (milestone 12): lighting.wgsl, GL's lit path. fs_main and
+// fs_blend both shade with it, into the HDR target's linear light; the
+// composite tone maps it for the screen.
 //
 // Conventions (docs/roadmap.md): positions camera-relative, depth 0..1.
-// No animation yet (grass, leaves sway and water waves in defaultShader.vert)
-// and no lighting: albedo times the orientation shade.
+// No animation yet (grass, leaves sway and water waves in defaultShader.vert).
 
-struct Uniforms {
-    // perspectiveRH_ZO times Camera::getViewMatrix (rotation only).
-    viewProjection: mat4x4f,
-    // The camera position split as in Camera::decomposePosition, the
-    // u_positionInt / u_positionFloat pair. w unused.
-    positionInt: vec4i,
-    positionFloat: vec4f,
-    // GL's u_waterColor, in output (sRGB) space: this world is unlit and
-    // writes texture colors as they are, where GL mixes in linear space.
-    waterColor: vec4f,
-    // x near plane, y far plane: to turn depth back into distance. z the
-    // crack frame, 0-10, for fs_decal (written when a decal is drawn).
-    planes: vec4f,
-    // Camera::getViewMatrix (rotation only): camera-relative positions to
-    // view space, for the G-buffer's positions (GL's u_view).
-    view: mat4x4f,
-};
-@group(0) @binding(0) var<uniform> u: Uniforms;
+#include "world.wgsl"
+#include "lighting.wgsl"
+
 @group(0) @binding(1) var<storage, read> vertexData: array<f32>;
 @group(0) @binding(2) var<storage, read> vertexUV: array<f32>;
 @group(0) @binding(3) var<storage, read> textureLayers: array<u32>;
@@ -105,16 +88,32 @@ struct VertexOutput {
     // and Equal needs them to land on the same depth bit for bit.
     @invariant @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
+    // The face's albedo, normal map and material map layers (GL's
+    // v_textureSampler, v_normalSampler, v_materialSampler).
     @location(1) @interpolate(flat) layer: u32,
-    @location(2) shade: f32,
+    @location(6) @interpolate(flat) normalLayer: u32,
+    @location(7) @interpolate(flat) materialLayer: u32,
+    // GL's v_ambientMultiplier: the orientation's fixed darkening.
+    @location(2) @interpolate(flat) ambientMultiplier: f32,
     // Camera-relative position, for the view direction.
     @location(3) relative: vec3f,
     @location(4) @interpolate(flat) normal: vec3f,
+    // Flag bits: 0 water, 1 in water, 4-7 the AO shape.
     @location(5) @interpolate(flat) flags: u32,
+    // The block's position and the point within it (GL's fragmentPositionI
+    // and fragmentPositionF), for the point lights.
+    @location(8) @interpolate(flat) blockPos: vec3i,
+    // (Not named `fragment`: a reserved word in Metal Shading Language,
+    // which wgpu translates this to without renaming struct members.)
+    @location(9) inBlock: vec3f,
+    // The baked light byte: sky light high nibble, block light low.
+    @location(10) @interpolate(flat) light: u32,
+    // The paint (the texture index's high 5 bits), 0 for none.
+    @location(11) @interpolate(flat) colors: u32,
 };
 
 // defaultShader.vert's vertexColor: a fixed darkening per orientation (front,
-// back, top, bottom, left, right; grass; leaves), standing in for lighting.
+// back, top, bottom, left, right; grass; leaves).
 const vertexColor = array<f32, 16>(
     0.95, 0.85, 1.0, 0.8, 0.85, 0.95,
     0.95, 0.95, 0.95, 0.95,
@@ -141,33 +140,17 @@ fn cornerShape(row: i32, corner: u32) -> vec3f {
     return vec3f(vertexData[base], vertexData[base + 1u], vertexData[base + 2u]);
 }
 
-// GL's linear <-> sRGB (defaultShader.frag's toLinearSRGB, and its inverse).
-fn toLinear(c: vec3f) -> vec3f {
-    let low = c / 12.92;
-    let high = pow((c + 0.055) / 1.055, vec3f(2.4));
-    return select(high, low, c < vec3f(0.04045));
-}
-
-fn fromLinear(c: vec3f) -> vec3f {
-    let low = c * 12.92;
-    let high = 1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055;
-    return select(high, low, c < vec3f(0.0031308));
-}
-
-// defaultShader.frag's fromFloatTouShort: [-1, 1] to [0, 65536], clamped to
-// 65535 (GL's 65536 for a component of exactly 1 does not fit 16 bits).
-fn packNormal(n: vec3f) -> vec4u {
-    return vec4u(min(vec3u((n + 1.0) * 0.5 * 65536.0), vec3u(65535u)), 0u);
-}
-
 @vertex
 fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOutput {
     let orientation = face.orientationAndTexture.x;
     let textureIndex = u32(face.orientationAndTexture.y) & 0x07FFu;
+    let colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
 
     // The light and flag bytes ride in y's high bits.
     let blockPosition = vec3i(face.position.x, face.position.y & 0xFFFF, face.position.z);
+    let light = u32(face.position.y >> 16) & 0xFFu;
     let flags = u32(face.position.y >> 24) & 0xFFu;
+    let water = (flags & 1u) != 0u;
 
     // Leaves (10-15) reuse the cube faces' rows; defaultShader.vert only
     // adds their sway on top.
@@ -187,8 +170,8 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
     // world is from the origin.
     let relative = vec3f(blockPosition - u.positionInt.xyz) - u.positionFloat.xyz + shape;
 
-    var shade = 1.0;
-    if (orientation >= 0 && orientation < 16) { shade = vertexColor[orientation]; }
+    var ambientMultiplier = 1.0;
+    if (orientation >= 0 && orientation < 16 && !water) { ambientMultiplier = vertexColor[orientation]; }
 
     // defaultShader.vert's normals: the table for cube faces and water, and
     // for every other shape (grass, leaves, models) the face's own plane from
@@ -211,11 +194,18 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
     out.position = u.viewProjection * vec4f(relative, 1.0);
     out.position.z += zBias * 0.5;
     out.uv = vec2f(vertexUV[uvBase], vertexUV[uvBase + 1u]);
-    out.layer = textureLayers[textureIndex]; // the albedo slot
-    out.shade = shade;
+    // A block's four slots: albedo, normal map, material map, parallax.
+    out.layer = textureLayers[textureIndex];
+    out.normalLayer = textureLayers[textureIndex + 1u];
+    out.materialLayer = textureLayers[textureIndex + 2u];
+    out.ambientMultiplier = ambientMultiplier;
     out.relative = relative;
     out.normal = normal;
     out.flags = flags;
+    out.blockPos = blockPosition;
+    out.inBlock = shape;
+    out.light = light;
+    out.colors = colors;
     return out;
 }
 
@@ -224,6 +214,80 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
 fn fs_depth(in: VertexOutput) {
     let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
     if (albedo.a <= 0.0) { discard; }
+}
+
+fn isWater(in: VertexOutput) -> bool {
+    return (in.flags & 1u) != 0u;
+}
+
+// Every texture the lighting reads, read before anything branches on the
+// pixel: textureSample takes derivatives, so it must stay in uniform
+// control flow.
+struct Texels {
+    albedo: vec4f,
+    normalMap: vec3f,
+    material: vec3f,
+    ao: f32,
+};
+
+fn readTexels(in: VertexOutput) -> Texels {
+    var t: Texels;
+    t.albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
+    t.normalMap = textureSample(blockTextures, blockSampler, in.uv, in.normalLayer).rgb;
+    t.material = textureSample(blockTextures, blockSampler, in.uv, in.materialLayer).rgb;
+    t.ao = textureSample(aoTexture, aoSampler, aoCoordinate(in.flags, in.uv)).r;
+    return t;
+}
+
+// A face lit: what fs_main and fs_blend both start from.
+struct Shaded {
+    color: vec3f,   // linear light
+    alpha: f32,     // the texture's, made more opaque at grazing angles
+    normal: vec3f,  // the normal-mapped normal, toward the eye
+    roughness: f32,
+    bloom: vec3f,   // the emissive light for bloom
+    dotNV: f32,
+};
+
+// defaultShader.frag's lit path (u_shaders on), shadow and fog aside.
+fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
+    let levels = lightLevels(in.light);
+    let water = isWater(in);
+    let ao = aoFromTexel(in.flags, t.ao);
+    let ambient = computeAmbient(levels, in.normal, in.ambientMultiplier, (in.flags & 2u) != 0u, ao);
+
+    var m = material(t.material);
+    var albedo = toLinear(t.albedo.rgb);
+    if (water) {
+        // Water has its own color, smooth and not metal.
+        albedo = u.waterColor.rgb;
+        m.roughness = 0.09;
+        m.metallic = 0.0;
+    }
+    albedo = paintAlbedo(albedo, in.colors);
+
+    // Water's normal is GL's animated dudv map, which comes with the water
+    // animation; until then the surface is flat.
+    var N = applyNormalMap(in.normal, t.normalMap, frontFacing);
+    if (water) { N = select(-in.normal, in.normal, frontFacing); }
+
+    let V = -normalize(in.relative);
+    var F0 = mix(vec3f(0.04), albedo, m.metallic);
+    if (water) { F0 = vec3f(0.021, 0.021, 0.05); }
+
+    var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0);
+    color += sunLight(levels, m.metallic, m.roughness, V, albedo, N, F0, ao);
+
+    var s: Shaded;
+    s.dotNV = dot(N, V);
+    s.alpha = 1.0 - (1.0 - t.albedo.a) * s.dotNV;
+    // GL's ambient without its physically accurate reflections (switched
+    // off by a constant): the albedo in the ambient light.
+    s.color = color + albedo * ambient;
+    s.normal = N;
+    s.roughness = m.roughness;
+    s.bloom = m.emissive * 0.12 * albedo;
+    return s;
 }
 
 // fboMain's targets, in defaultShader.frag's order, GL's fifth (the
@@ -236,25 +300,20 @@ struct GBuffer {
 };
 
 @fragment
-fn fs_main(in: VertexOutput) -> GBuffer {
-    let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
+fn fs_main(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> GBuffer {
+    let t = readTexels(in);
     // GL's alpha test: cut-out leaves, grass and flowers. After the prepass
     // this only matters with the prepass off; with it, Equal has already
     // dropped the cut-out pixels' fragments.
-    if (albedo.a <= 0.0) { discard; }
+    if (t.albedo.a <= 0.0) { discard; }
 
+    let s = shade(in, t, frontFacing);
     var out: GBuffer;
-    out.color = vec4f(toLinear(albedo.rgb * in.shade), 1.0);
-    // No material maps yet: GL's roughness without them, and no emission.
-    out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, 0.9);
-    // The face's normal: normal maps come with the lighting (milestone 12).
-    out.normal = packNormal(in.normal);
-    out.bloom = vec4f(0.0);
+    out.color = vec4f(s.color, 1.0);
+    out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, s.roughness);
+    out.normal = packNormal(s.normal);
+    out.bloom = vec4f(s.bloom, 0.0);
     return out;
-}
-
-fn isWater(in: VertexOutput) -> bool {
-    return (in.flags & 1u) != 0u;
 }
 
 // Depth back to distance from the camera, for the 0..1 range of
@@ -273,11 +332,8 @@ fn fs_waterDepth(in: VertexOutput) {
 }
 
 @fragment
-fn fs_blend(in: VertexOutput) -> @location(0) vec4f {
-    // textureSample must stay in uniform control flow (it takes derivatives
-    // for the mip level), so the albedo is read before any branch that
-    // depends on the pixel.
-    let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
+fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> @location(0) vec4f {
+    let t = readTexels(in);
     let pixel = vec2i(in.position.xy);
 
     // The peel: GL_GREATER against the nearest water surface, by hand.
@@ -285,42 +341,32 @@ fn fs_blend(in: VertexOutput) -> @location(0) vec4f {
         if (in.position.z <= textureLoad(peelDepth, pixel, 0) + 0.0000001) { discard; }
     }
 
-    if (albedo.a <= 0.0) { discard; }
+    if (t.albedo.a <= 0.0) { discard; }
 
-    let V = -normalize(in.relative);
-    let dotNV = dot(in.normal, V);
+    let s = shade(in, t, frontFacing);
 
-    if (!isWater(in)) {
-        // Glass and ice: GL's alpha, made more opaque at grazing angles.
-        // abs: the final pass draws back faces too (no culling), and GL's
-        // float target would take the >1 alpha a negative dotNV gives.
-        let alpha = 1.0 - (1.0 - albedo.a) * abs(dotNV);
-        return vec4f(toLinear(albedo.rgb * in.shade), alpha);
-    }
+    // Glass and ice: lit, with GL's alpha (more opaque at grazing angles).
+    if (!isWater(in)) { return vec4f(s.color, s.alpha); }
 
-    // Water: its own color, not the texture's.
-    var color = u.waterColor.rgb * in.shade;
-    let mixFactor = clamp(pow(1.0 - clamp(dotNV, 0.0, 1.0), 2.0) * 0.8 + 0.1, 0.0, 1.0);
+    // Water: the lit surface mixed, by the view angle, with what is under it.
+    let mixFactor = clamp(pow(1.0 - clamp(s.dotNV, 0.0, 1.0), 2.0) * 0.8 + 0.1, 0.0, 1.0);
 
     let lastDepth = linearizeDepth(textureLoad(peelDepth, pixel, 0));
     let currentDepth = linearizeDepth(in.position.z);
     let waterDepth = lastDepth - currentDepth;
 
     if (passMode == 1u) {
-        // What is under the water, darkening with depth, mixed with the
-        // surface by the view angle. GL also distorts the lookup with the
-        // animated dudv map; that comes with the animation.
-        // The copy is of the HDR target (linear): back to the space this
-        // shader mixes in, then the result to linear again.
-        var under = fromLinear(textureLoad(peelColor, pixel, 0).rgb);
+        // What is under the water, darkening with depth. GL also distorts
+        // the lookup with the animated dudv map; that comes with the
+        // animation.
+        var under = textureLoad(peelColor, pixel, 0).rgb;
         under = mix(under, u.waterColor.rgb * 0.7, 0.6 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0));
-        return vec4f(toLinear(mix(under, color, mixFactor)), 1.0);
+        return vec4f(mix(under, s.color, mixFactor), 1.0);
     }
 
     // No peel: the water itself is see-through, more so looking down.
     let depthMix = 0.4 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0);
-    color = mix(color, u.waterColor.rgb * 0.7, depthMix);
-    return vec4f(toLinear(color), pow(mixFactor, 0.7));
+    return vec4f(mix(s.color, u.waterColor.rgb * 0.7, depthMix), pow(mixFactor, 0.7));
 }
 
 // The crack (decal.frag): frame planes.z of the strip, opaque where drawn.

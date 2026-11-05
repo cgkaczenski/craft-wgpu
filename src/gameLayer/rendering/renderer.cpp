@@ -3035,8 +3035,18 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 		blockCubes.push_back(cube);
 	}
 
+	wgpuWorld::Lighting lighting;
+	lighting.sunDirection = mainLightPosition;
+	lighting.sunLightColor = sunLightColor;
+	lighting.ambientColor = ambientColor;
+	lighting.skyLightIntensity = skyLightIntensity;
+	lighting.baseAmbientExtra = adaptiveExposure.bonusAmbient;
+	lighting.exposure = adaptiveExposure.currentExposure;
+	lighting.useLights = getShadingSettings().useLights != 0;
+	lighting.maxLights = getShadingSettings().maxLights;
+	lighting.aoTexture = programData.aoTexture.id;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
-		getShadingSettings().waterType != 0, zprepass);
+		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif
 
 
@@ -3969,7 +3979,14 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 
 
 		//update automatic exposure
+	#if RENDERER_WEBGPU
+		// The readback above is GL stubs here, so averageLuminosity never
+		// moves from 0 and the exposure would climb to its maximum. Until
+		// milestone 16 ports the readback, the exposure stays where it
+		// starts (1.6, no ambient bonus).
+	#else
 		adaptiveExposure.update(deltaTime, averageLuminosity);
+	#endif
 
 	}
 #pragma endregion

@@ -42,8 +42,10 @@ namespace render
 	// The size the surface is currently configured at, in framebuffer pixels.
 	void wgpuSurfaceSize(int &width, int &height);
 
-	// Reads a WGSL file and compiles it. Errors arrive through the device's
-	// uncaptured-error callback. Returns null if the file cannot be read.
+	// Reads a WGSL file and compiles it. A line `#include "name.wgsl"` is
+	// replaced by that file (relative to the including file, each file
+	// included once). Errors arrive through the device's uncaptured-error
+	// callback. Returns null if the file, or a file it includes, cannot be read.
 	wgpu::ShaderModule wgpuCreateShaderModuleFromFile(const char *path);
 
 	// The frame's single render pass, begun (clearing to the recorded color)

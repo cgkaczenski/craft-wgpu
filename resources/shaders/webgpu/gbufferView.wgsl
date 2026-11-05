@@ -1,8 +1,11 @@
 // Milestone 11: turns one G-buffer attachment into something a screen can
 // show. Two uses, one shader:
 //   - the composite: the HDR color drawn onto the surface at the end of the
-//     world (`view` 0), converted from linear light back to sRGB. The post
-//     chain (milestone 15) replaces this with tone mapping and FXAA.
+//     world (`view` 0): GL's toneMap.frag with its default settings, which
+//     is the exposure, the ACES fit (tonemapper 0) and the sRGB curve
+//     (milestone 12, when lit colors went past 1). The post chain (milestone
+//     15) adds the rest: the other tone mappers, color grading, the dither,
+//     the vignette, FXAA.
 //   - the debug views: each attachment drawn into a small wgpu2d target that
 //     the ImGui "G-buffer" header shows (wgpuWorld::gBufferPreview).
 //
@@ -18,15 +21,16 @@
 @group(0) @binding(3) var bloomTexture: texture_2d<f32>;    // rg11b10ufloat, linear
 @group(0) @binding(4) var depthTexture: texture_depth_2d;   // depth32float, 0..1
 
-// The world's uniforms (chunkFaces.wgsl's Uniforms), for the camera planes.
-struct Uniforms {
+// The world's uniforms (world.wgsl), for the camera planes and exposure.
+// Bound at 5 here (world.wgsl declares 0): this module has its own layout.
+struct ViewUniforms {
     viewProjection: mat4x4f,
     positionInt: vec4i,
     positionFloat: vec4f,
     waterColor: vec4f,
-    planes: vec4f, // x near, y far
+    planes: vec4f, // x near, y far, w exposure
 };
-@group(0) @binding(5) var<uniform> u: Uniforms;
+@group(0) @binding(5) var<uniform> u: ViewUniforms;
 
 // Which view, in wgpuWorld.cpp's gBufferViewLabels order: color, position,
 // normal, bloom, roughness, depth.
@@ -52,6 +56,32 @@ fn fromLinear(c: vec3f) -> vec3f {
     let low = c * 12.92;
     let high = 1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055;
     return select(high, low, c < vec3f(0.0031308));
+}
+
+// toneMap.frag's ACESFitted (Stephen Hill's fit). GLSL and WGSL both build
+// a matrix from columns, so the same numbers and the same transpose.
+const acesInput = mat3x3f(
+    0.59719, 0.35458, 0.04823,
+    0.07600, 0.90834, 0.01566,
+    0.02840, 0.13383, 0.83777,
+);
+const acesOutput = mat3x3f(
+     1.60475, -0.53108, -0.07367,
+    -0.10208,  1.10813, -0.00605,
+    -0.00327, -0.07276,  1.07602,
+);
+
+fn rrtAndOdtFit(v: vec3f) -> vec3f {
+    let a = v * (v + 0.0245786) - 0.000090537;
+    let b = v * (0.983729 * v + 0.4329510) + 0.238081;
+    return a / b;
+}
+
+fn acesFitted(color: vec3f) -> vec3f {
+    var c = transpose(acesInput) * color;
+    c = rrtAndOdtFit(c);
+    c = transpose(acesOutput) * c;
+    return clamp(c, vec3f(0.0), vec3f(1.0));
 }
 
 fn texelOf(uv: vec2f, size: vec2u) -> vec2i {
@@ -89,5 +119,7 @@ fn fs_view(in: ViewOutput) -> @location(0) vec4f {
         let distance = near * far / (far - d * (far - near));
         return vec4f(vec3f(sqrt(clamp(distance / far, 0.0, 1.0))), 1.0);
     }
-    return vec4f(fromLinear(clamp(textureLoad(colorTexture, texel, 0).rgb, vec3f(0.0), vec3f(1.0))), 1.0);
+    // The HDR color, tone mapped as toneMap.frag does by default.
+    let hdr = textureLoad(colorTexture, texel, 0).rgb * u.planes.w;
+    return vec4f(fromLinear(acesFitted(hdr)), 1.0);
 }

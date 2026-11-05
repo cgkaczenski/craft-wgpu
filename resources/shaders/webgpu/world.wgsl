@@ -1,0 +1,55 @@
+// What every world shader shares (milestone 12): the uniforms and the color
+// helpers. Included with `#include "world.wgsl"` (wgpu2d's shader loader
+// expands it; WGSL itself has no includes). Must match wgpuWorld.cpp's
+// Uniforms.
+
+struct Uniforms {
+    // perspectiveRH_ZO times Camera::getViewMatrix (rotation only).
+    viewProjection: mat4x4f,
+    // The camera position split as in Camera::decomposePosition, the
+    // u_positionInt / u_positionFloat pair. w unused.
+    positionInt: vec4i,
+    positionFloat: vec4f,
+    // GL's u_waterColor, linear.
+    waterColor: vec4f,
+    // x near plane, y far plane: to turn depth back into distance. z the
+    // crack frame, 0-10, for fs_decal (written when a decal is drawn).
+    // w the exposure the composite applies (adaptiveExposure.currentExposure).
+    planes: vec4f,
+    // Camera::getViewMatrix: camera-relative positions to view space, for
+    // the G-buffer's positions (GL's u_view).
+    view: mat4x4f,
+    // The direction toward the sun (or the moon at night: GL's
+    // mainLightPosition); w GL's u_baseAmbientExtra.
+    sunDirection: vec4f,
+    // GL's u_sunLightColor and u_ambientColor, from the time of day.
+    sunLightColor: vec4f,
+    ambientColor: vec4f,
+    // x GL's u_skyLightIntensity (0-15, the time of day's sky light), y the
+    // point lights in `lights` (0 with lights off), zw unused.
+    lightParams: vec4i,
+};
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+// GL's linear <-> sRGB (defaultShader.frag's toLinearSRGB, and its inverse).
+fn toLinear(c: vec3f) -> vec3f {
+    let low = c / 12.92;
+    let high = pow((c + 0.055) / 1.055, vec3f(2.4));
+    return select(high, low, c < vec3f(0.04045));
+}
+
+fn toLinear1(c: f32) -> f32 {
+    return toLinear(vec3f(c)).x;
+}
+
+fn fromLinear(c: vec3f) -> vec3f {
+    let low = c * 12.92;
+    let high = 1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055;
+    return select(high, low, c < vec3f(0.0031308));
+}
+
+// defaultShader.frag's fromFloatTouShort: [-1, 1] to [0, 65536], clamped to
+// 65535 (GL's 65536 for a component of exactly 1 does not fit 16 bits).
+fn packNormal(n: vec3f) -> vec4u {
+    return vec4u(min(vec3u((n + 1.0) * 0.5 * 65536.0), vec3u(65535u)), 0u);
+}

@@ -71,11 +71,15 @@ namespace
 		glm::mat4 viewProjection;
 		glm::ivec4 positionInt;
 		glm::vec4 positionFloat;
-		glm::vec4 waterColor; // rgb, output (sRGB) space
-		glm::vec4 planes;     // x near, y far
-		glm::mat4 view;       // Camera::getViewMatrix, for G-buffer positions
+		glm::vec4 waterColor;    // rgb, linear (GL's u_waterColor)
+		glm::vec4 planes;        // x near, y far, z crack frame, w exposure
+		glm::mat4 view;          // Camera::getViewMatrix, for G-buffer positions
+		glm::vec4 sunDirection;  // xyz toward the sun or moon; w GL's u_baseAmbientExtra
+		glm::vec4 sunLightColor; // rgb
+		glm::vec4 ambientColor;  // rgb
+		glm::ivec4 lightParams;  // x sky light intensity, y point lights
 	};
-	static_assert(sizeof(Uniforms) == 192, "uniform layout must match chunkFaces.wgsl");
+	static_assert(sizeof(Uniforms) == 256, "uniform layout must match world.wgsl");
 
 	// One face: short orientation, short texture, ivec3 position.
 	constexpr uint64_t faceBytes = 4 * sizeof(int);
@@ -236,6 +240,15 @@ namespace
 		wgpu2d::FrameBuffer previews[gBufferViewCount];
 		uint32_t previewsWanted = 0; // bits: views asked for since the last frame
 		uint32_t previewsDrawn = 0;  // bits: views with a frame drawn in them
+
+		// Milestone 12: the point lights and the AO texture (group 0's 6-8).
+		std::unordered_map<const Chunk *, std::vector<glm::ivec4>> chunkLights;
+		std::vector<glm::ivec4> frameLights; // this frame's, gathered
+		Buffer lightBuffer = nullptr;
+		uint64_t lightCapacity = 0;          // in lights
+		uint32_t aoTextureId = 0;            // the wgpu2d texture bound at 7
+		Sampler aoSampler = nullptr;
+		TextureView boundAoView = nullptr;   // what the bind group names (not owned)
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
@@ -437,7 +450,7 @@ namespace
 	{
 		ErrorScope scope("world bind group layout");
 
-		BindGroupLayoutEntry entries[6];
+		BindGroupLayoutEntry entries[9];
 		entries[0] = Default;
 		entries[0].binding = 0;
 		entries[0].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
@@ -474,9 +487,24 @@ namespace
 		entries[5].buffer.minBindingSize = 0;
 		entries[5].sampler.type = SamplerBindingType::Filtering;
 
+		// 6: the point lights; 7: the AO texture; 8: its sampler (milestone
+		// 12, lighting.wgsl). Fragment stage.
+		entries[6] = entries[0];
+		entries[6].binding = 6;
+		entries[6].visibility = ShaderStage::Fragment;
+		entries[6].buffer.type = BufferBindingType::ReadOnlyStorage;
+		entries[6].buffer.minBindingSize = 0;
+
+		entries[7] = entries[4];
+		entries[7].binding = 7;
+		entries[7].texture.viewDimension = TextureViewDimension::_2D;
+
+		entries[8] = entries[5];
+		entries[8].binding = 8;
+
 		BindGroupLayoutDescriptor layoutDesc = Default;
 		layoutDesc.label = StringView("world bind group layout");
-		layoutDesc.entryCount = 6;
+		layoutDesc.entryCount = 9;
 		layoutDesc.entries = entries;
 		w.bindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		if (!w.bindGroupLayout) { return false; }
@@ -1536,6 +1564,11 @@ namespace
 	// Brings the tables, the texture array and the bind group naming them up
 	// to date. The bind group holds the buffers and views themselves, so it
 	// is remade after any of them is.
+	// Defined further down.
+	bool ensureBuffer(Buffer &buffer, uint64_t &capacity, uint64_t needed, uint64_t unitBytes,
+		BufferUsage usage, const char *label, bool &remade);
+	bool ensureWhiteTexture();
+
 	bool updateResources()
 	{
 		bool changed = false;
@@ -1552,14 +1585,54 @@ namespace
 			w.texturesDirty = false;
 			changed = true;
 		}
+		// The point lights' buffer: room for at least one (a storage binding
+		// can't be empty), grown to the frame's count.
+		bool grownLights = false;
+		if (!ensureBuffer(w.lightBuffer, w.lightCapacity, std::max<size_t>(w.frameLights.size(), 1),
+			sizeof(glm::ivec4), BufferUsage::Storage, "world point lights", grownLights)) { return false; }
+		if (!w.frameLights.empty())
+		{
+			wgpuQueue().writeBuffer(w.lightBuffer, 0, w.frameLights.data(), w.frameLights.size() * sizeof(glm::ivec4));
+		}
+		if (grownLights) { changed = true; }
+
+		// GL's ao.png, mirrored in u (GL_MIRRORED_REPEAT on S), clamped in v
+		// (gl2d's default), linear with mips (loaded with mipmaps, not
+		// pixelated).
+		if (!w.aoSampler)
+		{
+			SamplerDescriptor samplerDesc = Default;
+			samplerDesc.label = StringView("world AO sampler");
+			samplerDesc.addressModeU = AddressMode::MirrorRepeat;
+			samplerDesc.addressModeV = AddressMode::ClampToEdge;
+			samplerDesc.addressModeW = AddressMode::ClampToEdge;
+			samplerDesc.magFilter = FilterMode::Linear;
+			samplerDesc.minFilter = FilterMode::Linear;
+			samplerDesc.mipmapFilter = MipmapFilterMode::Linear;
+			samplerDesc.lodMinClamp = 0.0f;
+			samplerDesc.lodMaxClamp = 32.0f;
+			samplerDesc.compare = CompareFunction::Undefined;
+			samplerDesc.maxAnisotropy = 1;
+			w.aoSampler = wgpuDevice().createSampler(samplerDesc);
+			if (!w.aoSampler) { return false; }
+		}
+		TextureView aoView = wgpuTextureView(w.aoTextureId);
+		if (!aoView)
+		{
+			// No AO texture: the white texture reads as no darkening.
+			if (!ensureWhiteTexture()) { return false; }
+			aoView = w.whiteView;
+		}
+		if (aoView != w.boundAoView) { changed = true; }
+
 		if (!changed && w.bindGroup) { return true; }
 		if (!w.blockGeometryBuffer || !w.textureArrayView) { return false; }
 
 		ErrorScope scope("world bind group");
 		if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
 
-		BindGroupEntry entries[6];
-		for (int i = 0; i < 6; i++) { entries[i] = Default; entries[i].binding = i; }
+		BindGroupEntry entries[9];
+		for (int i = 0; i < 9; i++) { entries[i] = Default; entries[i].binding = i; }
 		entries[0].buffer = w.uniformBuffer;
 		entries[0].size = sizeof(Uniforms);
 		entries[1].buffer = w.blockGeometryBuffer;
@@ -1570,11 +1643,16 @@ namespace
 		entries[3].size = w.textureLayerBuffer.getSize();
 		entries[4].textureView = w.textureArrayView;
 		entries[5].sampler = w.sampler;
+		entries[6].buffer = w.lightBuffer;
+		entries[6].size = w.lightBuffer.getSize();
+		entries[7].textureView = aoView;
+		entries[8].sampler = w.aoSampler;
+		w.boundAoView = aoView;
 
 		BindGroupDescriptor groupDesc = Default;
 		groupDesc.label = StringView("world bind group");
 		groupDesc.layout = w.bindGroupLayout;
-		groupDesc.entryCount = 6;
+		groupDesc.entryCount = 9;
 		groupDesc.entries = entries;
 		w.bindGroup = wgpuDevice().createBindGroup(groupDesc);
 		return w.bindGroup && !scope.failed();
@@ -2171,12 +2249,37 @@ void removeChunk(const Chunk *chunk)
 	static const std::vector<int> none;
 	placeFaces(w.chunks, chunk, none);
 	placeFaces(w.transparentChunks, chunk, none);
+	w.chunkLights.erase(chunk);
+}
+
+void setChunkLights(const Chunk *chunk, const std::vector<glm::ivec4> &lights)
+{
+	if (lights.empty()) { w.chunkLights.erase(chunk); }
+	else { w.chunkLights[chunk] = lights; }
 }
 
 void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std::vector<BlockCube> &blockCubes,
-	const glm::vec3 &waterColor, bool waterPeel, bool depthPrepass)
+	const glm::vec3 &waterColor, bool waterPeel, bool depthPrepass, const Lighting &lighting)
 {
 	if (!initialize()) { return; }
+
+	// The point lights, as GL gathers them: the visible chunks' lists,
+	// nearest chunk first (the list's end), until maxLights is reached
+	// (the chunk that crosses it still counts whole; the shader reads at
+	// most maxLights).
+	w.frameLights.clear();
+	if (lighting.useLights && lighting.maxLights > 0)
+	{
+		for (auto c = visibleChunks.rbegin(); c != visibleChunks.rend(); ++c)
+		{
+			auto it = w.chunkLights.find(*c);
+			if (it == w.chunkLights.end()) { continue; }
+			w.frameLights.insert(w.frameLights.end(), it->second.begin(), it->second.end());
+			if ((int)w.frameLights.size() > lighting.maxLights) { break; }
+		}
+	}
+	w.aoTextureId = lighting.aoTexture;
+
 	if (!updateResources()) { return; }
 
 	int width = 0, height = 0;
@@ -2203,18 +2306,14 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.viewProjection = projection * camera.getViewMatrix();
 	uniforms.positionInt = glm::ivec4(positionInt, 0);
 	uniforms.positionFloat = glm::vec4(positionFloat, 0.f);
-	// GL mixes water in linear space and converts at the end; this world is
-	// unlit and writes colors as textures hold them, so the water color is
-	// converted to that space here (sRGB, as defaultShader.frag's toLinear
-	// undoes).
-	auto toSrgb = [](float c)
-	{
-		c = glm::clamp(c, 0.f, 1.f);
-		return c <= 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.f / 2.4f) - 0.055f;
-	};
-	uniforms.waterColor = glm::vec4(toSrgb(waterColor.r), toSrgb(waterColor.g), toSrgb(waterColor.b), 1.f);
-	uniforms.planes = glm::vec4(camera.closePlane, camera.farPlane, 0.f, 0.f);
+	uniforms.waterColor = glm::vec4(waterColor, 1.f); // linear, as GL's
+	uniforms.planes = glm::vec4(camera.closePlane, camera.farPlane, 0.f, lighting.exposure);
 	uniforms.view = camera.getViewMatrix();
+	uniforms.sunDirection = glm::vec4(lighting.sunDirection, lighting.baseAmbientExtra);
+	uniforms.sunLightColor = glm::vec4(lighting.sunLightColor, 0.f);
+	uniforms.ambientColor = glm::vec4(lighting.ambientColor, 0.f);
+	uniforms.lightParams = glm::ivec4(lighting.skyLightIntensity,
+		(int)std::min<size_t>(w.frameLights.size(), (size_t)std::max(lighting.maxLights, 0)), 0, 0);
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
 
 	const auto recordStart = std::chrono::steady_clock::now();
@@ -2675,7 +2774,8 @@ void shutdown()
 			<< w.chunks.size() << " + " << w.transparentChunks.size() << " chunks, " << w.facesInUse << " of " << w.arenaFaces << " faces used, "
 			<< w.freeRanges.size() << " free ranges; entities " << w.lastModelDraws << " model and "
 			<< w.lastItemDraws << " item draws, "
-			<< w.meshes.size() << " meshes\n";
+			<< w.meshes.size() << " meshes; " << w.frameLights.size() << " point lights from "
+			<< w.chunkLights.size() << " chunks with lights\n";
 		if (w.timedFrames)
 		{
 			std::cout << "WebGPU world timing (" << drawModeName(w.drawMode) << ", " << w.timedFrames
@@ -2703,6 +2803,10 @@ void shutdown()
 	if (w.viewPipelineLayout) { w.viewPipelineLayout.release(); w.viewPipelineLayout = nullptr; }
 	if (w.viewBindGroupLayout) { w.viewBindGroupLayout.release(); w.viewBindGroupLayout = nullptr; }
 	for (wgpu2d::FrameBuffer &preview : w.previews) { preview.cleanup(); }
+	if (w.lightBuffer) { w.lightBuffer.release(); w.lightBuffer = nullptr; w.lightCapacity = 0; }
+	if (w.aoSampler) { w.aoSampler.release(); w.aoSampler = nullptr; }
+	w.boundAoView = nullptr;
+	w.chunkLights.clear();
 	w.previewsDrawn = 0;
 	for (RenderPipeline *pipeline : { &w.cubePipeline, &w.decalPipeline, &w.linePipeline, &w.iconPipeline })
 	{

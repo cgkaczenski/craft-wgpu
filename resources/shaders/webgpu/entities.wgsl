@@ -26,15 +26,8 @@
 // no bloom.
 // Gizmo lines draw on the screen after the composite, as GL draws them.
 
-struct Uniforms {
-    viewProjection: mat4x4f,
-    positionInt: vec4i,
-    positionFloat: vec4f,
-    waterColor: vec4f,
-    planes: vec4f,
-    view: mat4x4f,
-};
-@group(0) @binding(0) var<uniform> u: Uniforms;
+#include "world.wgsl"
+
 @group(0) @binding(3) var<storage, read> textureLayers: array<u32>;
 @group(0) @binding(4) var blockTextures: texture_2d_array<f32>;
 @group(0) @binding(5) var blockSampler: sampler;
@@ -46,16 +39,6 @@ struct GBuffer {
     @location(2) normal: vec4u,
     @location(3) bloom: vec4f,
 };
-
-fn toLinear(c: vec3f) -> vec3f {
-    let low = c / 12.92;
-    let high = pow((c + 0.055) / 1.055, vec3f(2.4));
-    return select(high, low, c < vec3f(0.04045));
-}
-
-fn packNormal(n: vec3f) -> vec4u {
-    return vec4u(min(vec3u((n + 1.0) * 0.5 * 65536.0), vec3u(65535u)), 0u);
-}
 
 // GL's normalize(transpose(inverse(m)) * n), for the 3x3 part of m. The
 // inverse transpose is the cofactor matrix over the determinant; its columns

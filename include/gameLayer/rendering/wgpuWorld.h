@@ -122,13 +122,33 @@ namespace wgpuWorld
 	// Replaces what the chunk had; an empty vector frees it.
 	void setChunkTransparentFaces(const Chunk *chunk, const std::vector<int> &faces);
 
-	// The chunk is going away: frees its faces.
+	// The chunk is going away: frees its faces and its lights.
 	void removeChunk(const Chunk *chunk);
+
+	// The chunk's light blocks (its `lights`, as GL uploads them to the
+	// chunk's lightsBuffer): xyz block positions. render gathers the visible
+	// chunks' lists into the point lights.
+	void setChunkLights(const Chunk *chunk, const std::vector<glm::ivec4> &lights);
+
+	// What lights the world this frame (milestone 12): the values
+	// renderFromBakedData computes for defaultShader's uniforms.
+	struct Lighting
+	{
+		glm::vec3 sunDirection = {0, 1, 0};  // toward the sun or moon (mainLightPosition)
+		glm::vec3 sunLightColor = {1, 1, 1}; // linear, from the time of day
+		glm::vec3 ambientColor = {1, 1, 1};  // linear, from the time of day
+		int skyLightIntensity = 15;          // 0-15, the time of day's sky light
+		float baseAmbientExtra = 0;          // adaptiveExposure.bonusAmbient
+		float exposure = 1;                  // adaptiveExposure.currentExposure
+		bool useLights = true;               // the useLights setting
+		int maxLights = 40;                  // the maxLights setting
+		uint32_t aoTexture = 0;              // ao.png, a wgpu2d texture id
+	};
 
 	// Records the world's opaque pass for this frame and prepares the
 	// transparent ones (renderTransparent records them): clears the
 	// G-buffer (GL's fboMain: HDR color, positions with the roughness in
-	// their alpha, normals, bloom) and depth, draws the opaque faces of `visibleChunks` (the
+	// their alpha, normals, bloom) and depth, lit by `lighting`, draws the opaque faces of `visibleChunks` (the
 	// renderer's frustum-culled list, sorted far to near) and the dropped
 	// block cubes into it, then, later, their transparent faces blended back
 	// to front. With `depthPrepass` (the renderer's zprepass) the faces go
@@ -139,7 +159,7 @@ namespace wgpuWorld
 	// frame, before the 2D layer draws.
 	void render(Camera &camera, const std::vector<Chunk *> &visibleChunks,
 		const std::vector<BlockCube> &blockCubes, const glm::vec3 &waterColor, bool waterPeel,
-		bool depthPrepass);
+		bool depthPrepass, const Lighting &lighting);
 
 	// Milestone 11's debug views of the G-buffer, for ImGui: view `view`
 	// (0 to gBufferViewCountTotal() - 1, named by gBufferViewName) as a

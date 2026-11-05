@@ -2437,6 +2437,7 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 
 	#if RENDERER_WEBGPU
 		wgpuWorld::setChunkFaces(this, opaqueGeometry);
+		wgpuWorld::setChunkLights(this, lights);
 	#endif
 
 		//gpuBuffer->addChunk({data.x, data.z}, opaqueGeometry);

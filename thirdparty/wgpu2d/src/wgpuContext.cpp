@@ -689,14 +689,51 @@ namespace
 	// quadShaderSource.h); this exists for the application, which has a
 	// resource layout and may keep its shaders in it -- the ImGui backend in
 	// src/platform does exactly that through wgpuCreateShaderModuleFromFile.
+	// ourCraft: WGSL has no #include, and the world's shaders share their
+	// uniforms and lighting. A line `#include "name.wgsl"` is replaced by that
+	// file (from the including file's folder), once per file however often it
+	// is asked for, so two files can both include a third. Not WGSL, so a
+	// module whose includes were not expanded fails to compile loudly.
+	bool expandIncludes(const std::string &path, std::string &out, std::vector<std::string> &included)
+	{
+		std::string source;
+		if (!readTextFile(path.c_str(), source))
+		{
+			std::cerr << "WebGPU: cannot read shader file " << path << "\n";
+			return false;
+		}
+		const size_t slash = path.find_last_of('/');
+		const std::string folder = slash == std::string::npos ? "" : path.substr(0, slash + 1);
+
+		size_t start = 0;
+		while (start < source.size())
+		{
+			size_t end = source.find('\n', start);
+			if (end == std::string::npos) { end = source.size(); }
+			const std::string line = source.substr(start, end - start);
+			start = end + 1;
+
+			const size_t open = line.find("#include \"");
+			const size_t close = open == std::string::npos ? open : line.find('"', open + 10);
+			if (open != 0 || close == std::string::npos)
+			{
+				out += line;
+				out += '\n';
+				continue;
+			}
+			const std::string name = folder + line.substr(open + 10, close - open - 10);
+			if (std::find(included.begin(), included.end(), name) != included.end()) { continue; }
+			included.push_back(name);
+			if (!expandIncludes(name, out, included)) { return false; }
+		}
+		return true;
+	}
+
 	ShaderModule createShaderModuleFromFile(const char *path)
 	{
 		std::string source;
-		if (!readTextFile(path, source))
-		{
-			std::cerr << "WebGPU: cannot read shader file " << path << "\n";
-			return nullptr;
-		}
+		std::vector<std::string> included;
+		if (!expandIncludes(path, source, included)) { return nullptr; }
 		return createShaderModule(source.c_str(), path);
 	}
 
