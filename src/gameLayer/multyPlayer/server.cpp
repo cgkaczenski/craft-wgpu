@@ -330,6 +330,125 @@ void genericBroadcastEntityKillFromServerToPlayer(std::uint64_t eid, bool reliab
 		peerToIgnore, reliable, channelEntityPositions);
 }
 
+// The spawn's height: from worldSaver.spawnPosition, down through air to the
+// ground, then up to the first free spot with something solid under it. Only
+// while the spawn chunk is loaded; otherwise spawnPosition stays as it is.
+static void correctSpawnHeight(WorldSaver &worldSaver)
+{
+	glm::ivec3 spawnPos = worldSaver.spawnPosition;
+	auto spawnChunk = sd.chunkCache.getChunkOrGetNull(divideChunk(spawnPos.x),
+		divideChunk(spawnPos.z));
+
+	//only if the chunk is loaded for now
+	if (spawnChunk)
+	{
+		glm::ivec3 blockPos = spawnPos;
+		blockPos.x = modBlockToChunk(blockPos.x);
+		blockPos.z = modBlockToChunk(blockPos.z);
+
+		if (blockPos.y >= CHUNK_HEIGHT)
+		{
+			worldSaver.spawnPosition.y = CHUNK_HEIGHT;
+		}
+		else
+		{
+			if (blockPos.y < 1)
+			{
+				blockPos.y = 1;
+			}
+
+			//try down first
+			{
+				while (true)
+				{
+					auto b = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y, blockPos.z);
+
+					if (!b)
+					{
+						break;
+					}
+
+					if (!b->isColidable())
+					{
+						auto bunder = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y - 1, blockPos.z);
+						if (bunder && !bunder->isColidable())
+						{
+							blockPos.y--;
+						}
+						else
+						{
+							break;
+						}
+					}
+					else
+					{
+						break;
+					}
+				}
+			}
+			
+			while (true)
+			{
+				auto b = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y, blockPos.z);
+
+				if (!b)
+				{
+					worldSaver.spawnPosition.y = blockPos.y;
+					break;
+				}
+
+				if (!b->isColidable())
+				{
+					auto bunder = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y - 1, blockPos.z);
+					if (bunder && bunder->isColidable())
+					{
+						auto bUp = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y + 1, blockPos.z);
+						if (!bUp || !bUp->isColidable())
+						{
+							//good
+							worldSaver.spawnPosition.y = blockPos.y;
+							break;
+						}
+					}
+				}
+				blockPos.y++;
+			}
+
+		}
+	}
+}
+
+// Loads (or generates) the spawn chunk and places the spawn on its ground,
+// before any player can join. Without it, the first player of a run got
+// whatever spawnPosition held when it connected: the default height, or the
+// corrected one if a tick had already found the chunk loaded.
+void loadSpawnChunkAndPlaceSpawn(WorldGenerator &wg, StructuresManager &structuresManager,
+	BiomesManager &biomesManager, WorldSaver &worldSaver)
+{
+	// The spawn chunk and its neighbours, two chunks each way: generating a
+	// chunk writes its trees and other structures into the neighbours that
+	// are loaded, so the spawn's ground is only final once every chunk whose
+	// structures can reach it exists. The joining player needs them anyway.
+	// No player can have been sent anything yet, so the blocks this would
+	// send back to players are dropped.
+	std::vector<SendBlocksBack> sendNewBlocksToPlayers;
+	const glm::ivec3 spawnPos = worldSaver.spawnPosition;
+	const int spawnChunkX = divideChunk(spawnPos.x);
+	const int spawnChunkZ = divideChunk(spawnPos.z);
+	constexpr int radius = 2;
+	for (int z = -radius; z <= radius; z++)
+	{
+		for (int x = -radius; x <= radius; x++)
+		{
+			sd.chunkCache.getOrCreateChunk(spawnChunkX + x, spawnChunkZ + z,
+				wg, structuresManager, biomesManager, sendNewBlocksToPlayers, worldSaver);
+		}
+	}
+	correctSpawnHeight(worldSaver);
+	std::cout << "Spawn: " << worldSaver.spawnPosition.x << ", " << worldSaver.spawnPosition.y << ", "
+		<< worldSaver.spawnPosition.z << "\n";
+}
+
 void serverWorkerUpdate(
 	WorldGenerator &wg,
 	StructuresManager &structuresManager,
@@ -450,99 +569,9 @@ void serverWorkerUpdate(
 
 		//todo if first time ever or not do it if the chunk isn't loaded!
 	#pragma region replace spawn position
-		//worldSaver.spawnPosition.y = 170;
-		//if(0)
-		//TODO this should run once at server startup, and also create this chunk,
-		// also this should run when someone wants to respawn.
-		//just at start
-		{
-
-			//wg, structuresManager, biomesManager,
-			//sendNewBlocksToPlayers, true, nullptr, worldSaver
-
-			glm::ivec3 spawnPos = worldSaver.spawnPosition;
-			auto spawnChunk = sd.chunkCache.getChunkOrGetNull(divideChunk(spawnPos.x),
-				divideChunk(spawnPos.z));
-
-			//only if the chunk is loaded for now
-			if (spawnChunk)
-			{
-				glm::ivec3 blockPos = spawnPos;
-				blockPos.x = modBlockToChunk(blockPos.x);
-				blockPos.z = modBlockToChunk(blockPos.z);
-
-				if (blockPos.y >= CHUNK_HEIGHT)
-				{
-					worldSaver.spawnPosition.y = CHUNK_HEIGHT;
-				}
-				else
-				{
-					if (blockPos.y < 1)
-					{
-						blockPos.y = 1;
-					}
-
-					//try down first
-					{
-						while (true)
-						{
-							auto b = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y, blockPos.z);
-
-							if (!b)
-							{
-								break;
-							}
-
-							if (!b->isColidable())
-							{
-								auto bunder = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y - 1, blockPos.z);
-								if (bunder && !bunder->isColidable())
-								{
-									blockPos.y--;
-								}
-								else
-								{
-									break;
-								}
-							}
-							else
-							{
-								break;
-							}
-						}
-					}
-					
-					while (true)
-					{
-						auto b = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y, blockPos.z);
-
-						if (!b)
-						{
-							worldSaver.spawnPosition.y = blockPos.y;
-							break;
-						}
-
-						if (!b->isColidable())
-						{
-							auto bunder = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y - 1, blockPos.z);
-							if (bunder && bunder->isColidable())
-							{
-								auto bUp = spawnChunk->chunk.safeGet(blockPos.x, blockPos.y + 1, blockPos.z);
-								if (!bUp || !bUp->isColidable())
-								{
-									//good
-									worldSaver.spawnPosition.y = blockPos.y;
-									break;
-								}
-							}
-						}
-						blockPos.y++;
-					}
-
-				}
-			}
-
-		}
+		//TODO this should also run when someone wants to respawn.
+		// loadSpawnChunkAndPlaceSpawn already ran it once at startup.
+		correctSpawnHeight(worldSaver);
 	#pragma endregion
 
 

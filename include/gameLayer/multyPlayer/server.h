@@ -62,6 +62,11 @@ void serverWorkerUpdate(WorldGenerator &wg, StructuresManager &structuresManager
 	std::vector<ServerTask> &serverTask,
 	float deltaTime, Profiler &profiler);
 
+// Once at startup, before the first tick: loads the spawn chunk and puts
+// worldSaver.spawnPosition on its ground, so every player joins there.
+void loadSpawnChunkAndPlaceSpawn(WorldGenerator &wg, StructuresManager &structuresManager,
+	BiomesManager &biomesManager, WorldSaver &worldSaver);
+
 
 //returns the timer since the start of the program
 std::uint64_t getTimer();

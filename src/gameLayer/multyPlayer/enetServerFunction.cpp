@@ -1050,6 +1050,10 @@ void enetServerFunction(std::string path)
 	serverTasks.reserve(100);
 
 
+	// The spawn's height before anyone can join: a connection may already be
+	// queued in ENet, but only the loop below handles it (addConnection).
+	loadSpawnChunkAndPlaceSpawn(wg, structuresManager, biomesManager, worldSaver);
+
 	//run the server for one tick
 	serverWorkerUpdate(wg, structuresManager, biomesManager,
 		worldSaver, serverTasks, (1.f/targetTicksPerSeccond) + 0.01, serverProfiler);
