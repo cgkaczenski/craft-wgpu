@@ -21,7 +21,6 @@
 #include <lightSystem.h>
 #include <structure.h>
 #include <safeSave.h>
-#include <rendering/sunShadow.h>
 #include <multiPlot.h>
 #include <profiler.h>
 #include <thread>
@@ -49,7 +48,6 @@ struct GameData
 	LightSystem lightSystem;
 	int skyLightIntensity = 15;
 
-	SunShadow sunShadow;
 
 	Profiler gameplayFrameProfiler;
 	CameraShaker cameraShaker;
@@ -235,15 +233,12 @@ bool initGameplay(ProgramData &programData, const char *c) //GAME STUFF!
 
 	gameData.chunkSystem.init(getShadingSettings().viewDistance * 2);
 
-	//TODO, MOVE TO PROGRAM DATA!!!!!!!!!!!
-	gameData.sunShadow.init();
 
 	loadCurrentSkin();
 
 	//-5359
 	//6348
 	//todo clear history stuff here
-	//programData.GPUProfiler.;
 
 	//gameData.inventory.heldInMouse = Item(BlockTypes::glass);
 
@@ -899,12 +894,6 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		{
 
 			programData.renderer.reloadShaders();
-			programData.skyBoxLoaderAndDrawer.clearOnlyGPUdata();
-			programData.skyBoxLoaderAndDrawer.createGpuData();
-			programData.skyBoxLoaderAndDrawer.createSkyTextures();
-
-			programData.sunRenderer.clear();
-			programData.sunRenderer.create();
 
 		}
 
@@ -1765,7 +1754,6 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 #pragma endregion
 
-	programData.renderer.entityRenderer.itemEntitiesToRender.push_back({gameData.entityTest});
 
 
 	//
@@ -1818,7 +1806,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		gameData.gameplayFrameProfiler.startSubProfile("rendering");
 
 		//programData.renderer.render(data, gameData.c, programData.texture);
-		programData.renderer.renderFromBakedData(gameData.sunShadow,gameData.chunkSystem, 
+		programData.renderer.renderFromBakedData(gameData.chunkSystem, 
 			gameData.c, programData, programData.blocksLoader, gameData.entityManager,
 			programData.modelsManager, 
 			gameData.adaptiveExposure, gameData.showLightLevels,
@@ -1905,10 +1893,8 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	if (!gameData.isInsideMapView)
 	{
 
-		programData.GPUProfiler.startSubProfile("Debug rendering");
 
 
-		programData.pointDebugRenderer.renderCubePoint(gameData.c, gameData.point);
 
 		if (gameData.renderBox)
 		{
@@ -2043,7 +2029,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		if (gameData.renderColliders)
 		{
 
-			gameData.entityManager.renderColiders(programData.pointDebugRenderer, programData.gyzmosRenderer, 
+			gameData.entityManager.renderColiders(programData.gyzmosRenderer, 
 				gameData.c);
 
 		}
@@ -2060,7 +2046,6 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 		programData.gyzmosRenderer.render(gameData.c, posInt, posFloat);
 
-		programData.GPUProfiler.endSubProfile("Debug rendering");
 	}
 
 #pragma endregion
@@ -2143,30 +2128,28 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 			{	
 				ImGui::Checkbox("showLightLevels", &gameData.showLightLevels);
 				ImGui::SliderInt("skyLightIntensity", &gameData.skyLightIntensity, 0, 15);
-				ImGui::SliderFloat("metallic", &programData.renderer.metallic, 0, 1);
-				ImGui::SliderFloat("roughness", &programData.renderer.roughness, 0, 1);
 				ImGui::SliderFloat("exposure", &gameData.adaptiveExposure.currentExposure, 0.001, 10);
-				ImGui::Combo("Tonemapper", &programData.renderer.defaultShader.
+				ImGui::Combo("Tonemapper", &programData.renderer.
 					shadingSettings.tonemapper, "ACES\0AgX\0ZCAM\0");
 
 				ImGui::SliderFloat3("Sky pos", &programData.renderer.sunPos[0], -1, 1);
 
 				ImGui::ColorPicker3("water color", 
-					&programData.renderer.defaultShader.shadingSettings.waterColor[0]);
+					&programData.renderer.shadingSettings.waterColor[0]);
 
 				ImGui::ColorPicker3("under water color",
-					&programData.renderer.defaultShader.shadingSettings.underWaterColor[0]);
+					&programData.renderer.shadingSettings.underWaterColor[0]);
 
 				ImGui::SliderFloat("underwaterDarkenStrength",
-					&programData.renderer.defaultShader.shadingSettings.underwaterDarkenStrength,
+					&programData.renderer.shadingSettings.underwaterDarkenStrength,
 					0, 1);
 
 				ImGui::SliderFloat("underwaterDarkenDistance",
-					&programData.renderer.defaultShader.shadingSettings.underwaterDarkenDistance,
+					&programData.renderer.shadingSettings.underwaterDarkenDistance,
 					0, 40);
 
 				ImGui::SliderFloat("fogGradientUnderWater",
-					&programData.renderer.defaultShader.shadingSettings.fogGradientUnderWater,
+					&programData.renderer.shadingSettings.fogGradientUnderWater,
 					0, 10);
 
 				ImGui::SliderFloat("normal fog",
@@ -2206,11 +2189,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				ImGui::ColorEdit3("Sky", &programData.skyBoxLoaderAndDrawer.skyConfig.a1[0]);
 				ImGui::ColorEdit3("Ground", &programData.skyBoxLoaderAndDrawer.skyConfig.a2[0]);
 				ImGui::SliderFloat("Density", &programData.skyBoxLoaderAndDrawer.skyConfig.g, 0, 1);
-					
-				if(ImGui::Button("Refresh"))
-				{
-					programData.skyBoxLoaderAndDrawer.createSkyTextures();
-				}
+				// wgpuWorld re-bakes the skies when these change.
 
 			}
 
@@ -2317,67 +2296,9 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				}
 			}
 
-			if (ImGui::CollapsingHeader("Sun Shadow Map",
-				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
-			{
-				ImGui::Image((void *)gameData.sunShadow.shadowTexturePreview.color, {256, 256}, 
-					{0, 1}, {1, 0});
-				//ImGui::Image((void *)gameData.sunShadow.shadowMap.depth, {256, 256},
-				//	{0, 1}, {1, 0});
-			}
-
-			if (ImGui::CollapsingHeader("HBAO Map",
-				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
-			{
-				ImGui::Image((void *)programData.renderer.fboHBAO.color, {256, 256},
-					{0, 1}, {1, 0});
-			}
-
-			if (ImGui::CollapsingHeader("Sky Map",
-				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
-			{
-				ImGui::Image((void *)programData.renderer.fboSkyBox.color, {256, 256},
-					{0, 1}, {1, 0});
-			}
-
-			ImGui::NewLine();
-
-			if (ImGui::CollapsingHeader("Screen space pos",
-				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
-			{
-				ImGui::Image((void *)programData.renderer.fboLastFramePositions.color, {256, 256},
-					{0, 1}, {1, 0});
-			}
-
-			if (ImGui::CollapsingHeader("Last frame color",
-				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
-			{
-				ImGui::Image((void *)programData.renderer.fboLastFrame.color, {256, 256},
-					{0, 1}, {1, 0});
-			}
-
-			if (ImGui::CollapsingHeader("Sun for SSGR",
-				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
-			{
-				ImGui::Image((void *)programData.renderer.fboSunForGodRays.color, {256, 256},
-					{0, 1}, {1, 0});
-
-				ImGui::Image((void *)programData.renderer.fboSunForGodRaysSecond.color, {256, 256},
-					{0, 1}, {1, 0});
-			}
-
 			if (ImGui::CollapsingHeader("Filtered bloom color",
 				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
 			{
-				ImGui::Image((void *)programData.renderer.fboMain.fourthColor, {256, 256},
-					{0, 1}, {1, 0});
-
-				ImGui::Image((void *)programData.renderer.bluredColorBuffer[0], {256, 256},
-					{0, 1}, {1, 0});
-
-				ImGui::Image((void *)programData.renderer.bluredColorBuffer[1], {256, 256},
-					{0, 1}, {1, 0});
-
 				ImGui::SliderFloat("Multiplier", &getShadingSettings().bloomMultiplier, 0, 7);
 				ImGui::SliderFloat("Tresshold", &getShadingSettings().bloomTresshold, 0.0001, 10);
 			}
@@ -2397,12 +2318,9 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				ImVec4 colLoadedButNotBaked = {0.5f,0.5f,0.2f,1.f};
 				ImVec4 colrequested = {0.2f,0.2f,0.9f,1.f};
 
-				ImGui::Text("Gpu buffer entries count: %d",
-					(int)gameData.chunkSystem.gpuBuffer.entriesMap.size());
-
 				if (ImGui::Button("Drop all chunks"))
 				{
-					gameData.chunkSystem.dropAllChunks(&gameData.chunkSystem.gpuBuffer, true);
+					gameData.chunkSystem.dropAllChunks(true);
 				}
 				
 				ImGui::ColorButton("##1", colNotLoaded, ImGuiColorEditFlags_NoInputs, ImVec2(25, 25));
@@ -2473,22 +2391,13 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 			}
 
-			//ImGui::Checkbox("Unified geometry pool",
-			//	&programData.renderer.unifiedGeometry);
-
-			ImGui::Checkbox("Sort chunks",
-				&programData.renderer.sortChunks);
-
 			ImGui::Checkbox("Z pre pass",
 				&programData.renderer.zprepass);
 
-			ImGui::Checkbox("Render Transparent",
-				&programData.renderer.renderTransparent);
-
-			bool shaders = programData.renderer.defaultShader.shadingSettings.shaders;
+			bool shaders = programData.renderer.shadingSettings.shaders;
 			ImGui::Checkbox("Shaders",
 				&shaders);
-			programData.renderer.defaultShader.shadingSettings.shaders = shaders;
+			programData.renderer.shadingSettings.shaders = shaders;
 
 			ImGui::Checkbox("Frustum culling",
 				&programData.renderer.frustumCulling);
@@ -3292,9 +3201,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 
 	gameData.gameplayFrameProfiler.endFrame();
-	programData.GPUProfiler.endFrame();
 	gameData.gameplayFrameProfiler.startFrame();
-	programData.GPUProfiler.startFrame();
 	gameData.gameplayFrameProfiler.startSubProfile("swap chain and others");
 
 

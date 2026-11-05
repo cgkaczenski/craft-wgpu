@@ -210,7 +210,7 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 
 		if (scene)
 		{
-			model.vao = wgpuWorld::newMeshId();
+			model.mesh = wgpuWorld::newMeshId();
 
 			unsigned int vertexOffset = 0;
 
@@ -422,7 +422,7 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 			if (!model.vertexCount) { std::cout << "!!!!Error wrong model format!!!!!!!!!!!!!\n"; }
 
 			static_assert(sizeof(Data) == 36, "the WebGPU model pipeline reads 36-byte vertices");
-			wgpuWorld::setMesh(model.vao, vertexes.data(), vertexes.size() * sizeof(Data),
+			wgpuWorld::setMesh(model.mesh, vertexes.data(), vertexes.size() * sizeof(Data),
 				indices.data(), indices.size(), sizeof(unsigned int));
 		}
 		else if(reportErrors)
@@ -1005,7 +1005,7 @@ gl2d::Texture loadPlayerSkin(const char *path)
 
 void Model::cleanup()
 {
-	wgpuWorld::removeMesh(vao);
+	wgpuWorld::removeMesh(mesh);
 
 	*this = {};
 }

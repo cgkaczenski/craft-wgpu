@@ -67,7 +67,6 @@ void ChunkSystem::init(int squareDistance)
 	created = 0;
 	squareSize = squareDistance;
 	loadedChunks.resize(squareDistance * squareDistance, nullptr);
-	gpuBuffer.create(squareDistance * squareDistance);
 }
 
 void ChunkSystem::changeRenderDistance(int squareDistance, bool notifyServer)
@@ -85,8 +84,7 @@ void ChunkSystem::changeRenderDistance(int squareDistance, bool notifyServer)
 
 void ChunkSystem::cleanup(bool notifyServer)
 {
-	dropAllChunks(nullptr, notifyServer);
-	gpuBuffer.cleanup();
+	dropAllChunks(notifyServer);
 	//threadPool.cleanup();
 }
 
@@ -435,7 +433,7 @@ void ChunkSystem::update(glm::ivec3 playerBlockPosition, float deltaTime, UndoQu
 						}
 
 				//chunk no longer needed delete it
-				dropChunkAtIndexUnsafe(i, &gpuBuffer);
+				dropChunkAtIndexUnsafe(i);
 			}
 		}
 
@@ -1267,7 +1265,7 @@ void ChunkSystem::changeBlockLightStuff(glm::ivec3 pos, int currentSkyLightLevel
 
 }
 
-void ChunkSystem::dropAllChunks(BigGpuBuffer *gpuBuffer, bool notifyServer)
+void ChunkSystem::dropAllChunks(bool notifyServer)
 {
 	if (notifyServer)
 	{
@@ -1281,24 +1279,24 @@ void ChunkSystem::dropAllChunks(BigGpuBuffer *gpuBuffer, bool notifyServer)
 
 	for (int i = 0; i < loadedChunks.size(); i++)
 	{
-		dropChunkAtIndexSafe(i, gpuBuffer);
+		dropChunkAtIndexSafe(i);
 	}
 	created = 0;
 }
 
-void ChunkSystem::dropChunkAtIndexUnsafe(int index, BigGpuBuffer *gpuBuffer)
+void ChunkSystem::dropChunkAtIndexUnsafe(int index)
 {
-	loadedChunks[index]->clearGpuData(gpuBuffer);
+	loadedChunks[index]->clearGpuData();
 	delete loadedChunks[index];
 	loadedChunks[index] = nullptr;
 
 }
 
-void ChunkSystem::dropChunkAtIndexSafe(int index, BigGpuBuffer *gpuBuffer)
+void ChunkSystem::dropChunkAtIndexSafe(int index)
 {
 	if (loadedChunks[index] != nullptr)
 	{
-		dropChunkAtIndexUnsafe(index, gpuBuffer);
+		dropChunkAtIndexUnsafe(index);
 	}
 }
 

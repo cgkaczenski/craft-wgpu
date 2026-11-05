@@ -8,7 +8,6 @@
 #include <optional>
 #include "multyPlayer/undoQueue.h"
 #include "chunk.h"
-#include <rendering/bigGpuBuffer.h>
 #include <gameplay/blocks/blocksWithData.h>
 #include <multyPlayer/splitUpdatesLogic.h>
 #include <vector>
@@ -20,7 +19,6 @@ void bakeWorkerThread(int index, ThreadPool &threadPool);
 struct ChunkSystem
 {
 
-	BigGpuBuffer gpuBuffer;
 
 
 	struct ChunkSystemSettings
@@ -136,13 +134,13 @@ struct ChunkSystem
 		BlockType newType, LightSystem &lightSystem);
 
 	//unloads all loaded chunks
-	void dropAllChunks(BigGpuBuffer *gpuBuffer, bool notifyServer);
+	void dropAllChunks(bool notifyServer);
 	
 	//unloads a chunk atn the specified index in the matrix vector,
 	//ASSUMES THE CHUNK IS LOADED AND HAS GPU DATA
-	void dropChunkAtIndexUnsafe(int index, BigGpuBuffer *gpuBuffer);
+	void dropChunkAtIndexUnsafe(int index);
 
-	void dropChunkAtIndexSafe(int index, BigGpuBuffer *gpuBuffer);
+	void dropChunkAtIndexSafe(int index);
 
 };
 

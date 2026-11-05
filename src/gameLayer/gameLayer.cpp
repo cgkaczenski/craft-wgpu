@@ -310,7 +310,7 @@ bool initGame() //main server and title screen stuff
 
 	loadShadingSettings();
 	{
-		auto &s = programData.renderer.defaultShader.shadingSettings;
+		auto &s = programData.renderer.shadingSettings;
 		auto &loadedS = getShadingSettings();
 
 		s.exposure = loadedS.exposure;
@@ -326,10 +326,6 @@ bool initGame() //main server and title screen stuff
 
 	programData.ui.init();
 
-	programData.gyzmosRenderer.create();
-	programData.pointDebugRenderer.create();
-	programData.skyBoxLoaderAndDrawer.createGpuData();
-	programData.sunRenderer.create();
 
 	loadAllDefaultTexturePacks();
 	programData.renderer.create(programData.modelsManager);

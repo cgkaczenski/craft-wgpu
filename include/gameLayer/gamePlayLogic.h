@@ -15,13 +15,9 @@ struct ProgramData
 
 	Renderer renderer;
 	GyzmosRenderer gyzmosRenderer;
-	PointDebugRenderer pointDebugRenderer;
 	BlocksLoader blocksLoader;
 	ModelsManager modelsManager;
 	SkyBoxLoaderAndDrawer skyBoxLoaderAndDrawer;
-	SunRenderer sunRenderer;
-
-	Profiler GPUProfiler;
 
 	gl2d::Texture numbersTexture;
 	gl2d::Texture causticsTexture;

@@ -56,37 +56,37 @@ void displayRenderSettingsMenu(ProgramData &programData)
 
 
 	programData.ui.menuRenderer.colorPicker("Water color",
-		&programData.renderer.defaultShader.shadingSettings.waterColor[0],
+		&programData.renderer.shadingSettings.waterColor[0],
 		programData.ui.buttonTexture, programData.ui.buttonTexture, Colors_Gray, Colors_Gray);
-	getShadingSettings().waterColor = programData.renderer.defaultShader.shadingSettings.waterColor;
+	getShadingSettings().waterColor = programData.renderer.shadingSettings.waterColor;
 
 
 	programData.ui.menuRenderer.colorPicker("Under water color",
-		&programData.renderer.defaultShader.shadingSettings.underWaterColor[0],
+		&programData.renderer.shadingSettings.underWaterColor[0],
 		programData.ui.buttonTexture, programData.ui.buttonTexture, Colors_Gray, Colors_Gray);
-	getShadingSettings().underWaterColor = programData.renderer.defaultShader.shadingSettings.underWaterColor;
+	getShadingSettings().underWaterColor = programData.renderer.shadingSettings.underWaterColor;
 
 
 	programData.ui.menuRenderer.sliderFloat("Underwater Fog strength",
-		&programData.renderer.defaultShader.shadingSettings.underwaterDarkenStrength,
+		&programData.renderer.shadingSettings.underwaterDarkenStrength,
 		0, 1, Colors_White, programData.ui.buttonTexture, Colors_Gray, 
 		programData.ui.buttonTexture, Colors_White
 		);
-	getShadingSettings().underwaterDarkenStrength = programData.renderer.defaultShader.shadingSettings.underwaterDarkenStrength;
+	getShadingSettings().underwaterDarkenStrength = programData.renderer.shadingSettings.underwaterDarkenStrength;
 
 
 	programData.ui.menuRenderer.sliderFloat("Underwater Fog Distance",
-		&programData.renderer.defaultShader.shadingSettings.underwaterDarkenDistance,
+		&programData.renderer.shadingSettings.underwaterDarkenDistance,
 		0, 40, Colors_White, programData.ui.buttonTexture, Colors_Gray,
 		programData.ui.buttonTexture, Colors_White);
-	getShadingSettings().underwaterDarkenDistance = programData.renderer.defaultShader.shadingSettings.underwaterDarkenDistance;
+	getShadingSettings().underwaterDarkenDistance = programData.renderer.shadingSettings.underwaterDarkenDistance;
 
 
 	programData.ui.menuRenderer.sliderFloat("Underwater Fog Gradient",
-		&programData.renderer.defaultShader.shadingSettings.fogGradientUnderWater,
+		&programData.renderer.shadingSettings.fogGradientUnderWater,
 		0, 32, Colors_White, programData.ui.buttonTexture, Colors_Gray,
 		programData.ui.buttonTexture, Colors_White);
-	getShadingSettings().fogGradientUnderWater = programData.renderer.defaultShader.shadingSettings.fogGradientUnderWater;
+	getShadingSettings().fogGradientUnderWater = programData.renderer.shadingSettings.fogGradientUnderWater;
 
 
 	static glm::vec4 colors[] = {{0.6,0.9,0.6,1}, Colors_Red};
@@ -145,7 +145,7 @@ good performance.\n-Fancy: significant performance cost but looks very nice.");
 		{(float)0x7F / 255.0f, (float)0x7F / 255.0f, (float)0x7F / 255.0f, 0.65},
 		"The tonemapper is the thing that displays the final color\n\
 -Aces: a filmic look.\n-AgX: a more dull neutral look.\n-ZCAM a verey neutral and vanila look\n   preserves colors, slightly more expensive.\n-Unchrated :))");
-	programData.renderer.defaultShader.shadingSettings.tonemapper = getShadingSettings().tonemapper;
+	programData.renderer.shadingSettings.tonemapper = getShadingSettings().tonemapper;
 
 	if (programData.ui.menuRenderer.Button("Reset settings...", {(float)0x7F / 255.0f, (float)0x7F / 255.0f, (float)0x7F / 255.0f, 0.65}, programData.ui.buttonTexture))
 	{

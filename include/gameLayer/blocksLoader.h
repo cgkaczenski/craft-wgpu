@@ -26,7 +26,7 @@ struct BlocksLoader
 
 	struct ItemGeometry2D
 	{
-		unsigned int vao = 0; // the wgpuWorld mesh id (wgpuWorld::newMeshId)
+		unsigned int mesh = 0; // its wgpuWorld mesh id (wgpuWorld::newMeshId)
 		unsigned int count = 0;
 
 		void clear();
@@ -34,7 +34,7 @@ struct BlocksLoader
 
 	struct ItemGeometry3D
 	{
-		unsigned int vao = 0; // the wgpuWorld mesh id (wgpuWorld::newMeshId)
+		unsigned int mesh = 0; // its wgpuWorld mesh id (wgpuWorld::newMeshId)
 		unsigned int count = 0;
 
 		std::uint64_t gpuId = 0; // texturesId's id, as a texture slot

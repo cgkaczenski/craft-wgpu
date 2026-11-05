@@ -13,7 +13,6 @@
 
 struct UndoQueue;
 struct PlayerInventory;
-struct PointDebugRenderer;
 struct GyzmosRenderer;
 struct Camera;
 
@@ -87,7 +86,7 @@ struct ClientEntityManager : public EntityDataClient
 	std::uint64_t intersectAllAttackableEntities(glm::dvec3 start,
 		glm::dvec3 dir, float maxDistance, float &outDistance, float delta);
 
-	void renderColiders(PointDebugRenderer &pointDebugRenderer, GyzmosRenderer &gyzmosRenderer, Camera &c);
+	void renderColiders(GyzmosRenderer &gyzmosRenderer, Camera &c);
 
 	void removeBlockEntity(glm::ivec3 pos, BlockType blockType);
 

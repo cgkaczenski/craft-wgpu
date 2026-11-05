@@ -58,21 +58,21 @@ namespace wgpuWorld
 	// ---- Models and items (milestone 10b) ------------------------------
 	//
 	// Meshes are named by ids from newMeshId, which the models and items
-	// keep (their `vao` member) and the draw lists below name.
+	// keep (their `mesh` member) and the draw lists below name.
 
 	// A new mesh id, never 0 and never handed out before.
 	unsigned int newMeshId();
 
 	// A mesh's vertices and, if indexed, indices (indexBytes 2 or 4; 0 for
 	// none). Models use model.cpp's 36-byte vertex, items 8 floats.
-	void setMesh(unsigned int vao, const void *vertices, size_t vertexBytes,
+	void setMesh(unsigned int id, const void *vertices, size_t vertexBytes,
 		const void *indices, size_t indexCount, unsigned int indexBytes);
-	void removeMesh(unsigned int vao);
+	void removeMesh(unsigned int id);
 
 	// One skinned model instance (basicEntity.vert's PerEntityData).
 	struct ModelInstance
 	{
-		unsigned int mesh = 0;         // the model's vao
+		unsigned int mesh = 0;         // the model's mesh id
 		uint32_t boneBase = 0;         // its first matrix in the frame's bones
 		glm::ivec3 positionInt = {};
 		glm::vec3 positionFloat = {};
@@ -83,7 +83,7 @@ namespace wgpuWorld
 	// One item (itemEntityShader's uniforms for one draw).
 	struct ItemInstance
 	{
-		unsigned int mesh = 0;         // the item geometry's vao
+		unsigned int mesh = 0;         // the item geometry's mesh id
 		uint32_t texture = 0;          // wgpu2d texture id; 0 draws white
 		glm::mat4 model = glm::mat4(1.f);
 		glm::ivec3 positionInt = {};

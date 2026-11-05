@@ -1788,7 +1788,7 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		result = {};
 
-		result.vao = wgpuWorld::newMeshId();
+		result.mesh = wgpuWorld::newMeshId();
 
 		float thick = 1.f / 8;
 		//float thick = 2;
@@ -2106,7 +2106,7 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		result.count = finalData.size() / 8;
 
-		wgpuWorld::setMesh(result.vao, finalData.data(), finalData.size() * sizeof(float), nullptr, 0, 0);
+		wgpuWorld::setMesh(result.mesh, finalData.data(), finalData.size() * sizeof(float), nullptr, 0, 0);
 
 	};
 
@@ -2141,7 +2141,7 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		if (scene)
 		{
-			result.vao = wgpuWorld::newMeshId();
+			result.mesh = wgpuWorld::newMeshId();
 
 			unsigned int vertexOffset = 0;
 
@@ -2191,7 +2191,7 @@ void BlocksLoader::loadAllItemsGeometry()
 				return false;
 			}
 
-			wgpuWorld::setMesh(result.vao, finalData.data(), finalData.size() * sizeof(float),
+			wgpuWorld::setMesh(result.mesh, finalData.data(), finalData.size() * sizeof(float),
 				indices.data(), indices.size(), sizeof(indices[0]));
 
 			// --- TEXTURE: try to load the first embedded diffuse/albedo texture (keeps default if none)
@@ -2339,7 +2339,7 @@ void BlocksLoader::clearItemsGeometry()
 	{
 		for (int i = 1; i < itemsGeometry.size(); i++)
 		{
-			if (itemsGeometry[0].model2D.vao != itemsGeometry[i].model2D.vao)
+			if (itemsGeometry[0].model2D.mesh != itemsGeometry[i].model2D.mesh)
 			{
 				itemsGeometry[i].model2D.clear();
 			}
@@ -2362,13 +2362,13 @@ uint16_t getGpuIdIndexForBlock(short type, int face)
 
 void BlocksLoader::ItemGeometry2D::clear()
 {
-	wgpuWorld::removeMesh(vao);
+	wgpuWorld::removeMesh(mesh);
 	*this = {};
 }
 
 void BlocksLoader::ItemGeometry3D::clear()
 {
-	wgpuWorld::removeMesh(vao);
+	wgpuWorld::removeMesh(mesh);
 
 	texturesId.cleanup();
 

@@ -4,7 +4,6 @@
 #include <blocksLoader.h>
 #include <lightSystem.h>
 #include <iostream>
-#include <rendering/bigGpuBuffer.h>
 #include <platformTools.h>
 #include <algorithm>
 #include <array>
@@ -2428,7 +2427,6 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 		wgpuWorld::setChunkFaces(this, opaqueGeometry);
 		wgpuWorld::setChunkLights(this, lights);
 
-		//gpuBuffer->addChunk({data.x, data.z}, opaqueGeometry);
 	}
 
 	if (updateTransparency)
@@ -2510,14 +2508,9 @@ void Chunk::createGpuData()
 	// (setChunkFaces, setChunkTransparentFaces), on the first upload.
 }
 
-void Chunk::clearGpuData(BigGpuBuffer *gpuBuffer)
+void Chunk::clearGpuData()
 {
 	wgpuWorld::removeChunk(this);
-
-	if (gpuBuffer)
-	{
-		gpuBuffer->removeChunk({data.x, data.z});
-	}
 }
 
 void Chunk::removeBlockDataFromThisPos(Block lastBlock,

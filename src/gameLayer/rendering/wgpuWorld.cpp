@@ -521,7 +521,7 @@ namespace
 			int width = 0, height = 0;
 		} pending;
 
-		// Milestone 10b: meshes by GL vao, the model and item pipelines, and
+		// Milestone 10b: meshes by id (newMeshId), the model and item pipelines, and
 		// the frame's bones and instances.
 		std::unordered_map<unsigned int, Mesh> meshes;
 		RenderPipeline modelPipeline = nullptr;
@@ -4653,11 +4653,11 @@ unsigned int newMeshId()
 	return ++next;
 }
 
-void setMesh(unsigned int vao, const void *vertices, size_t vertexBytes,
+void setMesh(unsigned int id, const void *vertices, size_t vertexBytes,
 	const void *indices, size_t indexCount, unsigned int indexBytes)
 {
-	if (!wgpuDevice() || !vao || !vertices || !vertexBytes) { return; }
-	removeMesh(vao);
+	if (!wgpuDevice() || !id || !vertices || !vertexBytes) { return; }
+	removeMesh(id);
 
 	auto upload = [](const void *data, uint64_t bytes, BufferUsage usage, const char *label)
 	{
@@ -4691,12 +4691,12 @@ void setMesh(unsigned int vao, const void *vertices, size_t vertexBytes,
 		mesh.count = (uint32_t)(vertexBytes / (8 * sizeof(float)));
 	}
 	if (!mesh.vertices || (indices && indexCount && !mesh.indices)) { releaseMesh(mesh); return; }
-	w.meshes[vao] = mesh;
+	w.meshes[id] = mesh;
 }
 
-void removeMesh(unsigned int vao)
+void removeMesh(unsigned int id)
 {
-	auto found = w.meshes.find(vao);
+	auto found = w.meshes.find(id);
 	if (found == w.meshes.end()) { return; }
 	releaseMesh(found->second);
 	w.meshes.erase(found);

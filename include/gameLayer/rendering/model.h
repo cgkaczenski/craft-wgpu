@@ -104,7 +104,7 @@ struct Animatable
 struct Model
 {
 
-	unsigned int vao = 0; // the wgpuWorld mesh id (wgpuWorld::newMeshId)
+	unsigned int mesh = 0; // its wgpuWorld mesh id (wgpuWorld::newMeshId)
 	size_t vertexCount = 0;
 	std::vector<glm::mat4> transforms;
 

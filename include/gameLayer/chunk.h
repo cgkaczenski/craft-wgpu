@@ -24,7 +24,6 @@ struct Ivec2Hash
 	}
 };
 
-struct BigGpuBuffer;
 struct Renderer;
 
 inline std::uint64_t getRegionId(int x, int z)
@@ -131,15 +130,10 @@ struct Chunk
 	BlocksWithDataHolder blockData;
 
 
-	// vao, transparentVao and lightsBuffer: always 0, named only by
-	// renderer.cpp's GL passes until milestone 19c removes them.
-	unsigned int vao = 0;
+	// How many opaque faces, transparent faces and lights the chunk last
+	// uploaded to wgpuWorld.
 	size_t elementCountSize = 0;
-
-	unsigned int transparentVao = 0;
 	size_t transparentElementCountSize = 0;
-
-	unsigned int lightsBuffer = 0;
 	size_t lightsElementCountSize = 0;
 
 	unsigned char currentLod = 0;
@@ -225,7 +219,7 @@ struct Chunk
 
 	void createGpuData();
 
-	void clearGpuData(BigGpuBuffer *gpuBuffer);
+	void clearGpuData();
 
 	void removeBlockDataFromThisPos(Block lastBlock, std::uint8_t x, 
 		std::uint8_t y, std::uint8_t z);

@@ -481,7 +481,7 @@ std::uint64_t ClientEntityManager::intersectAllAttackableEntities(glm::dvec3 sta
 
 template<int TYPE, class T>
 void genericRenderColliders(T &container,
-	PointDebugRenderer &pointDebugRenderer, GyzmosRenderer &gyzmosRenderer, Camera &camera)
+	GyzmosRenderer &gyzmosRenderer, Camera &camera)
 {
 
 	auto drawBox = [&](glm::dvec3 pos, glm::vec3 boxSize)
@@ -516,9 +516,6 @@ void genericRenderColliders(T &container,
 
 	for (auto &p : container)
 	{
-		pointDebugRenderer.
-			renderPoint(camera, p.second.getRubberBandPosition());
-
 		glm::dvec3 position = {};
 
 		if constexpr (hasPositionBasedID<decltype((container)[0].entityBuffered)>)
@@ -546,22 +543,22 @@ void genericRenderColliders(T &container,
 
 template <int... Is>
 void callGenericRenderColliders(std::integer_sequence<int, Is...>, ClientEntityManager &c,
-	PointDebugRenderer &pointDebugRenderer, GyzmosRenderer &gyzmosRenderer, Camera &camera
+	GyzmosRenderer &gyzmosRenderer, Camera &camera
 )
 {
 	(genericRenderColliders<Is>(*c.template entityGetter<Is>(), 
-		pointDebugRenderer, gyzmosRenderer, camera), ...);
+		gyzmosRenderer, camera), ...);
 
 }
 
 
 
-void ClientEntityManager::renderColiders(PointDebugRenderer &pointDebugRenderer, GyzmosRenderer &gyzmosRenderer, Camera &c)
+void ClientEntityManager::renderColiders(GyzmosRenderer &gyzmosRenderer, Camera &c)
 {
 
 	return callGenericRenderColliders(
 		std::make_integer_sequence<int, EntitiesTypesCount>(), *this,
-		pointDebugRenderer, gyzmosRenderer, c);
+		gyzmosRenderer, c);
 
 
 }
