@@ -1,4 +1,3 @@
-#if RENDERER_WEBGPU
 
 // wgpu2d's webgpuImpl.cpp defines WEBGPU_CPP_IMPLEMENTATION; this file only
 // uses the wrapper.
@@ -180,4 +179,3 @@ void pinMetalLayerToSRGB(GLFWwindow *) {}
 
 }
 
-#endif

@@ -47,9 +47,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686|X86")
 endif()
 
 
-# WebGPU render port (docs/roadmap.md). OFF keeps the OpenGL renderer.
-option(RENDERER_WEBGPU "Use the WebGPU renderer (wgpu-native) instead of OpenGL" OFF)
-
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -78,54 +75,45 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 
 
 
-if(RENDERER_WEBGPU)
-	include(FetchContent)
+include(FetchContent)
 
-	# glfw3webgpu v1.3 calls glfwGetPlatform(), which needs GLFW 3.4.
-	# The OpenGL path keeps the vendored 3.3.7.
-	FetchContent_Declare(glfw
-		GIT_REPOSITORY https://github.com/glfw/glfw.git
-		GIT_TAG 3.4
-		GIT_SHALLOW TRUE
-	)
+# WebGPU (docs/roadmap.md): wgpu-native, prebuilt for Windows, Linux and
+# macOS, with GLFW for the window. glfw3webgpu v1.3 calls glfwGetPlatform(),
+# which needs GLFW 3.4.
+FetchContent_Declare(glfw
+	GIT_REPOSITORY https://github.com/glfw/glfw.git
+	GIT_TAG 3.4
+	GIT_SHALLOW TRUE
+)
 
-	# Fetches precompiled wgpu-native (v24.0.3.1) and provides the 'webgpu'
-	# target, including the WebGPU-Cpp wrapper <webgpu/webgpu.hpp>.
-	set(WEBGPU_BACKEND "WGPU" CACHE STRING "" FORCE)
-	FetchContent_Declare(webgpu
-		GIT_REPOSITORY https://github.com/eliemichel/WebGPU-distribution.git
-		GIT_TAG v0.3.0-gamma
-		GIT_SHALLOW TRUE # older branches carry binaries; a full clone is huge
-	)
+# Fetches precompiled wgpu-native (v24.0.3.1) and provides the 'webgpu'
+# target, including the WebGPU-Cpp wrapper <webgpu/webgpu.hpp>.
+set(WEBGPU_BACKEND "WGPU" CACHE STRING "" FORCE)
+FetchContent_Declare(webgpu
+	GIT_REPOSITORY https://github.com/eliemichel/WebGPU-distribution.git
+	GIT_TAG v0.3.0-gamma
+	GIT_SHALLOW TRUE # older branches carry binaries; a full clone is huge
+)
 
-	FetchContent_Declare(glfw3webgpu
-		GIT_REPOSITORY https://github.com/eliemichel/glfw3webgpu.git
-		GIT_TAG v1.3.0-alpha
-		GIT_SHALLOW TRUE
-	)
+FetchContent_Declare(glfw3webgpu
+	GIT_REPOSITORY https://github.com/eliemichel/glfw3webgpu.git
+	GIT_TAG v1.3.0-alpha
+	GIT_SHALLOW TRUE
+)
 
-	FetchContent_MakeAvailable(glfw webgpu glfw3webgpu)
+FetchContent_MakeAvailable(glfw webgpu glfw3webgpu)
 
-	# The 2D layer (milestone 3): wgpu2d, with gl2d's API through a shim header
-	# so the game and glui compile unchanged.
-	add_subdirectory(thirdparty/wgpu2d)
-	set(GL2D_TARGET gl2dShim)
-else()
-	add_subdirectory(thirdparty/glfw-3.3.7)
-	set(GL2D_TARGET gl2d)
-endif()
+# The 2D layer (milestone 3): wgpu2d, with gl2d's API through a shim header
+# so the game and glui compile unchanged.
+add_subdirectory(thirdparty/wgpu2d)
+set(GL2D_TARGET gl2dShim)
 
-# glad stays on both paths until milestones 2-4 move gl2d, glui, ImGui and the
-# renderer off OpenGL.
+# glad stays until milestone 19d deletes the null GL scaffold it carries.
 add_subdirectory(thirdparty/glad)
 add_subdirectory(thirdparty/stb_image)
-# PNG output for WGPU_SCREENSHOT_FRAME on both paths (wgpuWindow.cpp and
-# glfwMain.cpp), so the two renderers can be compared screenshot to screenshot.
+# PNG output for WGPU_SCREENSHOT_FRAME (wgpuWindow.cpp).
 add_subdirectory(thirdparty/stb_image_write)
 add_subdirectory(thirdparty/stb_truetype)
-if(NOT RENDERER_WEBGPU)
-	add_subdirectory(thirdparty/gl2d)
-endif()
 add_subdirectory(thirdparty/raudio)
 add_subdirectory(thirdparty/glm)
 add_subdirectory(thirdparty/imgui-docking)
@@ -138,14 +126,6 @@ add_subdirectory(thirdparty/magic_enum-0.9.3)
 add_subdirectory(thirdparty/safeSave)
 add_subdirectory(thirdparty/profilerLib)
 add_subdirectory(thirdparty/zstd-1.5.5/build/cmake)
-# Standalone OpenGL tools. Not ported.
-if(NOT RENDERER_WEBGPU)
-	add_subdirectory(noiseTool)
-	# PBRTool uses Win32 file dialogs (PBRGameLayer.cpp).
-	if(WIN32)
-		add_subdirectory(PBRTool)
-	endif()
-endif()
 
 
 # MY_SOURCES is a list of all the source files for my game 
@@ -196,22 +176,19 @@ target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE glm glfw glad stb_image st
 	magic_enum safeSave profilerLib
 	libzstd_static assimp)
 
-if(RENDERER_WEBGPU)
-	target_compile_definitions("${CMAKE_PROJECT_NAME}" PUBLIC RENDERER_WEBGPU=1)
-	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu)
-	if(APPLE)
-		# Pins the CAMetalLayer colorspace to sRGB. Compiled as C++ with
-		# -x objective-c++ rather than enable_language(OBJCXX), which would also
-		# claim GLFW's .m files and compile its Objective-C as Objective-C++.
-		set(WGPU_METAL_LAYER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/wgpuMetalLayer.mm")
-		set_source_files_properties("${WGPU_METAL_LAYER_SRC}" PROPERTIES
-			LANGUAGE CXX
-			COMPILE_OPTIONS "-x;objective-c++")
-		target_sources("${CMAKE_PROJECT_NAME}" PRIVATE "${WGPU_METAL_LAYER_SRC}")
-		target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE "-framework Cocoa" "-framework QuartzCore")
-	endif()
-	# Copies the wgpu-native .dylib/.so/.dll next to the executable.
-	target_copy_webgpu_binaries("${CMAKE_PROJECT_NAME}")
+target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE webgpu glfw3webgpu)
+if(APPLE)
+	# Pins the CAMetalLayer colorspace to sRGB. Compiled as C++ with
+	# -x objective-c++ rather than enable_language(OBJCXX), which would also
+	# claim GLFW's .m files and compile its Objective-C as Objective-C++.
+	set(WGPU_METAL_LAYER_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/platform/wgpuMetalLayer.mm")
+	set_source_files_properties("${WGPU_METAL_LAYER_SRC}" PROPERTIES
+		LANGUAGE CXX
+		COMPILE_OPTIONS "-x;objective-c++")
+	target_sources("${CMAKE_PROJECT_NAME}" PRIVATE "${WGPU_METAL_LAYER_SRC}")
+	target_link_libraries("${CMAKE_PROJECT_NAME}" PRIVATE "-framework Cocoa" "-framework QuartzCore")
 endif()
+# Copies the wgpu-native .dylib/.so/.dll next to the executable.
+target_copy_webgpu_binaries("${CMAKE_PROJECT_NAME}")
 
 

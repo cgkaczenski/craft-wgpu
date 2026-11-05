@@ -4,9 +4,8 @@
 // milestones 1 and 3). wgpu2d owns the instance, adapter, device and frame;
 // this file only knows the window: it makes the surface, pins the Metal
 // layer's colorspace, and passes framebuffer sizes along.
-// Only compiled when CMake is configured with -DRENDERER_WEBGPU=ON.
 
-#if RENDERER_WEBGPU
+
 
 struct GLFWwindow;
 
@@ -31,4 +30,3 @@ namespace wgpuWindow
 	void pinMetalLayerToSRGB(GLFWwindow *window);
 }
 
-#endif

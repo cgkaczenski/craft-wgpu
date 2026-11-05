@@ -1,8 +1,8 @@
-// macOS only (added to the build by CMakeLists.txt when RENDERER_WEBGPU and APPLE).
+// macOS only (added to the build by CMakeLists.txt on APPLE).
 
 #include "wgpuWindow.h"
 
-#if RENDERER_WEBGPU && defined(__APPLE__)
+#if defined(__APPLE__)
 
 #define GLFW_INCLUDE_NONE
 #define GLFW_EXPOSE_NATIVE_COCOA

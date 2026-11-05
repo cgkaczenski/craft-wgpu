@@ -2435,10 +2435,8 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 			lights.data(), GL_STREAM_READ);
 		lightsElementCountSize = lights.size();
 
-	#if RENDERER_WEBGPU
 		wgpuWorld::setChunkFaces(this, opaqueGeometry);
 		wgpuWorld::setChunkLights(this, lights);
-	#endif
 
 		//gpuBuffer->addChunk({data.x, data.z}, opaqueGeometry);
 	}
@@ -2453,9 +2451,7 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 
 		transparentElementCountSize = transparentGeometry.size() / 4; //todo magic number
 
-	#if RENDERER_WEBGPU
 		wgpuWorld::setChunkTransparentFaces(this, transparentGeometry);
-	#endif
 	}
 
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -2558,9 +2554,7 @@ void Chunk::createGpuData()
 
 void Chunk::clearGpuData(BigGpuBuffer *gpuBuffer)
 {
-#if RENDERER_WEBGPU
 	wgpuWorld::removeChunk(this);
-#endif
 
 	glDeleteBuffers(1, &opaqueGeometryBuffer);
 	glDeleteBuffers(1, &opaqueGeometryIndex);

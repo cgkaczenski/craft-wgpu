@@ -1420,11 +1420,9 @@ float &getHitLensDirt();
 
 void Renderer::recreateBlocksTexturesBuffer(BlocksLoader &blocksLoader)
 {
-#if RENDERER_WEBGPU
 	// The handle table, slot by slot; the WebGPU world turns it into a
 	// texture array and a slot -> layer table (milestone 7).
 	wgpuWorld::setBlockTextures(blocksLoader.gpuIds);
-#endif
 
 	//glDeleteBuffers(1, &textureSamplerersBuffer);
 	//if (!textureSamplerersBuffer)
@@ -1496,7 +1494,6 @@ void Renderer::renderAllBlocksUiTextures(BlocksLoader &blocksLoader, ModelsManag
 
 	auto view = glm::lookAt(glm::vec3{3, 3, 3}, {0, 0, 0}, {0, 1, 0});
 
-#if RENDERER_WEBGPU
 	{
 		// The same icons, drawn by wgpuWorld into wgpu2d render targets: the
 		// GL path below is all stubs here and would leave each icon a GL name
@@ -1564,7 +1561,6 @@ void Renderer::renderAllBlocksUiTextures(BlocksLoader &blocksLoader, ModelsManag
 		wgpuWorld::renderBlockIcons(icons, TEXTURE_SIZE);
 		return;
 	}
-#endif
 
 	renderUIBlocksShader.shader.bind();
 
@@ -2085,11 +2081,9 @@ void Renderer::create(ModelsManager &modelsManager)
 		addModelData(modelsManager.blockModels[i], i);
 	}
 
-#if RENDERER_WEBGPU
 	// The cube (the first 36 vertices) for dropped block items, and all of
 	// it for the inventory's block icons.
 	wgpuWorld::setBlockCubeGeometry(data);
-#endif
 
 
 	glBufferData(GL_ARRAY_BUFFER, sizeof(float) * data.size(), data.data(), GL_STATIC_DRAW);
@@ -2289,9 +2283,7 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 			i == ModelsManager::crateModel, noRotation(i));
 	}
 
-#if RENDERER_WEBGPU
 	wgpuWorld::setBlockGeometry(newVertexData, newUVData);
-#endif
 
 	//todo optimize with buffer storage!!!! (don't forget to recreate the buffer!!)
 	glBindBuffer(GL_SHADER_STORAGE_BUFFER, vertexDataBuffer);
@@ -2308,11 +2300,9 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 
 void Renderer::reloadShaders()
 {
-#if RENDERER_WEBGPU
 	// Milestone 20: the world's WGSL. The GL programs below still compile,
 	// against the null GL, as no-ops.
 	wgpuWorld::reloadShaders();
-#endif
 
 	std::string defines = getShadingSettings().formatIntoGLSLcode();
 
@@ -2688,7 +2678,6 @@ struct DrawElementsIndirectCommand
 };
 
 
-#if RENDERER_WEBGPU
 // Milestone 13: one sun shadow cascade's matrix, as renderShadow's
 // renderOneFrustum builds it, kept in double throughout (GL stores a float
 // mat4 of world coordinates). OpenGL clip space, world coordinates;
@@ -2770,7 +2759,6 @@ static glm::vec3 skyWeightsFor(float timeOfDay)
 	weights[second] += mix;
 	return weights;
 }
-#endif
 
 void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSystem, Camera &c,
 	ProgramData &programData, BlocksLoader &blocksLoader, ClientEntityManager &entityManager, 
@@ -3084,7 +3072,6 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 
 #pragma endregion
 
-#if RENDERER_WEBGPU
 	// The WebGPU world pass: the opaque faces of the chunks that survived the
 	// frustum culling above. Everything below still goes to the null GL
 	// scaffold.
@@ -3212,7 +3199,6 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	lighting.causticsTexture = programData.causticsTexture.id;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
-#endif
 
 
 
@@ -3872,10 +3858,8 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 			programData.renderer.defaultShader.shadingSettings.exposure, chunkSystem, skyLightIntensity,
 			currentSkinBindlessTexture, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
 			showHand, playersConnectionData);
-	#if RENDERER_WEBGPU
 		// The world's transparent passes come after the entities, as here.
 		wgpuWorld::renderTransparent();
-	#endif
 		programData.GPUProfiler.endSubProfile("entities");
 	#pragma endregion
 
@@ -3974,10 +3958,8 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 			programData.renderer.defaultShader.shadingSettings.exposure, chunkSystem, skyLightIntensity,
 			currentSkinBindlessTexture, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
 			showHand, playersConnectionData);
-	#if RENDERER_WEBGPU
 		// The world's transparent passes come after the entities, as here.
 		wgpuWorld::renderTransparent();
-	#endif
 		programData.GPUProfiler.endSubProfile("entities");
 	#pragma endregion
 
@@ -4144,7 +4126,6 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 
 
 		//update automatic exposure
-	#if RENDERER_WEBGPU
 		// The readback above is GL stubs here (its map gives nothing); the
 		// WebGPU world's reading stands in, with GL's arithmetic.
 		{
@@ -4155,7 +4136,6 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 				averageLuminosity = glm::dot(screenColor, glm::vec3(0.2126, 0.7152, 0.0722));
 			}
 		}
-	#endif
 		adaptiveExposure.update(deltaTime, averageLuminosity);
 
 	}
@@ -4631,10 +4611,8 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 				//std::cout << "MAX: " << int(maxSize * screenX) * int(maxSize * screenX) * 4 << " ";
 				maxSize = int(maxSize * screenX) * int(maxSize * screenX) * 4;
 			}
-		#if RENDERER_WEBGPU
 			// The GL queries are stubs here; the WebGPU world counts the same.
 			queryDataForSunFlare = wgpuWorld::sunVisibleSamples();
-		#endif
 			float sunOcclusionFactor = glm::clamp(queryDataForSunFlare / maxSize, 0.f, 1.f);
 			sunOcclusionFactor *= sunOcclusionFactor;
 
@@ -4750,9 +4728,7 @@ void Renderer::renderDecal(glm::ivec3 position, Camera &c, Block b, ProgramData 
 	
 	int elementCountSize = currentVector.size() / 4; //todo magic number
 
-#if RENDERER_WEBGPU
 	wgpuWorld::renderDecal(currentVector, decalPosition, programData.crackTexture.id);
-#endif
 
 
 #pragma region add data
@@ -4862,7 +4838,6 @@ void Renderer::renderEntities(
 	static std::vector<PerEntityData> entityData;
 	entityData.clear();
 
-#if RENDERER_WEBGPU
 	// The same draws, for the WebGPU entity pass: bone matrices and
 	// per-entity data as the GL buffers get them, textures as wgpu2d ids (a
 	// handle carries its texture's id in the low 32 bits; see nullGL.cpp).
@@ -4892,7 +4867,6 @@ void Renderer::renderEntities(
 		instance.textures[3] = textureIdOf(data.textureId3);
 		wgpuModels.push_back(instance);
 	};
-#endif
 
 	glm::mat4 handItemMatrix = glm::mat4{1.f};
 
@@ -5019,9 +4993,7 @@ void Renderer::renderEntities(
 
 			glDrawElements(GL_TRIANGLES, model.vertexCount, GL_UNSIGNED_INT, nullptr);
 
-		#if RENDERER_WEBGPU
 			addModel(model, skinningMatrix.data(), skinningMatrix.size(), entityData.back());
-		#endif
 		};
 
 	};
@@ -5174,10 +5146,8 @@ void Renderer::renderEntities(
 
 			entityData.push_back(data);
 
-		#if RENDERER_WEBGPU
 			addModel(model, skinningMatrix.data() + (skinningMatrix.size() - model.transforms.size()),
 				model.transforms.size(), data);
-		#endif
 		}
 
 		glBindBuffer(GL_SHADER_STORAGE_BUFFER, skinningMatrixSSBO);
@@ -5448,7 +5418,6 @@ void Renderer::renderEntities(
 				glDrawArrays(GL_TRIANGLES, 0, count);
 			}
 
-		#if RENDERER_WEBGPU
 			{
 				// The same uniforms as above, as one item record.
 				wgpuWorld::ItemInstance item;
@@ -5470,7 +5439,6 @@ void Renderer::renderEntities(
 				item.brightness = (light / 15.f) * 0.6f * (1.f - 0.25f) + 0.25f;
 				wgpuItems.push_back(item);
 			}
-		#endif
 
 		
 		};
@@ -5525,9 +5493,7 @@ void Renderer::renderEntities(
 
 #pragma endregion
 
-#if RENDERER_WEBGPU
 	wgpuWorld::renderEntities(wgpuBones, wgpuModels, wgpuItems);
-#endif
 
 }
 
@@ -6336,7 +6302,6 @@ void GyzmosRenderer::create()
 
 void GyzmosRenderer::render(Camera &c, glm::ivec3 posInt, glm::vec3 posFloat)
 {
-#if RENDERER_WEBGPU
 	// WebGPU has no wireframe polygon mode: each cube triangle's three edges
 	// become line segments, which is what glPolygonMode(GL_LINE) draws
 	// (face diagonals included). Points are camera-relative, integer part
@@ -6370,7 +6335,6 @@ void GyzmosRenderer::render(Camera &c, glm::ivec3 posInt, glm::vec3 posFloat)
 		}
 		wgpuWorld::renderLines(points);
 	}
-#endif
 
 
 

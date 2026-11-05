@@ -8,7 +8,6 @@
 // Each later milestone moves one subsystem off OpenGL. When none is left,
 // delete this, nullGL.cpp, nullGLStubs.inl, tools/genNullGL.py and glad.
 
-#if RENDERER_WEBGPU
 
 namespace nullGL
 {
@@ -16,4 +15,3 @@ namespace nullGL
 	void install();
 }
 
-#endif

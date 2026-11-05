@@ -1,4 +1,3 @@
-#if RENDERER_WEBGPU
 
 // The WebGPU world renderer. See include/gameLayer/rendering/wgpuWorld.h.
 //
@@ -5249,4 +5248,3 @@ void shutdown()
 
 } // namespace wgpuWorld
 
-#endif

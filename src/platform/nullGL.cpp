@@ -1,4 +1,3 @@
-#if RENDERER_WEBGPU
 
 #include <glad/glad.h>
 #include "nullGL.h"
@@ -214,4 +213,3 @@ void install()
 
 }
 
-#endif

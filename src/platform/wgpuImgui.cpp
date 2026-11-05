@@ -1,4 +1,3 @@
-#if RENDERER_WEBGPU
 
 // Milestone 4: the ImGui renderer backend, ported from space-game-wgpu (see
 // include/platform/wgpuImgui.h for why it is not imgui_impl_wgpu). Its job is small and fixed: every frame
@@ -500,5 +499,4 @@ void shutdown()
 
 } // namespace wgpuImgui
 
-#endif
 

@@ -3,7 +3,7 @@
 # copy is free to diverge: device features and a 3D pass are coming.
 #
 # Needs the `webgpu` target from WebGPU-distribution, so it is added after
-# FetchContent, and only on the RENDERER_WEBGPU path.
+# FetchContent.
 
 # The shaders are compiled into the library rather than read from disk, so
 # nothing here depends on the game's RESOURCES_PATH. Each becomes a raw string

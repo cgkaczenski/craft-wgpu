@@ -21,14 +21,10 @@
 #include <string>
 #include <vector>
 
-#if RENDERER_WEBGPU
 	#include "wgpuWindow.h"
 	#include "wgpuImgui.h"
 	#include "rendering/wgpuWorld.h"
 	#include "nullGL.h"
-#else
-	#include <stb_image_write/stb_image_write.h>
-#endif
 
 
 #ifdef _WIN32
@@ -337,49 +333,6 @@ static void playScriptedInput(GLFWwindow *window)
 	}
 }
 
-#if !RENDERER_WEBGPU
-// WGPU_SCREENSHOT_FRAME=N saves frame N as screenshot-frameN.png, the same as
-// the WebGPU path (wgpuWindow.cpp), so both renderers can be compared. Called
-// just before the swap, so the back buffer holds the finished frame,
-// ImGui included.
-static void saveGLScreenshotIfAsked(GLFWwindow *window)
-{
-	static long long frameIndex = 0;
-	static const char *shotAt = std::getenv("WGPU_SCREENSHOT_FRAME");
-	++frameIndex;
-	if (!shotAt || frameIndex != std::atoll(shotAt)) { return; }
-
-	int width = 0, height = 0;
-	glfwGetFramebufferSize(window, &width, &height);
-	if (width <= 0 || height <= 0) { return; }
-
-	std::vector<unsigned char> pixels(size_t(width) * height * 4);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-	glReadBuffer(GL_BACK);
-	glPixelStorei(GL_PACK_ALIGNMENT, 1);
-	glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-
-	// glReadPixels returns the bottom row first; PNG wants the top row first.
-	// Alpha is forced opaque, as the window shows it.
-	std::vector<unsigned char> flipped(pixels.size());
-	const size_t rowBytes = size_t(width) * 4;
-	for (int y = 0; y < height; y++)
-	{
-		std::copy_n(&pixels[(height - 1 - y) * rowBytes], rowBytes, &flipped[y * rowBytes]);
-	}
-	for (size_t i = 3; i < flipped.size(); i += 4) { flipped[i] = 255; }
-
-	std::string name = "screenshot-frame" + std::to_string(frameIndex) + ".png";
-	if (stbi_write_png(name.c_str(), width, height, 4, flipped.data(), int(rowBytes)))
-	{
-		std::cout << "screenshot: " << name << " (" << width << "x" << height << ")\n";
-	}
-	else
-	{
-		std::cout << "screenshot: could not write " << name << "\n";
-	}
-}
-#endif
 
 
 #pragma region platform functions
@@ -638,21 +591,8 @@ int main()
 
 	permaAssertComment(glfwInit(), "err initializing glfw");
 	//glfwWindowHint(GLFW_SAMPLES, 4);
-#if RENDERER_WEBGPU
 	// No OpenGL context: WebGPU owns the window's drawable (a CAMetalLayer on macOS).
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-#else
-	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-	#ifdef __APPLE__
-	// macOS implements OpenGL 4.1. Core profiles also require forward compatibility.
-	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-	#else
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-	#endif
-#endif
 
 	int w = 500;
 	int h = 500;
@@ -670,10 +610,6 @@ int main()
 		glfwSetWindowPos(wind, mx + 80, my + 80);
 	}
 #endif
-#if !RENDERER_WEBGPU
-	glfwMakeContextCurrent(wind);
-	//glfwSwapInterval(1);
-#endif
 
 	glfwSetKeyCallback(wind, keyCallback);
 	glfwSetMouseButtonCallback(wind, mouseCallback);
@@ -683,7 +619,6 @@ int main()
 	glfwSetCharCallback(wind, characterCallback);
 	glfwSetScrollCallback(wind, scrollCallback);
 
-#if RENDERER_WEBGPU
 	// WebGPU owns the window. gl2d and glui draw through wgpu2d and ImGui
 	// through wgpuImgui; the 3D renderer still calls OpenGL, and with no
 	// context those calls go to nullGL's do-nothing stubs until later
@@ -696,27 +631,6 @@ int main()
 		return 1;
 	}
 	nullGL::install();
-#else
-	permaAssertComment(gladLoadGL(), "err initializing glad");
-	std::cout << "OpenGL " << glGetString(GL_VERSION) << "\n";
-
-#ifdef __APPLE__
-	installAppleGLFallbacks();
-#endif
-
-	if (!GLAD_GL_ARB_bindless_texture)
-	{
-		std::cout << "Bindless textures are not available. World rendering needs a later graphics port.\n";
-#ifndef __APPLE__
-		std::cout << "Press enter to try anyway...\n";
-		system("pause");
-#endif
-	}
-
-
-	// example
-	bool bindless = HasExtension("GL_ARB_bindless_texture");
-#endif
 
 	//enableReportGlErrors();
 
@@ -736,22 +650,13 @@ int main()
 		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 		//io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;      // Enable Gamepad Controls
 		io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
-	#if !RENDERER_WEBGPU
-		// Each extra OS window would need its own WebGPU surface, so the
-		// WebGPU path keeps ImGui windows inside the game window.
-		io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
-	#endif
 		//io.ConfigViewportsNoAutoMerge = true;
 		//io.ConfigViewportsNoTaskBarIcon = true;
 	
 		ImGuiStyle& style = ImGui::GetStyle();
-	#if RENDERER_WEBGPU
 		// The same see-through style as with viewports, so the dock space
 		// covering the window does not hide the game behind it.
 		const bool seeThrough = true;
-	#else
-		const bool seeThrough = io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable;
-	#endif
 		if (seeThrough)
 		{
 			//style.WindowRounding = 0.0f;
@@ -759,13 +664,8 @@ int main()
 			style.Colors[ImGuiCol_DockingEmptyBg].w = 0.f; //always
 		}
 	
-	#if RENDERER_WEBGPU
 		// Input and window size; wgpuImgui draws.
 		ImGui_ImplGlfw_InitForOther(wind, true);
-	#else
-		ImGui_ImplGlfw_InitForOpenGL(wind, true);
-		ImGui_ImplOpenGL3_Init("#version 330");
-	#endif
 
 		//ImGuiIO &io = ImGui::GetIO();
 		//io.Fonts->AddFontFromFileTTF("path/to/your/font.ttf", 24.0f);
@@ -775,10 +675,8 @@ int main()
 		font->Scale = 1.5f; // Scale factor to make the default font larger
 		io.FontDefault = font;
 
-	#if RENDERER_WEBGPU
 		// After the font setup: it builds the atlas and uploads it.
 		permaAssertComment(wgpuImgui::init(), "err initializing the WebGPU ImGui backend");
-	#endif
 	#endif
 #pragma endregion
 
@@ -827,9 +725,6 @@ int main()
 
 	#pragma region imgui
 		#if REMOVE_IMGUI == 0
-			#if !RENDERER_WEBGPU
-			ImGui_ImplOpenGL3_NewFrame();
-			#endif
 			ImGui_ImplGlfw_NewFrame();
 			ImGui::NewFrame();
 			ImGui::DockSpaceOverViewport(ImGui::GetMainViewport());
@@ -838,21 +733,17 @@ int main()
 
 	#pragma region game logic
 
-	#if RENDERER_WEBGPU
 		// The frame must be open before gameLogic: wgpu2d's flush records into it.
 		wgpuWindow::beginFrame();
-	#endif
 
 		playScriptedInput(wind);
 
 		if (!gameLogic(augmentedDeltaTime))
 		{
 			closeGame();
-		#if RENDERER_WEBGPU
 			wgpuWorld::shutdown();
 			wgpuImgui::shutdown();
 			wgpuWindow::shutdown();
-		#endif
 			return 0;
 		}
 
@@ -918,25 +809,7 @@ int main()
 		#pragma region imgui
 				#if REMOVE_IMGUI == 0
 				ImGui::Render();
-				#if RENDERER_WEBGPU
 				wgpuImgui::renderDrawData(); // on top of the game, same pass
-				#else
-				int display_w, display_h;
-				glfwGetFramebufferSize(wind, &display_w, &display_h);
-				glViewport(0, 0, display_w, display_h);
-				ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-				// Update and Render additional Platform Windows
-				// (Platform functions may change the current OpenGL context, so we save/restore it to make it easier to paste this code elsewhere.
-				//  For this specific demo app we could also call glfwMakeContextCurrent(window) directly)
-				if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable)
-				{
-					GLFWwindow* backup_current_context = glfwGetCurrentContext();
-					ImGui::UpdatePlatformWindows();
-					ImGui::RenderPlatformWindowsDefault();
-					glfwMakeContextCurrent(backup_current_context);
-				}
-				#endif
 			#endif
 		#pragma endregion
 
@@ -947,12 +820,7 @@ int main()
 		//}
 
 		pl.start();
-	#if RENDERER_WEBGPU
 		wgpuWindow::endFrame();
-	#else
-		saveGLScreenshotIfAsked(wind);
-		glfwSwapBuffers(wind);
-	#endif
 		pl.end();
 
 		//if (pl.rezult.timeSeconds * 1000 > (17))
@@ -968,11 +836,9 @@ int main()
 	}
 
 	closeGame();
-#if RENDERER_WEBGPU
 	wgpuWorld::shutdown();
 	wgpuImgui::shutdown();
 	wgpuWindow::shutdown();
-#endif
 
 	//if you want the console to stay after closing the window
 	//std::cin.clear();
