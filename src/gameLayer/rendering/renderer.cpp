@@ -2308,6 +2308,11 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 
 void Renderer::reloadShaders()
 {
+#if RENDERER_WEBGPU
+	// Milestone 20: the world's WGSL. The GL programs below still compile,
+	// against the null GL, as no-ops.
+	wgpuWorld::reloadShaders();
+#endif
 
 	std::string defines = getShadingSettings().formatIntoGLSLcode();
 

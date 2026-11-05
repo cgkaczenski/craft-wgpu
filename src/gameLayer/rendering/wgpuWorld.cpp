@@ -2860,11 +2860,11 @@ namespace
 
 	// ---- Milestone 15: the post chain (post.wgsl) -------------------------
 
-	bool createPost()
+	// The post chain's uniforms, sampler and bind group layout: made once.
+	// createPost makes its pipelines (again on a shader reload).
+	bool createPostResources()
 	{
-		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/post.wgsl");
-		if (!module) { return false; }
-		ErrorScope scope("world post chain");
+		ErrorScope scope("world post chain resources");
 
 		BufferDescriptor bufferDesc = Default;
 		bufferDesc.label = StringView("world post uniforms");
@@ -2887,7 +2887,7 @@ namespace
 		samplerDesc.compare = CompareFunction::Undefined;
 		samplerDesc.maxAnisotropy = 1;
 		w.postSampler = wgpuDevice().createSampler(samplerDesc);
-		if (!w.postUniformBuffer || !w.postSampler) { module.release(); return false; }
+		if (!w.postUniformBuffer || !w.postSampler) { return false; }
 
 		BindGroupLayoutEntry entries[3];
 		for (uint32_t i = 0; i < 3; i++)
@@ -2912,7 +2912,16 @@ namespace
 		layoutDesc.entryCount = 3;
 		layoutDesc.entries = entries;
 		w.postBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
-		if (!w.postBindGroupLayout) { module.release(); return false; }
+		if (!w.postBindGroupLayout) { return false; }
+		return !scope.failed();
+	}
+
+	bool createPost()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/post.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world post chain");
+
 		w.postPipelineLayout = createPipelineLayout("world post pipeline layout", &w.postBindGroupLayout, 1);
 
 		// Each pass a fullscreen triangle into one target, no blending.
@@ -2956,11 +2965,10 @@ namespace
 
 	// ---- Milestone 16: bloom and the auto exposure (bloom.wgsl) ----------
 
-	bool createBloom()
+	// Bloom's buffers, sampler, black texture and layouts: made once.
+	bool createBloomResources()
 	{
-		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/bloom.wgsl");
-		if (!module) { return false; }
-		ErrorScope scope("world bloom");
+		ErrorScope scope("world bloom resources");
 
 		BufferDescriptor bufferDesc = Default;
 		bufferDesc.label = StringView("world bloom uniforms");
@@ -2997,11 +3005,7 @@ namespace
 			w.blackView = createTargetView(w.blackTexture, "world black view", TextureFormat::RGBA8Unorm,
 				TextureAspect::All, TextureUsage::TextureBinding);
 		}
-		if (!w.bloomUniformBuffer || !w.exposureReadBuffer || !w.dirtSampler || !w.blackView)
-		{
-			module.release();
-			return false;
-		}
+		if (!w.bloomUniformBuffer || !w.exposureReadBuffer || !w.dirtSampler || !w.blackView) { return false; }
 
 		// Uniforms, one source, its sampler; the apply adds three dirt
 		// textures and their sampler.
@@ -3042,7 +3046,16 @@ namespace
 		layoutDesc.label = StringView("world bloom apply bind group layout");
 		layoutDesc.entryCount = 9;
 		w.bloomApplyBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
-		if (!w.bloomBindGroupLayout || !w.bloomApplyBindGroupLayout) { module.release(); return false; }
+		if (!w.bloomBindGroupLayout || !w.bloomApplyBindGroupLayout) { return false; }
+		return !scope.failed();
+	}
+
+	bool createBloom()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/bloom.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world bloom");
+
 		w.bloomPipelineLayout = createPipelineLayout("world bloom pipeline layout", &w.bloomBindGroupLayout, 1);
 		w.bloomApplyPipelineLayout = createPipelineLayout("world bloom apply pipeline layout",
 			&w.bloomApplyBindGroupLayout, 1);
@@ -3239,11 +3252,10 @@ namespace
 
 	// ---- Milestone 17: ambient occlusion (hbao.wgsl) ----------------------
 
-	bool createHbao()
+	// The AO's uniforms and its two passes' layouts: made once.
+	bool createHbaoResources()
 	{
-		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/hbao.wgsl");
-		if (!module) { return false; }
-		ErrorScope scope("world hbao");
+		ErrorScope scope("world hbao resources");
 
 		BufferDescriptor bufferDesc = Default;
 		bufferDesc.label = StringView("world hbao uniforms");
@@ -3251,7 +3263,7 @@ namespace
 		bufferDesc.size = sizeof(HbaoUniforms);
 		bufferDesc.mappedAtCreation = false;
 		w.hbaoUniformBuffer = wgpuDevice().createBuffer(bufferDesc);
-		if (!w.hbaoUniformBuffer) { module.release(); return false; }
+		if (!w.hbaoUniformBuffer) { return false; }
 
 		// Bindings 0 uniforms, 1 positions, 2 normals or 3 the AO, 4 the
 		// sampler: two layouts, one for each pass.
@@ -3288,7 +3300,16 @@ namespace
 		};
 		w.hbaoBindGroupLayout = layout(2, TextureSampleType::Uint, "world hbao bind group layout");
 		w.hbaoApplyBindGroupLayout = layout(3, TextureSampleType::Float, "world hbao apply bind group layout");
-		if (!w.hbaoBindGroupLayout || !w.hbaoApplyBindGroupLayout) { module.release(); return false; }
+		if (!w.hbaoBindGroupLayout || !w.hbaoApplyBindGroupLayout) { return false; }
+		return !scope.failed();
+	}
+
+	bool createHbao()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/hbao.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world hbao");
+
 		w.hbaoPipelineLayout = createPipelineLayout("world hbao pipeline layout", &w.hbaoBindGroupLayout, 1);
 		w.hbaoApplyPipelineLayout = createPipelineLayout("world hbao apply pipeline layout",
 			&w.hbaoApplyBindGroupLayout, 1);
@@ -3469,17 +3490,10 @@ namespace
 		return wgpuDevice().createBuffer(desc);
 	}
 
-	bool createRaysAndWarp()
+	// The god rays' and the warp's uniforms and layouts: made once.
+	bool createRaysAndWarpResources()
 	{
-		ShaderModule rays = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/godRays.wgsl");
-		ShaderModule warp = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/underwater.wgsl");
-		if (!rays || !warp)
-		{
-			if (rays) { rays.release(); }
-			if (warp) { warp.release(); }
-			return false;
-		}
-		ErrorScope scope("world god rays and warp");
+		ErrorScope scope("world god rays and warp resources");
 
 		w.rayUniformBuffer = makeUniformBuffer("world god ray uniforms", sizeof(RayUniforms));
 		w.warpUniformBuffer = makeUniformBuffer("world warp uniforms", sizeof(WarpUniforms));
@@ -3495,10 +3509,23 @@ namespace
 		if (!w.rayUniformBuffer || !w.warpUniformBuffer || !w.rayMaskBindGroupLayout || !w.rayBlurBindGroupLayout
 			|| !w.warpBindGroupLayout)
 		{
-			rays.release();
-			warp.release();
 			return false;
 		}
+		return !scope.failed();
+	}
+
+	bool createRaysAndWarp()
+	{
+		ShaderModule rays = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/godRays.wgsl");
+		ShaderModule warp = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/underwater.wgsl");
+		if (!rays || !warp)
+		{
+			if (rays) { rays.release(); }
+			if (warp) { warp.release(); }
+			return false;
+		}
+		ErrorScope scope("world god rays and warp");
+
 		w.rayMaskPipelineLayout = createPipelineLayout("world god ray mask pipeline layout", &w.rayMaskBindGroupLayout, 1);
 		w.rayBlurPipelineLayout = createPipelineLayout("world god ray blur pipeline layout", &w.rayBlurBindGroupLayout, 1);
 		w.warpPipelineLayout = createPipelineLayout("world warp pipeline layout", &w.warpBindGroupLayout, 1);
@@ -3584,13 +3611,11 @@ namespace
 		return e;
 	}
 
-	// The cubemaps, their views, the layouts, the three pipelines, the
-	// buffers and the sampler. The bake happens on the first frame.
-	bool createSky()
+	// The skies' cubemaps and views, buffers, sampler, layouts and the bake's
+	// group: made once. createSky makes the pipelines (again on a reload).
+	bool createSkyResources()
 	{
-		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/sky.wgsl");
-		if (!module) { return false; }
-		ErrorScope scope("world sky");
+		ErrorScope scope("world sky resources");
 
 		// A cubemap is a 2D texture with six layers, +X -X +Y -Y +Z -Z.
 		// It is sampled through one view of dimension Cube, and each face
@@ -3609,7 +3634,7 @@ namespace
 			desc.viewFormatCount = 0;
 			desc.viewFormats = nullptr;
 			w.skyCubes[k] = wgpuDevice().createTexture(desc);
-			if (!w.skyCubes[k]) { module.release(); return false; }
+			if (!w.skyCubes[k]) { return false; }
 
 			TextureViewDescriptor viewDesc = Default;
 			viewDesc.label = StringView(skyNames[k]);
@@ -3643,7 +3668,7 @@ namespace
 		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
 		bufferDesc.size = sizeof(SkyUniforms);
 		w.skyUniformBuffer = wgpuDevice().createBuffer(bufferDesc);
-		if (!w.skyBakeBuffer || !w.skyUniformBuffer) { module.release(); return false; }
+		if (!w.skyBakeBuffer || !w.skyUniformBuffer) { return false; }
 
 		// Linear and clamped: GL's cubemap parameters, and gl2d's for the
 		// sun and moon (loaded without pixelation or mipmaps).
@@ -3660,7 +3685,7 @@ namespace
 		samplerDesc.compare = CompareFunction::Undefined;
 		samplerDesc.maxAnisotropy = 1;
 		w.skySampler = wgpuDevice().createSampler(samplerDesc);
-		if (!w.skySampler) { module.release(); return false; }
+		if (!w.skySampler) { return false; }
 
 		// The bake's group: the three skies' settings.
 		BindGroupLayoutEntry bakeEntry = skyLayoutEntry(0, ShaderStage::Fragment);
@@ -3701,10 +3726,7 @@ namespace
 		skyLayoutDesc.entryCount = 7;
 		skyLayoutDesc.entries = skyEntries;
 		w.skyBindGroupLayout = wgpuDevice().createBindGroupLayout(skyLayoutDesc);
-		if (!w.skyBakeBindGroupLayout || !w.skyBindGroupLayout) { module.release(); return false; }
-
-		w.skyBakePipelineLayout = createPipelineLayout("world sky bake pipeline layout", &w.skyBakeBindGroupLayout, 1);
-		w.skyPipelineLayout = createPipelineLayout("world sky pipeline layout", &w.skyBindGroupLayout, 1);
+		if (!w.skyBakeBindGroupLayout || !w.skyBindGroupLayout) { return false; }
 
 		BindGroupEntry bakeGroupEntry = Default;
 		bakeGroupEntry.binding = 0;
@@ -3716,6 +3738,33 @@ namespace
 		bakeGroupDesc.entryCount = 1;
 		bakeGroupDesc.entries = &bakeGroupEntry;
 		w.skyBakeBindGroup = wgpuDevice().createBindGroup(bakeGroupDesc);
+
+		// Milestone 18: the god rays' second group, the scene's depth and the
+		// flare's counter, and the counter's buffers.
+		BindGroupLayoutEntry countEntries[2] = { textureEntry(0, TextureSampleType::Depth), emptyEntry(1) };
+		countEntries[1].buffer.type = BufferBindingType::Storage;
+		countEntries[1].buffer.hasDynamicOffset = false;
+		countEntries[1].buffer.minBindingSize = 4;
+		w.sunCountBindGroupLayout = makeLayout("world sun count bind group layout", countEntries, 2);
+		bufferDesc.label = StringView("world sun count");
+		bufferDesc.usage = BufferUsage::Storage | BufferUsage::CopySrc | BufferUsage::CopyDst;
+		bufferDesc.size = 4;
+		w.sunCountBuffer = wgpuDevice().createBuffer(bufferDesc);
+		bufferDesc.label = StringView("world sun count readback");
+		bufferDesc.usage = BufferUsage::MapRead | BufferUsage::CopyDst;
+		w.sunReadBuffer = wgpuDevice().createBuffer(bufferDesc);
+		if (!w.sunCountBindGroupLayout || !w.sunCountBuffer || !w.sunReadBuffer || !w.skyBakeBindGroup) { return false; }
+		return !scope.failed();
+	}
+
+	bool createSky()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/sky.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world sky");
+
+		w.skyBakePipelineLayout = createPipelineLayout("world sky bake pipeline layout", &w.skyBakeBindGroupLayout, 1);
+		w.skyPipelineLayout = createPipelineLayout("world sky pipeline layout", &w.skyBindGroupLayout, 1);
 
 		// Three pipelines, each a fullscreen triangle or a quad, no vertex
 		// buffers.
@@ -3788,19 +3837,6 @@ namespace
 		// Milestone 18: the god rays' sun and moon, into one half-size
 		// target, no blending or depth (GL's state for them), with a second
 		// group: the scene's depth and the flare's counter.
-		BindGroupLayoutEntry countEntries[2] = { textureEntry(0, TextureSampleType::Depth), emptyEntry(1) };
-		countEntries[1].buffer.type = BufferBindingType::Storage;
-		countEntries[1].buffer.hasDynamicOffset = false;
-		countEntries[1].buffer.minBindingSize = 4;
-		w.sunCountBindGroupLayout = makeLayout("world sun count bind group layout", countEntries, 2);
-		bufferDesc.label = StringView("world sun count");
-		bufferDesc.usage = BufferUsage::Storage | BufferUsage::CopySrc | BufferUsage::CopyDst;
-		bufferDesc.size = 4;
-		w.sunCountBuffer = wgpuDevice().createBuffer(bufferDesc);
-		bufferDesc.label = StringView("world sun count readback");
-		bufferDesc.usage = BufferUsage::MapRead | BufferUsage::CopyDst;
-		w.sunReadBuffer = wgpuDevice().createBuffer(bufferDesc);
-		if (!w.sunCountBindGroupLayout || !w.sunCountBuffer || !w.sunReadBuffer) { module.release(); return false; }
 		BindGroupLayout rayGroups[2] = { w.skyBindGroupLayout, w.sunCountBindGroupLayout };
 		w.sunRaysPipelineLayout = createPipelineLayout("world sun rays pipeline layout", rayGroups, 2);
 		w.sunRaysPipeline = pipeline("world sun and moon for the god rays", w.sunRaysPipelineLayout, "vs_sun",
@@ -3808,8 +3844,7 @@ namespace
 
 		const bool invalid = scope.failed();
 		module.release();
-		return w.skyBakePipeline && w.skyPipeline && w.sunPipeline && w.sunRaysPipeline && w.skyBakeBindGroup
-			&& !invalid;
+		return w.skyBakePipeline && w.skyPipeline && w.sunPipeline && w.sunRaysPipeline && !invalid;
 	}
 
 	// GL's three skies (SkyBoxLoaderAndDrawer::createSkyTextures), baked
@@ -4002,6 +4037,44 @@ namespace
 		recordSunRays(encoder, drawable);
 	}
 
+	// Everything made from the WGSL files: the pipelines and their layouts
+	// (milestone 20). Bind group layouts, buffers, samplers and bind groups
+	// come from the *Resources functions and createLayoutAndUniforms, once.
+	bool createPipelineSet()
+	{
+		return createPipelines() && createEntityPipelines() && createViewPipelines() && createSky()
+			&& createPost() && createBloom() && createHbao() && createRaysAndWarp();
+	}
+
+	// Every handle createPipelineSet assigns, for a reload to move aside,
+	// put back or release. The block icons' and block textures' pipelines
+	// are not here: they run once, at load.
+	template <typename OnPipeline, typename OnLayout>
+	void forEachReloadable(OnPipeline &&onPipeline, OnLayout &&onLayout)
+	{
+		RenderPipeline *const pipelines[] = {
+			&w.pipeline, &w.prepassPipeline, &w.solidLessPipeline, &w.waterDepthPipeline, &w.peelPipeline,
+			&w.finalPeelPipeline, &w.finalPlainPipeline, &w.decalPipeline,
+			&w.cubePipeline, &w.linePipeline, &w.modelPipeline, &w.itemPipeline,
+			&w.skyBakePipeline, &w.skyPipeline, &w.sunPipeline, &w.sunRaysPipeline,
+			&w.toneMapToTexturePipeline, &w.toneMapToSurfacePipeline, &w.fxaaPipeline,
+			&w.bloomFilterPipeline, &w.bloomDownPipeline, &w.bloomTentPipeline, &w.bloomUpPipeline,
+			&w.bloomBlurPipelines[0], &w.bloomBlurPipelines[1], &w.bloomApplyPipeline, &w.exposurePipeline,
+			&w.lastColorPipeline, &w.hbaoPipeline, &w.hbaoApplyPipeline,
+			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline };
+		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
+		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
+		for (RenderPipeline &pipeline : w.viewPipelines) { onPipeline(pipeline); }
+
+		PipelineLayout *const layouts[] = {
+			&w.pipelineLayout, &w.transparentPipelineLayout, &w.decalPipelineLayout, &w.cubePipelineLayout,
+			&w.entityPipelineLayout, &w.viewPipelineLayout, &w.skyBakePipelineLayout, &w.skyPipelineLayout,
+			&w.sunRaysPipelineLayout, &w.postPipelineLayout, &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout,
+			&w.hbaoPipelineLayout, &w.hbaoApplyPipelineLayout, &w.rayMaskPipelineLayout, &w.rayBlurPipelineLayout,
+			&w.warpPipelineLayout };
+		for (PipelineLayout *layout : layouts) { onLayout(*layout); }
+	}
+
 	bool initialize()
 	{
 		if (w.initialized) { return true; }
@@ -4016,9 +4089,8 @@ namespace
 			std::cout << "WebGPU world: the composite shows " << gBufferViewLabels[w.compositeView] << "\n";
 		}
 
-		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines()
-			|| !createSky() || !createPost() || !createBloom() || !createHbao()
-			|| !createRaysAndWarp())
+		if (!createLayoutAndUniforms() || !createSkyResources() || !createPostResources() || !createBloomResources()
+			|| !createHbaoResources() || !createRaysAndWarpResources() || !createPipelineSet())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -4911,6 +4983,53 @@ void renderLines(const std::vector<glm::vec3> &points)
 	pass.draw(count, 1, 0, 0);
 	pass.end();
 	pass.release();
+}
+
+bool reloadShaders()
+{
+	if (!w.initialized) { return false; }
+	const auto start = std::chrono::steady_clock::now();
+
+	// The current set aside, then a whole new one. Frames already recorded
+	// hold their own references, so releasing either set is safe.
+	std::vector<RenderPipeline> oldPipelines;
+	std::vector<PipelineLayout> oldLayouts;
+	forEachReloadable(
+		[&](RenderPipeline &pipeline) { oldPipelines.push_back(pipeline); pipeline = nullptr; },
+		[&](PipelineLayout &layout) { oldLayouts.push_back(layout); layout = nullptr; });
+
+	const bool ok = createPipelineSet();
+
+	// Keep the new set if all of it was made, else the old one (a WGSL error
+	// has already been printed with its line and column).
+	size_t nextPipeline = 0, nextLayout = 0;
+	forEachReloadable(
+		[&](RenderPipeline &pipeline)
+		{
+			RenderPipeline old = oldPipelines[nextPipeline++];
+			RenderPipeline &loser = ok ? old : pipeline;
+			if (loser) { loser.release(); }
+			if (!ok) { pipeline = old; }
+		},
+		[&](PipelineLayout &layout)
+		{
+			PipelineLayout old = oldLayouts[nextLayout++];
+			PipelineLayout &loser = ok ? old : layout;
+			if (loser) { loser.release(); }
+			if (!ok) { layout = old; }
+		});
+
+	const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	if (ok)
+	{
+		w.skyBaked = false; // the bake reruns with the new sky.wgsl
+		std::cout << "WebGPU world: reloaded the shaders (" << oldPipelines.size() << " pipelines) in " << ms << " ms\n";
+	}
+	else
+	{
+		std::cerr << "WebGPU world: shader reload failed, keeping the previous shaders\n";
+	}
+	return ok;
 }
 
 void shutdown()

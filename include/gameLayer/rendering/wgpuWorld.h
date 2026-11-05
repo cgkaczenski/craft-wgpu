@@ -271,6 +271,13 @@ namespace wgpuWorld
 	// and lines). Draws at once, after the world, on its depth.
 	void renderLines(const std::vector<glm::vec3> &points);
 
+	// Milestone 20: rebuilds every pipeline from the WGSL files on disk
+	// (Renderer::reloadShaders: the R key, or a shading setting that GL
+	// recompiles for). All or nothing: if any file fails to compile or a
+	// pipeline is rejected, the previous shaders stay. False then, or before
+	// the first frame.
+	bool reloadShaders();
+
 	// Releases every GPU object. Call before wgpuWindow::shutdown.
 	void shutdown();
 }

@@ -265,7 +265,7 @@ ourCraft. Phases B–D are where the new 3D concepts are.
 | # | Milestone | Notes |
 |---|---|---|
 | 19 | Decide the GL path's fate | Keep it for Windows/Linux or delete it along with glad, gl2d and the Apple fallbacks. |
-| 20 | Hot reload | `reloadShaders` for WGSL, if it was dropped along the way. |
+| 20 | Hot reload | Done. `wgpuWorld::reloadShaders`, called from `Renderer::reloadShaders`: GL's `R` key, or a shading setting GL recompiles for (that check also fires once on entering a world). WGSL is baked into pipelines, so a reload rebuilds the pipelines and their layouts and nothing else. The five create functions that mixed the two are split: `create*Resources` (bind group layouts, buffers, samplers, the sky cubes and the bake's group) runs once at startup, and `createPipelineSet` (the eight pipeline functions) runs at startup and on each reload. Bind groups, the arena and the targets are untouched. All or nothing: `forEachReloadable` lists the 42 pipelines and 17 layouts. A reload moves them aside, builds a new set, and keeps the new one only if every pipeline was made; otherwise it releases what it made and puts the old set back. A WGSL error prints with its line (naga's message) and the game keeps drawing. The skies re-bake after a reload, as GL's reload redoes its sky textures. The block icons' and block textures' pipelines run once at load and are not reloaded. A reload takes about 20 ms. Checked by script, editing `post.wgsl` between `R` presses: a red tint appears on reload, a syntax error is reported and the tint stays, and restoring the file brings the normal image back. No other validation errors; the GL build compiles. |
 
 ## Integration approach
 
