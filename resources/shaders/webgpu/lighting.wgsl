@@ -15,10 +15,12 @@
 //             and on the sky part of the ambient: sunShadow
 //
 // The fog toward the sky (milestone 14), the reflections (milestone 17) and
-// the underwater darkening (milestone 18) are chunkFaces.wgsl's. Not here
-// yet: caustics and animated water normals (they move with the water). GL's BRDF LUT only feeds its physically accurate ambient, which a
-// constant switches off (physicallyAccurateReflections), so its output never
-// reads the LUT and neither does this.
+// the underwater darkening (milestone 18) are chunkFaces.wgsl's, as are the
+// water's moving normal and the caustics (18-parity), which reach the lights
+// here as their `caustics` tint. GL's BRDF LUT only feeds its physically
+// accurate ambient, which a constant switches off
+// (physicallyAccurateReflections), so its output never reads the LUT and
+// neither does this.
 
 const PI = 3.14159265359;
 
@@ -368,7 +370,7 @@ fn atenuationFunction(dist: f32) -> f32 {
 // and its light could reach this face's level by block steps (GL's test on
 // the Manhattan distance), so lights behind walls stay dark.
 fn pointLights(levels: LightLevels, blockPos: vec3i, inBlock: vec3f, metallic: f32, roughness: f32,
-    V: vec3f, albedo: vec3f, N: vec3f, F0: vec3f) -> vec3f {
+    V: vec3f, albedo: vec3f, N: vec3f, F0: vec3f, caustics: vec3f) -> vec3f {
     var color = vec3f(0.0);
     if (levels.block == 0) { return color; }
     let count = u32(max(u.lightParams.y, 0));
@@ -382,15 +384,16 @@ fn pointLights(levels: LightLevels, blockPos: vec3i, inBlock: vec3f, metallic: f
         let manhattan = f32(dot(abs(blockPos - light), vec3i(1)));
         if ((15.0 - manhattan) + 0.1 > f32(levels.block)) { continue; }
         L = normalize(L);
-        color += computePointLightSource(L, metallic, roughness, vec3f(1.0), V, albedo, N, F0)
+        color += computePointLightSource(L, metallic, roughness, caustics, V, albedo, N, F0)
             * atenuationFunction(lightDist) * ((f32(levels.block) / 15.0) + 1.0) / 2.0;
     }
     return color;
 }
 
-// The sun (or moon) on a face that sees the sky.
+// The sun (or moon) on a face that sees the sky. `caustics` tints the
+// light, as on the point lights (1 out of water).
 fn sunLight(levels: LightLevels, metallic: f32, roughness: f32, V: vec3f, albedo: vec3f, N: vec3f,
-    F0: vec3f, ao: f32, shadow: f32) -> vec3f {
+    F0: vec3f, ao: f32, shadow: f32, caustics: vec3f) -> vec3f {
     if (levels.skyUnchanged <= 3) { return vec3f(0.0); }
     var color = u.sunLightColor.rgb * 1.9;
     // Less where little sky light reaches, and a little less at full light.
@@ -400,7 +403,7 @@ fn sunLight(levels: LightLevels, metallic: f32, roughness: f32, V: vec3f, albedo
     color *= mix(1.0, 0.7, decrease);
     let L = u.sunDirection.xyz;
     if (dot(L, vec3f(0.0, 1.0, 0.0)) <= -0.2) { return vec3f(0.0); }
-    return computePointLightSource(L, metallic, roughness, color, V, albedo, N, F0) * shadow * sqrt(ao);
+    return computePointLightSource(L, metallic, roughness, color * caustics, V, albedo, N, F0) * shadow * sqrt(ao);
 }
 
 // The material map: roughness from red, metallic from green, emission blue.

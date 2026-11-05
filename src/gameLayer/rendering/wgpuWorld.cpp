@@ -85,8 +85,9 @@ namespace
 		glm::mat4 projection;        // view to clip space, for the reflections (milestone 17)
 		glm::vec4 underWaterColor;   // rgb the color, w darken strength (milestone 18)
 		glm::vec4 underWaterParams;  // x darken distance, y fog gradient under water
+		glm::vec4 animation;         // x seconds (GL's u_timeGrass), y GL's u_waterMove (18-parity)
 	};
-	static_assert(sizeof(Uniforms) == 560, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 576, "uniform layout must match world.wgsl");
 
 	// Milestone 17: hbao.wgsl's HbaoUniforms.
 	struct HbaoUniforms
@@ -328,6 +329,12 @@ namespace
 		uint32_t aoTextureId = 0;            // the wgpu2d texture bound at 7
 		Sampler aoSampler = nullptr;
 		TextureView boundAoView = nullptr;   // what the bind group names (not owned)
+
+		// 18-parity: the water's textures (GL's u_dudv, u_dudvNormal and
+		// u_caustics; wgpu2d ids) at 13-15, and their sampler at 16.
+		uint32_t waterTextureIds[3] = {};
+		Sampler waterSampler = nullptr;
+		TextureView boundWaterViews[3] = {};
 
 		// Milestone 13: the sun's shadow maps, made the first frame shadows
 		// are on. A 1x1 depth stands in for them in the bind group until
@@ -711,7 +718,7 @@ namespace
 	{
 		ErrorScope scope("world bind group layout");
 
-		constexpr uint32_t worldBindings = 13;
+		constexpr uint32_t worldBindings = 17;
 		BindGroupLayoutEntry entries[worldBindings];
 		entries[0] = Default;
 		entries[0].binding = 0;
@@ -775,6 +782,16 @@ namespace
 		entries[12] = entries[5];
 		entries[12].binding = 12;
 		entries[12].sampler.type = SamplerBindingType::Comparison;
+
+		// 13-15: the water's dudv, normal and caustics textures; 16: their
+		// sampler (18-parity, chunkFaces.wgsl). Fragment stage.
+		for (uint32_t i = 13; i <= 15; i++)
+		{
+			entries[i] = entries[7];
+			entries[i].binding = i;
+		}
+		entries[16] = entries[5];
+		entries[16].binding = 16;
 
 		BindGroupLayoutDescriptor layoutDesc = Default;
 		layoutDesc.label = StringView("world bind group layout");
@@ -2288,6 +2305,37 @@ namespace
 		}
 		if (aoView != w.boundAoView) { changed = true; }
 
+		// The water's textures: gl2d's defaults for them (linear, mipmapped,
+		// repeat), as loadFromFile(path, false, true) sets.
+		if (!w.waterSampler)
+		{
+			SamplerDescriptor samplerDesc = Default;
+			samplerDesc.label = StringView("world water sampler");
+			samplerDesc.addressModeU = AddressMode::Repeat;
+			samplerDesc.addressModeV = AddressMode::Repeat;
+			samplerDesc.addressModeW = AddressMode::Repeat;
+			samplerDesc.magFilter = FilterMode::Linear;
+			samplerDesc.minFilter = FilterMode::Linear;
+			samplerDesc.mipmapFilter = MipmapFilterMode::Linear;
+			samplerDesc.lodMinClamp = 0.0f;
+			samplerDesc.lodMaxClamp = 32.0f;
+			samplerDesc.compare = CompareFunction::Undefined;
+			samplerDesc.maxAnisotropy = 1;
+			w.waterSampler = wgpuDevice().createSampler(samplerDesc);
+			if (!w.waterSampler) { return false; }
+		}
+		TextureView waterViews[3];
+		for (int i = 0; i < 3; i++)
+		{
+			waterViews[i] = wgpuTextureView(w.waterTextureIds[i]);
+			if (!waterViews[i])
+			{
+				if (!ensureWhiteTexture()) { return false; }
+				waterViews[i] = w.whiteView;
+			}
+			if (waterViews[i] != w.boundWaterViews[i]) { changed = true; }
+		}
+
 		if (!ensureShadowResources(w.shadowsWanted)) { return false; }
 		for (int i = 0; i < shadowCascades; i++)
 		{
@@ -2301,7 +2349,7 @@ namespace
 		if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
 		if (w.shadowPassBindGroup) { w.shadowPassBindGroup.release(); w.shadowPassBindGroup = nullptr; }
 
-		constexpr uint32_t worldBindings = 13;
+		constexpr uint32_t worldBindings = 17;
 		BindGroupEntry entries[worldBindings];
 		for (uint32_t i = 0; i < worldBindings; i++) { entries[i] = Default; entries[i].binding = i; }
 		entries[0].buffer = w.uniformBuffer;
@@ -2325,6 +2373,12 @@ namespace
 			w.boundShadowViews[i] = shadowBindView(i);
 		}
 		entries[12].sampler = w.shadowSampler;
+		for (int i = 0; i < 3; i++)
+		{
+			entries[13 + i].textureView = waterViews[i];
+			w.boundWaterViews[i] = waterViews[i];
+		}
+		entries[16].sampler = w.waterSampler;
 
 		BindGroupDescriptor groupDesc = Default;
 		groupDesc.label = StringView("world bind group");
@@ -4172,6 +4226,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		}
 	}
 	w.aoTextureId = lighting.aoTexture;
+	w.waterTextureIds[0] = lighting.dudvTexture;
+	w.waterTextureIds[1] = lighting.dudvNormalTexture;
+	w.waterTextureIds[2] = lighting.causticsTexture;
 	const int shadows = std::clamp(lighting.shadows, 0, 2);
 	w.shadowsWanted = shadows != 0;
 
@@ -4214,6 +4271,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.projection = projection;
 	uniforms.underWaterColor = glm::vec4(lighting.underWaterColor, lighting.underwaterDarkenStrength);
 	uniforms.underWaterParams = glm::vec4(lighting.underwaterDarkenDistance, lighting.fogGradientUnderWater, 0.f, 0.f);
+	uniforms.animation = glm::vec4(lighting.animationTime, lighting.waterMove, 0.f, 0.f);
 
 	// Milestone 13: the sun's cascades, camera-relative. GL's matrices
 	// take world positions to -1..1 depth; here the camera position is
@@ -4284,7 +4342,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	wgpuQueue().writeBuffer(w.rayUniformBuffer, 0, &rayUniforms, sizeof(rayUniforms));
 	WarpUniforms warpUniforms;
 	warpUniforms.color = glm::vec4(lighting.underWaterColor, 0.f);
-	warpUniforms.params = glm::vec4(lighting.warpTime, 0.f, 0.f, 0.f);
+	warpUniforms.params = glm::vec4(lighting.animationTime, 0.f, 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.warpUniformBuffer, 0, &warpUniforms, sizeof(warpUniforms));
 	w.underWater = lighting.underWater;
 
@@ -4902,7 +4960,9 @@ void shutdown()
 	for (wgpu2d::FrameBuffer &preview : w.previews) { preview.cleanup(); }
 	if (w.lightBuffer) { w.lightBuffer.release(); w.lightBuffer = nullptr; w.lightCapacity = 0; }
 	if (w.aoSampler) { w.aoSampler.release(); w.aoSampler = nullptr; }
+	if (w.waterSampler) { w.waterSampler.release(); w.waterSampler = nullptr; }
 	w.boundAoView = nullptr;
+	for (TextureView &view : w.boundWaterViews) { view = nullptr; }
 	for (int i = 0; i < shadowCascades; i++)
 	{
 		if (w.shadowPipelines[i]) { w.shadowPipelines[i].release(); w.shadowPipelines[i] = nullptr; }

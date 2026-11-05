@@ -157,9 +157,10 @@ fn addLensBlur(c: vec3f, presence: f32, strength: f32) -> vec3f {
 
 @fragment
 fn fs_apply(in: BloomOutput) -> @location(0) vec4f {
-    // GL's v runs up the screen, so it reads the dirt textures' first rows
-    // at the bottom; the same rows go to the bottom here.
-    let dirtUv = vec2f(in.uv.x, 1.0 - in.uv.y);
+    // The dirt textures straight, v down: gl2d stores rows bottom first and
+    // GL's v runs up, wgpu2d stores them top first and v runs down, so both
+    // put the image's top row at the top of the screen.
+    let dirtUv = in.uv;
     var c = textureSample(source, sourceSampler, in.uv).rgb;
     let dirtIntensity = textureSample(lensDirt, dirtSampler, dirtUv).rgb;
     let hitIntensity = textureSample(hitDirt, dirtSampler, dirtUv).rgb;

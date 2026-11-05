@@ -48,6 +48,10 @@ struct Uniforms {
     // u_underwaterDarkenDistance, y u_fogGradientUnderWater.
     underWaterColor: vec4f,
     underWaterParams: vec4f,
+    // 18-parity: x seconds since start (GL's u_timeGrass, on Windows wall
+    // time), for the grass, leaves and waves; y GL's u_waterMove (0..20),
+    // for the water's textures.
+    animation: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

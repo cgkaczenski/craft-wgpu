@@ -1,6 +1,7 @@
 #include "rendering/renderer.h"
 #include "rendering/wgpuWorld.h"
 #include <ctime>
+#include <chrono>
 #include "blocks.h"
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
@@ -3189,12 +3190,21 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	lighting.ssao = programData.renderer.ssao;
 	lighting.aoViewDistance = (chunkSystem.squareSize / 2.f) * 16.f;
 	lighting.ssr = getShadingSettings().SSR != 0;
-	// Milestone 18: under water, and the warp's clock.
+	// Milestone 18: under water.
 	lighting.underWaterColor = defaultShader.shadingSettings.underWaterColor;
 	lighting.underwaterDarkenStrength = defaultShader.shadingSettings.underwaterDarkenStrength;
 	lighting.underwaterDarkenDistance = defaultShader.shadingSettings.underwaterDarkenDistance;
 	lighting.fogGradientUnderWater = defaultShader.shadingSettings.fogGradientUnderWater;
-	lighting.warpTime = timeGrass;
+	// 18-parity: the animation's clock in wall seconds, what timeGrass is
+	// on Windows (std::clock is CPU time elsewhere).
+	{
+		static const auto animationStart = std::chrono::steady_clock::now();
+		lighting.animationTime = std::chrono::duration<float>(std::chrono::steady_clock::now() - animationStart).count();
+	}
+	lighting.waterMove = waterTimer;
+	lighting.dudvTexture = programData.dudv.id;
+	lighting.dudvNormalTexture = programData.dudvNormal.id;
+	lighting.causticsTexture = programData.causticsTexture.id;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif

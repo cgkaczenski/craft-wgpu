@@ -58,9 +58,13 @@
 // fboMain but its bloom), so the AO and the next frame's reflections see
 // the water's surface, not the lake bed.
 //
+// Animation (18-parity): defaultShader.vert's grass and leaf sway and water
+// waves, in animatedCorner, which every vertex entry point goes through (the
+// prepass, the solid and transparent passes and the shadow maps move alike);
+// and defaultShader.frag's moving water textures: the water's normal, the
+// distortion of what is under it and the caustics on what lies in it.
+//
 // Conventions (docs/roadmap.md): positions camera-relative, depth 0..1.
-// No animation yet (grass, leaves sway and water waves in defaultShader.vert),
-// and so no caustics (their coordinates move with the water's).
 
 #include "world.wgsl"
 #include "lighting.wgsl"
@@ -72,6 +76,15 @@
 // Nearest, nearest mip, repeat, max LOD 4: the GL texture parameters, less
 // the 4x anisotropy WebGPU only allows with linear filtering.
 @group(0) @binding(5) var blockSampler: sampler;
+
+// 18-parity: the water's textures (GL's u_dudv, u_dudvNormal, u_caustics:
+// waterDUDV.png, normal.png, caustics), tiled across the world by the
+// block's xz. wgpu2d stores rows top first where gl2d stored them bottom
+// first, so waterRead negates v to land on GL's texel (they repeat).
+@group(0) @binding(13) var dudvTexture: texture_2d<f32>;
+@group(0) @binding(14) var dudvNormalTexture: texture_2d<f32>;
+@group(0) @binding(15) var causticsTexture: texture_2d<f32>;
+@group(0) @binding(16) var waterSampler: sampler; // linear, mipmapped, repeat
 
 // The frame group: the peel's inputs (transparent passes) and the sky
 // behind the world, for the fog (milestone 14; GL's u_skyTexture, read at
@@ -146,10 +159,19 @@ const faceNormals = array<vec3f, 6>(
 );
 
 // defaultShader.vert's waterMask: which corners of the water orientations
-// (22-27) are on the surface, and drop 0.08 of a block to sit below it.
-const waterMask = array<f32, 24>(
+// (22-35) are on the surface, where they drop 0.08 of a block and the waves
+// move them.
+const waterMask = array<f32, 56>(
     1.0, 1.0, 0.0, 0.0,  0.0, 1.0, 1.0, 0.0,  1.0, 1.0, 1.0, 1.0,
     0.0, 0.0, 0.0, 0.0,  0.0, 1.0, 1.0, 0.0,  1.0, 1.0, 0.0, 0.0,
+    1.0, 1.0, 1.0, 1.0,  1.0, 1.0, 1.0, 1.0,  1.0, 1.0, 1.0, 1.0,  1.0, 1.0, 1.0, 1.0,
+    0.0, 0.0, 1.0, 1.0,  1.0, 0.0, 0.0, 1.0,  1.0, 0.0, 0.0, 1.0,  0.0, 0.0, 1.0, 1.0,
+);
+
+// defaultShader.vert's grassMask: the corners of grass (6-9) that sway,
+// its top two.
+const grassMask = array<f32, 16>(
+    1.0, 1.0, 0.0, 0.0,  0.0, 1.0, 1.0, 0.0,  1.0, 1.0, 0.0, 0.0,  0.0, 0.0, 1.0, 1.0,
 );
 
 const stripToCorner = array<u32, 4>(0u, 1u, 3u, 2u);
@@ -157,6 +179,62 @@ const stripToCorner = array<u32, 4>(0u, 1u, 3u, 2u);
 fn cornerShape(row: i32, corner: u32) -> vec3f {
     let base = u32(row) * 12u + corner * 3u;
     return vec3f(vertexData[base], vertexData[base + 1u], vertexData[base + 2u]);
+}
+
+fn biasUp(a: f32) -> f32 { return (a + 0.75) / 1.75; }
+fn biasUp2(a: f32) -> f32 { return ((a + 1.0) / 2.0) / 2.0 + 0.5; }
+
+// defaultShader.vert's calculateVertexPos: a corner of the face within its
+// block, moved by the animation (u.animation.x, GL's u_timeGrass) as GL
+// moves it. `facePosition` is the block's position, as floats.
+fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f) -> vec3f {
+    let t = u.animation.x;
+    if (orientation >= 22 && orientation < 36) {
+        // Water: its surface corners down 0.08, then two travelling waves.
+        var shape = cornerShape(orientation, corner);
+        let mask = waterMask[u32(orientation - 22) * 4u + corner];
+        let speed = 3.1;
+        let frequency = 0.5;
+        let amplitude = 0.034;
+        let offset = biasUp(cos((facePosition.x + shape.x + shape.z + facePosition.z - t * speed) * frequency))
+            * amplitude;
+        let offset2 = sin((1.0 + facePosition.x + shape.x + (shape.z + facePosition.z) * 2.0 - t * speed)
+            * frequency) * amplitude;
+        shape.y += mask * (offset + offset2 - 0.08);
+        return shape;
+    }
+    if (orientation >= 10 && orientation < 16) {
+        // Leaves: the cube faces' rows, every corner wandering on sines.
+        var shape = cornerShape(orientation - 10, corner);
+        var offset = vec3f(0.0);
+        offset.y = 0.01 * sin((t / 0.2) + shape.x + facePosition.x);
+        offset.y += 0.04 * sin(t + shape.z + facePosition.z);
+        let xz = 0.05 * sin((t / 2.0) + shape.xz + facePosition.xz)
+            + 0.02 * cos((t / 3.0) + shape.xz + facePosition.xz);
+        offset.y += 0.010 * cos(t + shape.x + facePosition.x);
+        offset.y += 0.02 * cos((t / 2.0) + shape.z + facePosition.z);
+        offset.x = xz.x;
+        offset.z = xz.y;
+        return shape + offset;
+    }
+    if (orientation >= 6 && orientation < 10) {
+        // Grass: the top corners pushed along one direction by two waves.
+        var shape = cornerShape(orientation, corner);
+        let mask = grassMask[u32(orientation - 6) * 4u + corner];
+        let dir = normalize(vec2f(0.5, 1.0));
+        let dir2 = normalize(vec2f(0.9, 1.0));
+        let speed = 2.0;
+        let frequency = 2.5;
+        let amplitude = 0.15;
+        let offset = biasUp(cos((facePosition.x * dir.x + facePosition.z * dir.y - t * speed) * frequency))
+            * amplitude;
+        let offset2 = biasUp2(sin((facePosition.x * dir2.x + facePosition.z * dir2.y - t * speed) * frequency))
+            * amplitude;
+        shape.x += mask * (offset * dir.x + offset2 * dir.x);
+        shape.z += mask * (offset * dir.y + offset2 * dir.y);
+        return shape;
+    }
+    return cornerShape(orientation, corner);
 }
 
 // One corner of a face, placed by the camera: what every vertex entry point
@@ -172,19 +250,9 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     let flags = u32(face.position.y >> 24) & 0xFFu;
     let water = (flags & 1u) != 0u;
 
-    // Leaves (10-15) reuse the cube faces' rows; defaultShader.vert only
-    // adds their sway on top.
-    var row = orientation;
-    if (orientation >= 10 && orientation < 16) { row = orientation - 10; }
-
     let corner = stripToCorner[vertexIndex];
-    var shape = cornerShape(row, corner);
-
-    // Water's surface corners sit 0.08 below the block top (GL adds waves
-    // on top of that; they come with the rest of the animation).
-    if (orientation >= 22 && orientation < 28) {
-        shape.y -= 0.08 * waterMask[u32(orientation - 22) * 4u + corner];
-    }
+    let facePosition = vec3f(blockPosition);
+    let shape = animatedCorner(orientation, corner, facePosition);
 
     // Integer difference first, then the fraction: exact however far the
     // world is from the origin.
@@ -193,17 +261,16 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     var ambientMultiplier = 1.0;
     if (orientation >= 0 && orientation < 16 && !water) { ambientMultiplier = vertexColor[orientation]; }
 
-    // defaultShader.vert's normals: the table for cube faces and water, and
-    // for every other shape (grass, leaves, models) the face's own plane from
-    // three of its corners, as GL takes it.
+    // defaultShader.vert's normals: the table for cube faces and still
+    // water's six, and for every other shape (grass, leaves, flowing water,
+    // models) the plane of three of its animated corners, as GL takes it.
     var normal: vec3f;
     if (orientation >= 0 && orientation < 6) { normal = faceNormals[orientation]; }
     else if (orientation >= 22 && orientation < 28) { normal = faceNormals[orientation - 22]; }
     else {
-        let p1 = cornerShape(row, corner);
-        let p2 = cornerShape(row, (corner + 1u) % 4u);
-        let p3 = cornerShape(row, (corner + 2u) % 4u);
-        normal = normalize(cross(p3 - p2, p1 - p2));
+        let p2 = animatedCorner(orientation, (corner + 1u) % 4u, facePosition);
+        let p3 = animatedCorner(orientation, (corner + 2u) % 4u, facePosition);
+        normal = normalize(cross(p3 - p2, shape - p2));
     }
 
     // UVs are indexed by the orientation itself, leaves included
@@ -258,6 +325,83 @@ fn isWater(in: VertexOutput) -> bool {
     return (in.flags & 1u) != 0u;
 }
 
+// ---- 18-parity: the water's moving textures --------------------------------
+// defaultShader.frag's getDudvCoords family: GL's coordinates, each the
+// base -blockPos.zx + uv scaled (some with v negated), plus an offset that
+// moves with u.animation.y (GL's u_waterMove). The reads sit in branches
+// (water, faces in water), where textureSample is not allowed, so each
+// coordinate carries its screen derivatives for textureSampleGrad: the
+// base's, taken in readTexels while the flow is still uniform, scaled as the
+// coordinate is (GL's derivatives of the offsets that come from other reads
+// are left out).
+
+const waterSpeed = 15.0;
+
+struct WaterCoord {
+    p: vec2f,
+    dx: vec2f,
+    dy: vec2f,
+};
+
+fn scaledCoord(c: WaterCoord, p: vec2f, scale: vec2f) -> WaterCoord {
+    var r: WaterCoord;
+    r.p = p * scale;
+    r.dx = c.dx * scale;
+    r.dy = c.dy * scale;
+    return r;
+}
+
+fn dudvCoords(base: WaterCoord, speed: f32) -> WaterCoord {
+    let m = u.animation.y * speed;
+    return scaledCoord(base, base.p + vec2f(m, m / 2.0), vec2f(1.0 / 20.0));
+}
+
+fn dudvCoords2(base: WaterCoord, speed: f32) -> WaterCoord {
+    let m = u.animation.y * speed;
+    return scaledCoord(base, base.p + vec2f(m + 3.0, m / 2.0 + 5.0), vec2f(0.1, -0.1));
+}
+
+fn dudvCoords3(base: WaterCoord, speed: f32) -> WaterCoord {
+    let m = u.animation.y * speed;
+    return scaledCoord(base, base.p - vec2f(m, m / 3.0), vec2f(0.1, -0.1));
+}
+
+fn dudvCoords5(base: WaterCoord, speed: f32) -> WaterCoord {
+    let m = u.animation.y * speed;
+    return scaledCoord(base, base.p + vec2f(m, m / 2.0), vec2f(1.0 / 50.0));
+}
+
+// GL's texture(t, c.p + shift), with v negated for wgpu2d's row order.
+fn waterRead(t: texture_2d<f32>, c: WaterCoord, shift: vec2f) -> vec4f {
+    let flip = vec2f(1.0, -1.0);
+    return textureSampleGrad(t, waterSampler, (c.p + shift) * flip, c.dx * flip, c.dy * flip);
+}
+
+// applyNormalMap's water branch: two reads of normal.png, the first nudging
+// the second, flattened to a fifth of its tilt; a texel for applyNormalMap.
+fn waterNormalTexel(base: WaterCoord) -> vec3f {
+    let first = waterRead(dudvNormalTexture, dudvCoords3(base, waterSpeed / 3.0), vec2f(0.0)).rg;
+    let n = waterRead(dudvNormalTexture, dudvCoords5(base, waterSpeed * 2.0), first * 0.04).rgb;
+    return vec3f(0.5, 0.5, 1.0) + (vec3f(n.x, n.y, 0.0) - vec3f(0.5, 0.5, 0.0)) * 0.2;
+}
+
+// The caustics on a face under water: caustics.png's channels read a little
+// apart (chromatic aberration), its coordinates wobbled by two dudv reads.
+fn causticsColor(base: WaterCoord) -> vec3f {
+    let dudv = waterRead(dudvTexture, dudvCoords(base, waterSpeed * 2.0), vec2f(0.0)).rg
+        + waterRead(dudvTexture, dudvCoords5(base, waterSpeed), vec2f(0.0)).rg;
+    let c = dudvCoords(base, 5.0);
+    var coords = scaledCoord(c, c.p, vec2f(3.0)); // causticsTextureScale
+    coords.p += dudv / 10.0;
+    let aberration = 0.004;
+    let power = 0.8;
+    let strength = 1.4;
+    return vec3f(
+        pow(waterRead(causticsTexture, coords, vec2f(0.0)).r, power),
+        pow(waterRead(causticsTexture, coords, vec2f(aberration)).g, power),
+        pow(waterRead(causticsTexture, coords, vec2f(aberration * 2.0)).b, power)) * strength;
+}
+
 // Every texture the lighting reads, read before anything branches on the
 // pixel: textureSample takes derivatives, so it must stay in uniform
 // control flow.
@@ -266,6 +410,7 @@ struct Texels {
     normalMap: vec3f,
     material: vec3f,
     ao: f32,
+    water: WaterCoord, // the base of the water's texture coordinates
 };
 
 fn readTexels(in: VertexOutput) -> Texels {
@@ -274,6 +419,9 @@ fn readTexels(in: VertexOutput) -> Texels {
     t.normalMap = textureSample(blockTextures, blockSampler, in.uv, in.normalLayer).rgb;
     t.material = textureSample(blockTextures, blockSampler, in.uv, in.materialLayer).rgb;
     t.ao = textureSample(aoTexture, aoSampler, aoCoordinate(in.flags, in.uv)).r;
+    t.water.p = vec2f(-f32(in.blockPos.z), -f32(in.blockPos.x)) + in.uv;
+    t.water.dx = dpdx(t.water.p);
+    t.water.dy = dpdy(t.water.p);
     return t;
 }
 
@@ -311,17 +459,28 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     }
     albedo = paintAlbedo(albedo, in.colors);
 
-    // Water's normal is GL's animated dudv map, which comes with the water
-    // animation; until then the surface is flat.
-    var N = applyNormalMap(in.normal, t.normalMap, frontFacing);
-    if (water) { N = select(-in.normal, in.normal, frontFacing); }
+    // Water's normal is GL's moving normal.png (18-parity), the rest the
+    // block's own normal map.
+    var normalTexel = t.normalMap;
+    if (water) { normalTexel = waterNormalTexel(t.water); }
+    let N = applyNormalMap(in.normal, normalTexel, frontFacing);
+
+    // The caustics: light rippling on faces under water (flag bit 1), on
+    // the point lights and the sun.
+    var caustics = vec3f(1.0);
+    var causticsPower = 0.0;
+    if ((in.flags & 2u) != 0u) {
+        caustics = causticsColor(t.water);
+        causticsPower = dot(caustics, vec3f(0.6, 0.3, 0.1)) * shadow;
+    }
 
     let V = -normalize(in.relative);
     var F0 = mix(vec3f(0.04), albedo, m.metallic);
     if (water) { F0 = vec3f(0.021, 0.021, 0.05); }
 
-    var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0);
-    color += sunLight(levels, m.metallic, m.roughness, V, albedo, N, F0, ao, shadow);
+    var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0, caustics);
+    let sun = sunLight(levels, m.metallic, m.roughness, V, albedo, N, F0, ao, shadow, caustics);
+    color += sun;
 
     var s: Shaded;
     s.dotNV = dot(N, V);
@@ -341,6 +500,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     s.normal = N;
     s.roughness = m.roughness;
     s.bloom = m.emissive * 0.12 * albedo;
+    // The brightest caustics glow (GL adds this to out_bloom with the sun).
+    if (causticsPower > 1.2) { s.bloom += max(sun, vec3f(4.0)) * 0.0008; }
     s.F0 = F0;
     return s;
 }
@@ -641,11 +802,26 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> Blend
     let waterDepth = lastDepth - currentDepth;
 
     if (passMode == 1u) {
-        // What is under the water, darkening with depth. GL also distorts
-        // the lookup with the animated dudv map; that comes with the
-        // animation.
+        // What is under the water, its lookup wobbled by the moving dudv
+        // map (18-parity), darkening with depth. GL's distortion is in its
+        // coordinates (v up), so v's part goes the other way here. Where the
+        // wobbled point lands on something in front of the water, the
+        // straight lookup is kept.
+        var dudv = waterRead(dudvTexture, dudvCoords(t.water, waterSpeed), vec2f(0.0)).rg;
+        dudv += waterRead(dudvTexture, dudvCoords2(t.water, dudv.x), vec2f(0.0)).rg * 0.01;
+        let distortion = (dudv * 2.0 - 1.0) * 0.009;
+        let size = vec2f(textureDimensions(peelColor));
+        let distortedUv = in.position.xy / size + vec2f(distortion.x, -distortion.y);
+        let distortedPixel = clamp(vec2i(distortedUv * size), vec2i(0), vec2i(size) - 1);
+        let distortDepth = linearizeDepth(textureLoad(peelDepth, distortedPixel, 0));
+
         var under = textureLoad(peelColor, pixel, 0).rgb;
-        under = mix(under, u.waterColor.rgb * 0.7, 0.6 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0));
+        var finalDepth = waterDepth;
+        if (distortDepth >= currentDepth + 0.1) {
+            under = textureSampleLevel(peelColor, lastFrameSampler, distortedUv, 0.0).rgb;
+            finalDepth = distortDepth - currentDepth;
+        }
+        under = mix(under, u.waterColor.rgb * 0.7, 0.6 * clamp(pow(finalDepth / 18.0, 2.0), 0.0, 1.0));
         return blendOutput(in, s, vec4f(applyFog(in, mix(under, reflection.color, mixFactor)), 1.0));
     }
 

@@ -8,7 +8,7 @@
 struct WarpUniforms {
     // rgb the underWaterColor setting (as GL uses it, unconverted), w unused.
     color: vec4f,
-    // x u_time (the renderer's timeGrass), yzw unused.
+    // x u_time (GL's timeGrass: world.wgsl's animation.x), yzw unused.
     params: vec4f,
 };
 @group(0) @binding(0) var<uniform> warp: WarpUniforms;

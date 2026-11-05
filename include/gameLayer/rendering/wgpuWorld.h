@@ -206,13 +206,22 @@ namespace wgpuWorld
 		bool ssr = true;
 
 		// Milestone 18: under water (`underWater` above), GL's shading
-		// settings for the darkening (used as GL uses them, unconverted) and
-		// the warp's clock (the renderer's timeGrass).
+		// settings for the darkening (used as GL uses them, unconverted).
 		glm::vec3 underWaterColor = glm::vec3(0, 17, 25) / 255.f;
 		float underwaterDarkenStrength = 0.94f;
 		float underwaterDarkenDistance = 29;
 		float fogGradientUnderWater = 1.9f;
-		float warpTime = 0;
+
+		// 18-parity: the animation. `animationTime` is seconds since start
+		// (GL's timeGrass, for the sway, the waves and the underwater warp;
+		// GL takes it from std::clock, which is wall time only on Windows);
+		// `waterMove` GL's u_waterMove (the renderer's waterTimer). The
+		// water's textures (wgpu2d ids): waterDUDV, its normal map, caustics.
+		float animationTime = 0;
+		float waterMove = 0;
+		uint32_t dudvTexture = 0;
+		uint32_t dudvNormalTexture = 0;
+		uint32_t causticsTexture = 0;
 	};
 
 	// Records the world's opaque pass for this frame and prepares the
