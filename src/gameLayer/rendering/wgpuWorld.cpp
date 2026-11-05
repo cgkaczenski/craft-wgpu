@@ -79,11 +79,21 @@ namespace
 		glm::vec4 sunDirection;  // xyz toward the sun or moon; w GL's u_baseAmbientExtra
 		glm::vec4 sunLightColor; // rgb
 		glm::vec4 ambientColor;  // rgb
-		glm::ivec4 lightParams;  // x sky light intensity, y point lights, z shadows setting
+		glm::ivec4 lightParams;  // x sky light intensity, y point lights, z shadows setting, w SSR
 		glm::mat4 shadowMatrices[3]; // camera-relative to each cascade's clip space, 0..1 deep
 		glm::vec4 fogParams;         // x fog distance, y near fog gradient, z underwater
+		glm::mat4 projection;        // view to clip space, for the reflections (milestone 17)
 	};
-	static_assert(sizeof(Uniforms) == 464, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 528, "uniform layout must match world.wgsl");
+
+	// Milestone 17: hbao.wgsl's HbaoUniforms.
+	struct HbaoUniforms
+	{
+		glm::mat4 view;       // world normals to view space
+		glm::mat4 projection; // view to clip space
+		glm::vec4 params;     // x the view distance the AO fades out at
+	};
+	static_assert(sizeof(HbaoUniforms) == 144, "must match hbao.wgsl's HbaoUniforms");
 
 	// Milestone 14: sky.wgsl's SkyUniforms and BakeParams.
 	struct SkyUniforms
@@ -412,6 +422,32 @@ namespace
 		glm::vec3 exposureColor = {0, 0, 0};
 		bool exposureFresh = false;                // a reading takeExposureColor has not given out
 		uint32_t exposureReadings = 0;             // for the shutdown line
+		int bloomLast = -1;                        // the blur buffer this frame's bloom ended in
+
+		// Milestone 17: the ambient occlusion (hbao.wgsl) and the
+		// reflections' history. The AO pass and its apply each have their
+		// own group: a pass may not read the texture it draws into, even
+		// through a binding its shader leaves alone.
+		BindGroupLayout hbaoBindGroupLayout = nullptr;      // uniforms, positions, normals, sampler
+		BindGroupLayout hbaoApplyBindGroupLayout = nullptr; // uniforms, positions, the AO, sampler
+		PipelineLayout hbaoPipelineLayout = nullptr;
+		PipelineLayout hbaoApplyPipelineLayout = nullptr;
+		RenderPipeline hbaoPipeline = nullptr;
+		RenderPipeline hbaoApplyPipeline = nullptr;   // black over the HDR color, by the AO's alpha
+		Buffer hbaoUniformBuffer = nullptr;
+		bool ssao = true;                             // this frame's setting
+		Texture hbaoTexture = nullptr;                // half the surface, r8unorm (GL's fboHBAO, GL_RED)
+		TextureView hbaoView = nullptr;
+		BindGroup hbaoBindGroup = nullptr;
+		BindGroup hbaoApplyBindGroup = nullptr;
+		// Last frame's HDR color (GL's fboLastFrame, RGBA8: drawn, since a
+		// copy cannot convert formats) and positions (copied), the size of
+		// the surface; the frame group reads them.
+		RenderPipeline lastColorPipeline = nullptr;
+		Texture lastColorTexture = nullptr;
+		TextureView lastColorView = nullptr;
+		Texture lastPositionsTexture = nullptr;
+		TextureView lastPositionsView = nullptr;
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
@@ -518,6 +554,7 @@ namespace
 	// Defined with the bloom (milestone 16), used by the targets.
 	bool ensureBloomTargets(int width, int height);
 	void releaseBloomTargets();
+	bool ensureHbaoTargets(int width, int height);
 
 	// ---- The face arena -------------------------------------------------
 
@@ -691,8 +728,8 @@ namespace
 
 		// Group 1 of the transparent pipelines: the peel's depth and color
 		// copies, read with textureLoad (no sampler).
-		BindGroupLayoutEntry peelEntries[3];
-		for (uint32_t i = 0; i < 3; i++)
+		BindGroupLayoutEntry peelEntries[6];
+		for (uint32_t i = 0; i < 6; i++)
 		{
 			peelEntries[i] = Default;
 			peelEntries[i].binding = i;
@@ -709,10 +746,20 @@ namespace
 		// is the decal's crack texture, in the decal's own group 1.
 		peelEntries[2].binding = 3;
 		peelEntries[2].texture.sampleType = TextureSampleType::Float;
+		// 4, 5, 6: last frame's color and positions and their sampler, for
+		// the reflections (milestone 17).
+		peelEntries[3].binding = 4;
+		peelEntries[3].texture.sampleType = TextureSampleType::Float;
+		peelEntries[4].binding = 5;
+		peelEntries[4].texture.sampleType = TextureSampleType::Float;
+		peelEntries[5].binding = 6;
+		peelEntries[5].texture.sampleType = TextureSampleType::BindingNotUsed;
+		peelEntries[5].texture.viewDimension = TextureViewDimension::Undefined;
+		peelEntries[5].sampler.type = SamplerBindingType::Filtering;
 
 		BindGroupLayoutDescriptor peelLayoutDesc = Default;
 		peelLayoutDesc.label = StringView("world frame bind group layout");
-		peelLayoutDesc.entryCount = 3;
+		peelLayoutDesc.entryCount = 6;
 		peelLayoutDesc.entries = peelEntries;
 		w.peelBindGroupLayout = wgpuDevice().createBindGroupLayout(peelLayoutDesc);
 		if (!w.peelBindGroupLayout) { return false; }
@@ -840,7 +887,8 @@ namespace
 		None,          // depth only (the water depth pass)
 		GBuffer,       // the G-buffer's four
 		GBufferMasked, // the four, nothing written: the prepass (glColorMask 0)
-		Hdr,           // the HDR color alone: the transparent passes
+		Hdr,           // the HDR color alone: the sky bake and sky passes
+		GBufferTransparent, // the four, the color blended, bloom masked: the transparent passes
 		Surface,       // the screen, after the composite: decal, lines
 	};
 
@@ -867,6 +915,14 @@ namespace
 				out[0].format = w.hdrFormat;
 				out[0].blend = blend;
 				return 1;
+			case ColorTargets::GBufferTransparent:
+				// GL's transparent passes: blending on the color target only,
+				// the positions and normals written over, the bloom's draw
+				// buffer off (milestone 17 needs the positions and normals).
+				for (int i = 0; i < GBufferSlots; i++) { out[i].format = gBufferFormat(i); }
+				out[GColor].blend = blend;
+				out[GBloom].writeMask = ColorWriteMask::None;
+				return GBufferSlots;
 			case ColorTargets::Surface:
 				out[0].format = wgpuSurfaceFormat();
 				out[0].blend = blend;
@@ -1068,12 +1124,12 @@ namespace
 		waterDepth.targets = ColorTargets::None;
 		w.waterDepthPipeline = createFacePipeline(module, waterDepth);
 
-		// Pass 5: the peel, blended, GL_LESS, culled, into the HDR color.
+		// Pass 5: the peel, blended, GL_LESS, culled, into the G-buffer.
 		FacePipelineDesc peel;
 		peel.label = "world transparent peel";
 		peel.layout = w.transparentPipelineLayout;
 		peel.fragmentEntry = "fs_blend";
-		peel.targets = ColorTargets::Hdr;
+		peel.targets = ColorTargets::GBufferTransparent;
 		peel.blend = true;
 		peel.passMode = 0;
 		w.peelPipeline = createFacePipeline(module, peel);
@@ -1358,38 +1414,6 @@ namespace
 		return encoder.beginRenderPass(passDesc);
 	}
 
-	// A render pass on the HDR color alone and the depth, keeping both: the
-	// transparent passes.
-	RenderPassEncoder beginHdrPass(CommandEncoder encoder, const char *label)
-	{
-		RenderPassColorAttachment color = Default;
-		color.view = w.gBufferViews[GColor];
-		color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
-		color.resolveTarget = nullptr;
-		color.loadOp = LoadOp::Load;
-		color.storeOp = StoreOp::Store;
-
-		RenderPassDepthStencilAttachment depthAttachment = Default;
-		depthAttachment.view = w.depthView;
-		depthAttachment.depthLoadOp = LoadOp::Load;
-		depthAttachment.depthStoreOp = StoreOp::Store;
-		depthAttachment.depthClearValue = depthClear;
-		depthAttachment.depthReadOnly = false;
-		depthAttachment.stencilLoadOp = LoadOp::Undefined;
-		depthAttachment.stencilStoreOp = StoreOp::Undefined;
-		depthAttachment.stencilClearValue = 0;
-		depthAttachment.stencilReadOnly = false;
-
-		RenderPassDescriptor passDesc = Default;
-		passDesc.label = StringView(label);
-		passDesc.colorAttachmentCount = 1;
-		passDesc.colorAttachments = &color;
-		passDesc.depthStencilAttachment = &depthAttachment;
-		passDesc.occlusionQuerySet = nullptr;
-		passDesc.timestampWrites = nullptr;
-		return encoder.beginRenderPass(passDesc);
-	}
-
 	// ---- Milestone 16: bloom and the auto exposure, each frame -----------
 
 	// A fullscreen triangle into one view (one mip), reading `group`. Loads
@@ -1534,6 +1558,7 @@ namespace
 	// run as in GL, so each pass reads and writes what GL's does.
 	void recordBloom(CommandEncoder encoder)
 	{
+		w.bloomLast = -1;
 		if (!w.bloom || w.blurViews[0].empty() || w.blurViews[1].empty()) { return; }
 
 		fullscreenPass(encoder, w.gBufferViews[GBloom], true, w.bloomFilterPipeline, w.colorSourceGroup,
@@ -1570,9 +1595,45 @@ namespace
 			last = !last;
 		}
 
-		BindGroup apply = bloomApplyGroup(w.blurViews[last][0]);
+		w.bloomLast = last;
+	}
+
+	// The bloom's last step, after the AO as in GL's post process: the
+	// result, with its lens dirt, added onto the HDR color.
+	void recordBloomApply(CommandEncoder encoder)
+	{
+		if (w.bloomLast < 0) { return; }
+		BindGroup apply = bloomApplyGroup(w.blurViews[w.bloomLast][0]);
+		w.bloomLast = -1;
 		if (!apply) { return; }
 		fullscreenPass(encoder, w.gBufferViews[GColor], true, w.bloomApplyPipeline, apply, "world bloom apply");
+	}
+
+	// Milestone 17: the AO at half size, then laid over the HDR color.
+	void recordHbao(CommandEncoder encoder)
+	{
+		if (!w.ssao || !w.hbaoBindGroup || !w.hbaoApplyBindGroup) { return; }
+		fullscreenPass(encoder, w.hbaoView, false, w.hbaoPipeline, w.hbaoBindGroup, "world hbao");
+		fullscreenPass(encoder, w.gBufferViews[GColor], true, w.hbaoApplyPipeline, w.hbaoApplyBindGroup,
+			"world hbao apply");
+	}
+
+	// The frame's HDR color and positions kept for the next frame's
+	// reflections (GL's copyToMainFboOnlyLastFrameStuff, after its tone
+	// mapping, which leaves the HDR color as it is).
+	void recordLastFrame(CommandEncoder encoder)
+	{
+		if (!w.lastColorView || !w.lastPositionsTexture || !w.colorSourceGroup) { return; }
+		fullscreenPass(encoder, w.lastColorView, false, w.lastColorPipeline, w.colorSourceGroup, "world last frame color");
+		TexelCopyTextureInfo from = Default;
+		from.texture = w.gBufferTextures[GPosition];
+		from.mipLevel = 0;
+		from.origin = { 0, 0, 0 };
+		from.aspect = TextureAspect::All;
+		TexelCopyTextureInfo to = from;
+		to.texture = w.lastPositionsTexture;
+		Extent3D size = { (uint32_t)w.depthWidth, (uint32_t)w.depthHeight, 1 };
+		encoder.copyTextureToTexture(from, to, size);
 	}
 
 	// The asked-for debug views, each into its own small wgpu2d target, and
@@ -1585,13 +1646,18 @@ namespace
 		w.frameRendered = false;
 
 		// Milestone 16: the exposure's average, of the HDR color as the
-		// world left it (GL reads it before the bloom), then the bloom.
+		// world left it (GL reads it before the bloom), then the bloom's
+		// blur; milestone 17's AO; the bloom added on; and the frame kept
+		// for the next one's reflections. GL's order.
 		{
 			CommandEncoder encoder = wgpuFrameEncoder();
 			if (encoder)
 			{
 				recordExposure(encoder);
 				recordBloom(encoder);
+				recordHbao(encoder);
+				recordBloomApply(encoder);
+				recordLastFrame(encoder);
 			}
 		}
 
@@ -2230,17 +2296,18 @@ namespace
 	void releaseTargets()
 	{
 		releaseBloomTargets();
-		for (BindGroup *group : { &w.peelBindGroup, &w.viewBindGroup, &w.toneMapBindGroup, &w.fxaaBindGroup })
+		for (BindGroup *group : { &w.peelBindGroup, &w.viewBindGroup, &w.toneMapBindGroup, &w.fxaaBindGroup,
+			&w.hbaoBindGroup, &w.hbaoApplyBindGroup })
 		{
 			if (*group) { group->release(); *group = nullptr; }
 		}
 		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView, &w.depthSampleView, &w.skyView,
-			&w.fxaaInputView })
+			&w.fxaaInputView, &w.hbaoView, &w.lastColorView, &w.lastPositionsView })
 		{
 			if (*view) { view->release(); *view = nullptr; }
 		}
 		for (Texture *texture : { &w.depthTexture, &w.peelDepthTexture, &w.peelColorTexture, &w.skyTexture,
-			&w.fxaaInputTexture })
+			&w.fxaaInputTexture, &w.hbaoTexture, &w.lastColorTexture, &w.lastPositionsTexture })
 		{
 			if (*texture) { texture->destroy(); texture->release(); *texture = nullptr; }
 		}
@@ -2289,7 +2356,7 @@ namespace
 		for (int i = 0; i < GBufferSlots; i++)
 		{
 			TextureUsage usage = TextureUsage::RenderAttachment | TextureUsage::TextureBinding;
-			if (i == GColor) { usage = usage | TextureUsage::CopySrc; }
+			if (i == GColor || i == GPosition) { usage = usage | TextureUsage::CopySrc; }
 			w.gBufferTextures[i] = createTarget(gBufferSlotNames[i], gBufferFormat(i), usage, width, height);
 			if (!w.gBufferTextures[i]) { return false; }
 			w.gBufferViews[i] = createTargetView(w.gBufferTextures[i], gBufferSlotNames[i], gBufferFormat(i),
@@ -2314,9 +2381,14 @@ namespace
 			TextureAspect::All, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
 		if (!w.depthView || !w.peelDepthView || !w.peelColorView || !w.skyView || !w.fxaaInputView) { return false; }
 
-		// The frame group: the peel's copies and the sky, all the size of
-		// the surface, so remade with them.
-		BindGroupEntry entries[3];
+		// Milestone 17: the AO target and last frame's copies, before the
+		// frame group that reads the copies.
+		if (!ensureHbaoTargets(width, height) || scope.failed()) { return false; }
+
+		// The frame group: the peel's copies, the sky and last frame's
+		// color and positions, all the size of the surface, so remade with
+		// them.
+		BindGroupEntry entries[6];
 		entries[0] = Default;
 		entries[0].binding = 0;
 		entries[0].textureView = w.peelDepthView;
@@ -2326,10 +2398,14 @@ namespace
 		entries[2] = Default;
 		entries[2].binding = 3;
 		entries[2].textureView = w.skyView;
+		for (int i = 3; i < 6; i++) { entries[i] = Default; entries[i].binding = (uint32_t)i + 1; }
+		entries[3].textureView = w.lastColorView;
+		entries[4].textureView = w.lastPositionsView;
+		entries[5].sampler = w.postSampler;
 		BindGroupDescriptor groupDesc = Default;
 		groupDesc.label = StringView("world frame bind group");
 		groupDesc.layout = w.peelBindGroupLayout;
-		groupDesc.entryCount = 3;
+		groupDesc.entryCount = 6;
 		groupDesc.entries = entries;
 		w.peelBindGroup = wgpuDevice().createBindGroup(groupDesc);
 		if (!w.peelBindGroup || scope.failed()) { return false; }
@@ -2884,12 +2960,16 @@ namespace
 			w.bloomApplyPipelineLayout, nullptr);
 		w.exposurePipeline = pass("world exposure average", "fs_average", TextureFormat::RGBA16Float, false,
 			layout, nullptr);
+		// Milestone 17: the HDR color into last frame's RGBA8 copy, texel
+		// for texel (the same size, so the read lands on texel centers).
+		w.lastColorPipeline = pass("world last frame color", "fs_average", TextureFormat::RGBA8Unorm, false,
+			layout, nullptr);
 
 		const bool invalid = scope.failed();
 		module.release();
 		return w.bloomFilterPipeline && w.bloomDownPipeline && w.bloomTentPipeline && w.bloomUpPipeline
 			&& w.bloomBlurPipelines[0] && w.bloomBlurPipelines[1] && w.bloomApplyPipeline && w.exposurePipeline
-			&& !invalid;
+			&& w.lastColorPipeline && !invalid;
 	}
 
 	// A bloom group: the uniforms, one view, the linear sampler.
@@ -3012,6 +3092,147 @@ namespace
 		// A copy recorded into the old chain but not yet submitted is still
 		// fine: the texture is destroyed only once the queue is done with it.
 		releaseChain(w.exposureTexture, w.exposureViews, w.exposureGroups);
+	}
+
+	// ---- Milestone 17: ambient occlusion (hbao.wgsl) ----------------------
+
+	bool createHbao()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/hbao.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world hbao");
+
+		BufferDescriptor bufferDesc = Default;
+		bufferDesc.label = StringView("world hbao uniforms");
+		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
+		bufferDesc.size = sizeof(HbaoUniforms);
+		bufferDesc.mappedAtCreation = false;
+		w.hbaoUniformBuffer = wgpuDevice().createBuffer(bufferDesc);
+		if (!w.hbaoUniformBuffer) { module.release(); return false; }
+
+		// Bindings 0 uniforms, 1 positions, 2 normals or 3 the AO, 4 the
+		// sampler: two layouts, one for each pass.
+		auto layout = [&](uint32_t textureBinding, TextureSampleType textureType, const char *label)
+		{
+			BindGroupLayoutEntry entries[4];
+			const uint32_t bindings[4] = { 0, 1, textureBinding, 4 };
+			for (uint32_t i = 0; i < 4; i++)
+			{
+				entries[i] = Default;
+				entries[i].binding = bindings[i];
+				entries[i].visibility = ShaderStage::Fragment;
+				entries[i].buffer.type = BufferBindingType::BindingNotUsed;
+				entries[i].sampler.type = SamplerBindingType::BindingNotUsed;
+				entries[i].texture.sampleType = TextureSampleType::BindingNotUsed;
+				entries[i].storageTexture.access = StorageTextureAccess::BindingNotUsed;
+			}
+			entries[0].buffer.type = BufferBindingType::Uniform;
+			entries[0].buffer.hasDynamicOffset = false;
+			entries[0].buffer.minBindingSize = sizeof(HbaoUniforms);
+			for (uint32_t i : { 1u, 2u })
+			{
+				entries[i].texture.viewDimension = TextureViewDimension::_2D;
+				entries[i].texture.multisampled = false;
+			}
+			entries[1].texture.sampleType = TextureSampleType::Float;
+			entries[2].texture.sampleType = textureType;
+			entries[3].sampler.type = SamplerBindingType::Filtering;
+			BindGroupLayoutDescriptor desc = Default;
+			desc.label = StringView(label);
+			desc.entryCount = 4;
+			desc.entries = entries;
+			return wgpuDevice().createBindGroupLayout(desc);
+		};
+		w.hbaoBindGroupLayout = layout(2, TextureSampleType::Uint, "world hbao bind group layout");
+		w.hbaoApplyBindGroupLayout = layout(3, TextureSampleType::Float, "world hbao apply bind group layout");
+		if (!w.hbaoBindGroupLayout || !w.hbaoApplyBindGroupLayout) { module.release(); return false; }
+		w.hbaoPipelineLayout = createPipelineLayout("world hbao pipeline layout", &w.hbaoBindGroupLayout, 1);
+		w.hbaoApplyPipelineLayout = createPipelineLayout("world hbao apply pipeline layout",
+			&w.hbaoApplyBindGroupLayout, 1);
+
+		// The apply: GL's glBlendFunci(0, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA).
+		BlendState over = Default;
+		over.color.operation = BlendOperation::Add;
+		over.color.srcFactor = BlendFactor::SrcAlpha;
+		over.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
+		over.alpha = over.color;
+		auto pass = [&](const char *label, const char *fragmentEntry, TextureFormat format, const BlendState *blend,
+			PipelineLayout pipelineLayout)
+		{
+			ColorTargetState target = Default;
+			target.format = format;
+			target.blend = blend;
+			target.writeMask = ColorWriteMask::All;
+			FragmentState fragment = Default;
+			fragment.module = module;
+			fragment.entryPoint = StringView(fragmentEntry);
+			fragment.targetCount = 1;
+			fragment.targets = &target;
+			RenderPipelineDescriptor desc = Default;
+			desc.label = StringView(label);
+			desc.layout = pipelineLayout;
+			desc.vertex.module = module;
+			desc.vertex.entryPoint = StringView("vs_fullscreen");
+			desc.vertex.bufferCount = 0;
+			desc.vertex.buffers = nullptr;
+			desc.primitive.topology = PrimitiveTopology::TriangleList;
+			desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+			desc.primitive.frontFace = FrontFace::CCW;
+			desc.primitive.cullMode = CullMode::None;
+			desc.depthStencil = nullptr;
+			desc.fragment = &fragment;
+			desc.multisample.count = 1;
+			desc.multisample.mask = 0xFFFFFFFFu;
+			desc.multisample.alphaToCoverageEnabled = false;
+			return wgpuDevice().createRenderPipeline(desc);
+		};
+		w.hbaoPipeline = pass("world hbao", "fs_hbao", TextureFormat::R8Unorm, nullptr, w.hbaoPipelineLayout);
+		w.hbaoApplyPipeline = pass("world hbao apply", "fs_apply", w.hdrFormat, &over, w.hbaoApplyPipelineLayout);
+
+		const bool invalid = scope.failed();
+		module.release();
+		return w.hbaoPipeline && w.hbaoApplyPipeline && !invalid;
+	}
+
+	// The AO target, half the surface, and the two passes' groups; and
+	// last frame's color and positions.
+	bool ensureHbaoTargets(int width, int height)
+	{
+		w.lastColorTexture = createTarget("world last frame color", TextureFormat::RGBA8Unorm,
+			TextureUsage::RenderAttachment | TextureUsage::TextureBinding, width, height);
+		w.lastPositionsTexture = createTarget("world last frame positions", gBufferFormat(GPosition),
+			TextureUsage::CopyDst | TextureUsage::TextureBinding, width, height);
+		w.hbaoTexture = createTarget("world hbao", TextureFormat::R8Unorm,
+			TextureUsage::RenderAttachment | TextureUsage::TextureBinding, std::max(1, width / 2), std::max(1, height / 2));
+		if (!w.lastColorTexture || !w.lastPositionsTexture || !w.hbaoTexture) { return false; }
+		w.lastColorView = createTargetView(w.lastColorTexture, "world last frame color view", TextureFormat::RGBA8Unorm,
+			TextureAspect::All, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+		w.lastPositionsView = createTargetView(w.lastPositionsTexture, "world last frame positions view",
+			gBufferFormat(GPosition), TextureAspect::All, TextureUsage::TextureBinding);
+		w.hbaoView = createTargetView(w.hbaoTexture, "world hbao view", TextureFormat::R8Unorm,
+			TextureAspect::All, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+		if (!w.lastColorView || !w.lastPositionsView || !w.hbaoView) { return false; }
+
+		auto group = [&](BindGroupLayout layout, uint32_t textureBinding, TextureView view, const char *label)
+		{
+			BindGroupEntry entries[4];
+			const uint32_t bindings[4] = { 0, 1, textureBinding, 4 };
+			for (uint32_t i = 0; i < 4; i++) { entries[i] = Default; entries[i].binding = bindings[i]; }
+			entries[0].buffer = w.hbaoUniformBuffer;
+			entries[0].size = sizeof(HbaoUniforms);
+			entries[1].textureView = w.gBufferViews[GPosition];
+			entries[2].textureView = view;
+			entries[3].sampler = w.postSampler;
+			BindGroupDescriptor desc = Default;
+			desc.label = StringView(label);
+			desc.layout = layout;
+			desc.entryCount = 4;
+			desc.entries = entries;
+			return wgpuDevice().createBindGroup(desc);
+		};
+		w.hbaoBindGroup = group(w.hbaoBindGroupLayout, 2, w.gBufferViews[GNormal], "world hbao bind group");
+		w.hbaoApplyBindGroup = group(w.hbaoApplyBindGroupLayout, 3, w.hbaoView, "world hbao apply bind group");
+		return w.hbaoBindGroup && w.hbaoApplyBindGroup;
 	}
 
 	// ---- Milestone 14: the sky (sky.wgsl) -------------------------------
@@ -3388,7 +3609,7 @@ namespace
 		}
 
 		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines()
-			|| !createSky() || !createPost() || !createBloom())
+			|| !createSky() || !createPost() || !createBloom() || !createHbao())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -3634,7 +3855,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.ambientColor = glm::vec4(lighting.ambientColor, 0.f);
 	uniforms.lightParams = glm::ivec4(lighting.skyLightIntensity,
 		(int)std::min<size_t>(w.frameLights.size(), (size_t)std::max(lighting.maxLights, 0)),
-		drawShadows ? shadows : 0, 0);
+		drawShadows ? shadows : 0, lighting.ssr ? 1 : 0);
+	uniforms.projection = projection;
 
 	// Milestone 13: the sun's cascades, camera-relative. GL's matrices
 	// take world positions to -1..1 depth; here the camera position is
@@ -3684,6 +3906,14 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	w.dirtTextures[0] = lighting.lensDirtTexture;
 	w.dirtTextures[1] = lighting.hitDirtTexture;
 	w.dirtTextures[2] = lighting.waterDirtTexture;
+
+	// Milestone 17: the AO's matrices and fade distance.
+	HbaoUniforms hbao;
+	hbao.view = camera.getViewMatrix();
+	hbao.projection = projection;
+	hbao.params = glm::vec4(lighting.aoViewDistance, 0.f, 0.f, 0.f);
+	wgpuQueue().writeBuffer(w.hbaoUniformBuffer, 0, &hbao, sizeof(hbao));
+	w.ssao = lighting.ssao;
 
 	const auto recordStart = std::chrono::steady_clock::now();
 
@@ -4125,10 +4355,10 @@ void renderTransparent()
 				pass.release();
 			}
 
-			// The peel (5): what lies beyond that surface, into the HDR color.
+			// The peel (5): what lies beyond that surface, into the G-buffer.
 			if (peelCount)
 			{
-				RenderPassEncoder pass = beginHdrPass(encoder, "world peel pass");
+				RenderPassEncoder pass = beginGBufferPass(encoder, false, "world peel pass");
 				bindFaces(pass, w.peelPipeline, true);
 				drawRecords(pass, mode, peelFirst, peelCount);
 				pass.end();
@@ -4143,7 +4373,7 @@ void renderTransparent()
 
 		// The final transparency (7).
 		{
-			RenderPassEncoder pass = beginHdrPass(encoder, "world transparent pass");
+			RenderPassEncoder pass = beginGBufferPass(encoder, false, "world transparent pass");
 			bindFaces(pass, waterPeel ? w.finalPeelPipeline : w.finalPlainPipeline, true);
 			drawRecords(pass, mode, finalFirst, finalCount);
 			pass.end();
@@ -4355,6 +4585,20 @@ void shutdown()
 		if (*buffer) { buffer->release(); *buffer = nullptr; }
 	}
 	if (w.dirtSampler) { w.dirtSampler.release(); w.dirtSampler = nullptr; }
+	// Milestone 17.
+	for (RenderPipeline *pipeline : { &w.hbaoPipeline, &w.hbaoApplyPipeline, &w.lastColorPipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	for (PipelineLayout *layout : { &w.hbaoPipelineLayout, &w.hbaoApplyPipelineLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (BindGroupLayout *layout : { &w.hbaoBindGroupLayout, &w.hbaoApplyBindGroupLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	if (w.hbaoUniformBuffer) { w.hbaoUniformBuffer.release(); w.hbaoUniformBuffer = nullptr; }
 	if (w.blackView) { w.blackView.release(); w.blackView = nullptr; }
 	if (w.blackTexture) { w.blackTexture.destroy(); w.blackTexture.release(); w.blackTexture = nullptr; }
 	for (RenderPipeline *pipeline : { &w.toneMapToTexturePipeline, &w.toneMapToSurfacePipeline, &w.fxaaPipeline })

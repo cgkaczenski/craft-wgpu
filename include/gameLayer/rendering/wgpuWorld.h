@@ -197,6 +197,13 @@ namespace wgpuWorld
 		uint32_t waterDirtTexture = 0;
 		float hitLensDirt = 0;    // getHitLensDirt()
 		float waterDrops = 0;     // waterDropsStrength
+
+		// Milestone 17: the renderer's ssao switch (GL's HBAO pass) and the
+		// view distance its AO fades out at ((squareSize / 2) * 16); the
+		// SSR setting (the lit shader's c_SSR).
+		bool ssao = true;
+		float aoViewDistance = 128;
+		bool ssr = true;
 	};
 
 	// Records the world's opaque pass for this frame and prepares the

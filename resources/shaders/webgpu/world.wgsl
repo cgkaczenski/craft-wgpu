@@ -27,7 +27,8 @@ struct Uniforms {
     ambientColor: vec4f,
     // x GL's u_skyLightIntensity (0-15, the time of day's sky light), y the
     // point lights in `lights` (0 with lights off), z the shadows setting
-    // (0 off, 1 hard, 2 soft; milestone 13), w unused.
+    // (0 off, 1 hard, 2 soft; milestone 13), w 1 when the SSR setting is on
+    // (milestone 17; GL's c_SSR).
     lightParams: vec4i,
     // The sun's shadow cascades (GL's u_cascadedShadowMatrix), nearest
     // first: camera-relative positions to each shadow map's clip space,
@@ -38,6 +39,10 @@ struct Uniforms {
     // (the fogGradient setting; 0 disables the near fog), z 1 underwater
     // (GL fogs only above water), w unused.
     fogParams: vec4f,
+    // Milestone 17: the camera's projection (perspectiveRH_ZO; GL's
+    // u_cameraProjection, whose x, y and w rows are the same), view space
+    // to clip space, for the reflections' ray march.
+    projection: mat4x4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

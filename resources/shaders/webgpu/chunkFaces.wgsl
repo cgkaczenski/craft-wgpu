@@ -51,6 +51,13 @@
 // fs_blend both shade with it, into the HDR target's linear light; the
 // composite tone maps it for the screen.
 //
+// Reflections (milestone 17): GL's SSR, inside the lit shader as there.
+// Smooth faces march their reflected ray through last frame's positions
+// and take last frame's color where it lands. fs_blend now writes the
+// positions and normals too (GL's transparent passes draw into all of
+// fboMain but its bloom), so the AO and the next frame's reflections see
+// the water's surface, not the lake bed.
+//
 // Conventions (docs/roadmap.md): positions camera-relative, depth 0..1.
 // No animation yet (grass, leaves sway and water waves in defaultShader.vert).
 
@@ -74,6 +81,14 @@
 
 // The decal's crack.png: 10 frames side by side (milestone 10a).
 @group(1) @binding(2) var crackTexture: texture_2d<f32>;
+
+// Milestone 17, also in the frame group: last frame's HDR color (GL's
+// fboLastFrame, RGBA8: clamped to 0..1) and view-space positions
+// (fboLastFramePositions), sampled as GL's FBO textures are (linear,
+// clamped).
+@group(1) @binding(4) var lastFrameColor: texture_2d<f32>;
+@group(1) @binding(5) var lastFramePositions: texture_2d<f32>;
+@group(1) @binding(6) var lastFrameSampler: sampler;
 
 override passMode: u32 = 1u;
 
@@ -269,6 +284,7 @@ struct Shaded {
     roughness: f32,
     bloom: vec3f,   // the emissive light for bloom
     dotNV: f32,
+    F0: vec3f,      // the reflectance at normal incidence
 };
 
 // defaultShader.frag's lit path (u_shaders on), fog aside.
@@ -315,7 +331,183 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     s.normal = N;
     s.roughness = m.roughness;
     s.bloom = m.emissive * 0.12 * albedo;
+    s.F0 = F0;
     return s;
+}
+
+// ---- Milestone 17: screen-space reflections -----------------------------
+// defaultShader.frag's SSR, RayMarch and BinarySearch (after Imanol
+// Fotia's Epsilon Engine). Coordinates stay GL's (x * 0.5 + 0.5 with v
+// running up), so its bounds and edge tests read the same; lastUv flips v
+// for WebGPU's top-first textures when sampling.
+
+const ssrMinRayStep = 1.0;
+const ssrMaxSteps = 50;
+const ssrBinarySearchSteps = 20;
+const ssrMaxRayStep = 150.2;
+const ssrMaxRayDelta = 10.0;
+
+fn ssrProject(p: vec3f) -> vec2f {
+    let c = u.projection * vec4f(p, 1.0);
+    return c.xy / c.w * 0.5 + 0.5;
+}
+
+fn lastUv(coord: vec2f) -> vec2f {
+    return vec2f(coord.x, 1.0 - coord.y);
+}
+
+// The view-space depth last frame had there. GL asks for mip 2 of a texture
+// with one mip and a non-mipmap filter, which reads level 0.
+fn lastDepthAt(coord: vec2f) -> f32 {
+    return textureSampleLevel(lastFramePositions, lastFrameSampler, lastUv(coord), 0.0).z;
+}
+
+struct Ray {
+    dir: vec3f,
+    hit: vec3f,
+    dDepth: f32,
+};
+
+// Halves the step, toward the surface, 20 times.
+fn ssrBinarySearch(ray: ptr<function, Ray>, oldValue: vec2f) -> vec2f {
+    var found = oldValue;
+    for (var i = 0; i < ssrBinarySearchSteps; i++) {
+        let coord = ssrProject((*ray).hit);
+        let depth = lastDepthAt(coord);
+        if (depth < -1000.0) { continue; }
+        found = coord;
+        (*ray).dDepth = (*ray).hit.z - depth;
+        (*ray).dir *= 0.5;
+        if ((*ray).dDepth > 0.0) { (*ray).hit += (*ray).dir; } else { (*ray).hit -= (*ray).dir; }
+    }
+    let coord = ssrProject((*ray).hit);
+    if (!(lastDepthAt(coord) < -1000.0)) { found = coord; }
+    return found;
+}
+
+struct RayHit {
+    coord: vec2f,
+    hit: bool,
+};
+
+// Steps along `dir` (longer the more the surface faces the eye) until the
+// ray is behind what last frame drew, then searches back for the surface.
+fn ssrRayMarch(dir: vec3f, start: vec3f, worldNormal: vec3f, viewDir: vec3f) -> RayHit {
+    var ray: Ray;
+    ray.dir = dir * mix(ssrMinRayStep, ssrMaxRayStep, abs(dot(worldNormal, viewDir)));
+    ray.hit = start;
+    ray.dDepth = 0.0;
+    var result: RayHit;
+    result.coord = vec2f(0.0);
+    result.hit = false;
+    for (var i = 0; i < ssrMaxSteps; i++) {
+        ray.hit += ray.dir;
+        let coord = ssrProject(ray.hit);
+        if (coord.x > 1.0 || coord.y > 1.0 || coord.x < -1.0 || coord.y < -1.0) { break; }
+        let depth = lastDepthAt(coord);
+        if (depth > 1000.0) { continue; }
+        if (depth < -1000.0) { continue; }
+        ray.dDepth = ray.hit.z - depth;
+        if ((ray.dir.z - ray.dDepth) < ssrMaxRayStep && ray.dDepth <= 0.0) {
+            let found = ssrBinarySearch(&ray, coord);
+            if (ray.dDepth < -ssrMaxRayDelta) { break; }
+            if (lastDepthAt(found) < -10000.0) { break; }
+            result.coord = found;
+            result.hit = true;
+            break;
+        }
+    }
+    return result;
+}
+
+// GL's murmurHash33 and hash33: three random floats in 0..1 from a position's bits.
+fn murmurHash33(source: vec3u) -> vec3u {
+    let M = 0x5bd1e995u;
+    var src = source;
+    var h = vec3u(1190494759u, 2147483647u, 3559788179u);
+    src *= M;
+    src ^= src >> vec3u(24u);
+    src *= M;
+    h *= M;
+    h ^= vec3u(src.x);
+    h *= M;
+    h ^= vec3u(src.y);
+    h *= M;
+    h ^= vec3u(src.z);
+    h ^= h >> vec3u(13u);
+    h *= M;
+    h ^= h >> vec3u(15u);
+    return h;
+}
+
+fn hash33(source: vec3f) -> vec3f {
+    let h = murmurHash33(bitcast<vec3u>(source));
+    return bitcast<vec3f>((h & vec3u(0x007fffffu)) | vec3u(0x3f800000u)) - 1.0;
+}
+
+// The ray's jitter, toward the normal's side, larger the rougher.
+fn computeJitter(wp: vec3f, viewNormal: vec3f, roughness: f32) -> vec3f {
+    var random = hash33(wp);
+    if (dot(random, viewNormal) <= 0.0) { random = -random; }
+    return (random * 2.0 - 1.0) * (roughness * 0.2);
+}
+
+struct Reflection {
+    color: vec3f,
+    found: bool,
+};
+
+// GL's SSR(): the color last frame had where the reflected ray lands, or
+// not found (off screen, toward the camera, faded out at the screen's edge).
+fn ssr(viewPos: vec3f, N: vec3f, roughness: f32, wp: vec3f, viewDir: vec3f, viewSpaceNormal: vec3f) -> Reflection {
+    var r: Reflection;
+    r.color = vec3f(0.0);
+    r.found = false;
+    let reflected = normalize(reflect(normalize(viewPos), viewSpaceNormal));
+    if (reflected.z > 0.0) { return r; }
+    let jitter = computeJitter(wp, viewSpaceNormal, roughness);
+    let march = ssrRayMarch(normalize((jitter + reflected) * max(ssrMinRayStep, -viewPos.z)), viewPos, N, viewDir);
+    if (!march.hit) { return r; }
+    let dCoords = smoothstep(vec2f(0.2), vec2f(0.6), abs(vec2f(0.5) - march.coord));
+    let screenEdgeFactor = clamp(1.0 - (dCoords.x + dCoords.y), 0.0, 1.0);
+    if (screenEdgeFactor * -reflected.z <= 0.001) { return r; }
+    r.color = textureSampleLevel(lastFrameColor, lastFrameSampler, lastUv(march.coord), 0.0).rgb;
+    r.found = true;
+    return r;
+}
+
+fn fresnelSchlickRoughness(cosTheta: f32, F0: vec3f, roughness: f32) -> vec3f {
+    return F0 + (max(vec3f(1.0 - roughness), F0) - F0) * pow(max(1.0 - cosTheta, 0.0), 5.0);
+}
+
+// defaultShader.frag's "ssr" block, with the SSR setting on, on faces
+// smoother than 0.45. GL reads the face's view position from last frame's
+// positions at the pixel; this uses the face's own, which is the same
+// while the camera is still and right while it moves. Water takes the
+// reflection whole (its mix with what is under it comes after); anything
+// else mixes it in by its fresnel and roughness. The ray steps by the
+// face's own normal for water (GL's v_normal), the mapped one otherwise.
+fn reflectSurface(in: VertexOutput, s: Shaded) -> Reflection {
+    var r: Reflection;
+    r.color = s.color;
+    r.found = false;
+    if (u.lightParams.w == 0 || s.roughness >= 0.45) { return r; }
+    let water = isWater(in);
+    let viewPos = (u.view * vec4f(in.relative, 1.0)).xyz;
+    let viewSpaceNormal = normalize((u.view * vec4f(s.normal, 0.0)).xyz);
+    var stepNormal = s.normal;
+    if (water) { stepNormal = in.normal; }
+    let V = -normalize(in.relative);
+    let found = ssr(viewPos, stepNormal, s.roughness * s.roughness, in.relative, V, viewSpaceNormal);
+    if (!found.found) { return r; }
+    r.found = true;
+    if (water) {
+        r.color = found.color;
+        return r;
+    }
+    let fresnel = fresnelSchlickRoughness(s.dotNV, s.F0, s.roughness);
+    r.color = mix(mix(found.color, s.color, fresnel), s.color, pow(s.roughness, 0.5));
+    return r;
 }
 
 // defaultShader.frag's computeFog (after Sildur's shaders, as GL notes):
@@ -369,8 +561,9 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> GBuffe
     if (t.albedo.a <= 0.0) { discard; }
 
     let s = shade(in, t, frontFacing);
+    let lit = reflectSurface(in, s).color;
     var out: GBuffer;
-    out.color = vec4f(applyFog(in, s.color), 1.0);
+    out.color = vec4f(applyFog(in, lit), 1.0);
     out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, s.roughness);
     out.normal = packNormal(s.normal);
     out.bloom = vec4f(s.bloom, 0.0);
@@ -392,8 +585,28 @@ fn fs_waterDepth(in: VertexOutput) {
     if (!isWater(in)) { discard; }
 }
 
+// What the transparent passes write: the color, blended; the positions
+// (roughness in w) and normals over what was there, as GL's (blending is
+// on for its color target only); bloom's target masked (GL turns its draw
+// buffer off for these passes), though WebGPU still wants the value.
+struct BlendOutput {
+    @location(0) color: vec4f,
+    @location(1) position: vec4f,
+    @location(2) normal: vec4u,
+    @location(3) bloom: vec4f,
+};
+
+fn blendOutput(in: VertexOutput, s: Shaded, color: vec4f) -> BlendOutput {
+    var out: BlendOutput;
+    out.color = color;
+    out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, s.roughness);
+    out.normal = packNormal(s.normal);
+    out.bloom = vec4f(0.0);
+    return out;
+}
+
 @fragment
-fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> @location(0) vec4f {
+fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> BlendOutput {
     let t = readTexels(in);
     let pixel = vec2i(in.position.xy);
 
@@ -405,9 +618,10 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> @loca
     if (t.albedo.a <= 0.0) { discard; }
 
     let s = shade(in, t, frontFacing);
+    let reflection = reflectSurface(in, s);
 
     // Glass and ice: lit, with GL's alpha (more opaque at grazing angles).
-    if (!isWater(in)) { return vec4f(applyFog(in, s.color), s.alpha); }
+    if (!isWater(in)) { return blendOutput(in, s, vec4f(applyFog(in, reflection.color), s.alpha)); }
 
     // Water: the lit surface mixed, by the view angle, with what is under it.
     let mixFactor = clamp(pow(1.0 - clamp(s.dotNV, 0.0, 1.0), 2.0) * 0.8 + 0.1, 0.0, 1.0);
@@ -422,12 +636,15 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> @loca
         // animation.
         var under = textureLoad(peelColor, pixel, 0).rgb;
         under = mix(under, u.waterColor.rgb * 0.7, 0.6 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0));
-        return vec4f(applyFog(in, mix(under, s.color, mixFactor)), 1.0);
+        return blendOutput(in, s, vec4f(applyFog(in, mix(under, reflection.color, mixFactor)), 1.0));
     }
 
-    // No peel: the water itself is see-through, more so looking down.
-    let depthMix = 0.4 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0);
-    return vec4f(applyFog(in, mix(s.color, u.waterColor.rgb * 0.7, depthMix)), pow(mixFactor, 0.7));
+    // No peel: the water itself is see-through, more so looking down; less
+    // darkened where it reflects.
+    let darken = select(0.4, 0.2, reflection.found);
+    let depthMix = darken * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0);
+    return blendOutput(in, s, vec4f(applyFog(in, mix(reflection.color, u.waterColor.rgb * 0.7, depthMix)),
+        pow(mixFactor, 0.7)));
 }
 
 // The crack (decal.frag): frame planes.z of the strip, opaque where drawn.

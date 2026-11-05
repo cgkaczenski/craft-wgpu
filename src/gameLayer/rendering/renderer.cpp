@@ -3185,6 +3185,10 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	lighting.waterDirtTexture = programData.waterDirtTexture.id;
 	lighting.hitLensDirt = getHitLensDirt();
 	lighting.waterDrops = waterDropsStrength;
+	// Milestone 17: the AO and the reflections.
+	lighting.ssao = programData.renderer.ssao;
+	lighting.aoViewDistance = (chunkSystem.squareSize / 2.f) * 16.f;
+	lighting.ssr = getShadingSettings().SSR != 0;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif
