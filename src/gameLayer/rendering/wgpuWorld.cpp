@@ -13,7 +13,7 @@
 //   - the UV table beside the corner table, both storage buffers;
 //   - one 128x128 texture_2d_array, a layer per distinct block texture, filled
 //     and mipmapped by blockTextures.wgsl from the loader's wgpu2d textures;
-//   - a slot -> layer table standing in for the u_textureSamplerers handles.
+//   - a slot -> layer table, the loader's texture slots to array layers.
 // Milestone 8 draws the visible chunks with indirect draws, as GL's
 // glMultiDrawElementsIndirect: one 16-byte argument record per chunk, built
 // from the culled list and written to an indirect buffer each frame, then one
@@ -552,9 +552,9 @@ namespace
 		std::vector<float> blockUVs; // 4 corners x 2 floats per orientation
 		Buffer blockUVBuffer = nullptr;
 
-		// The loader's handle table (BlocksLoader::gpuIds) and what is built
-		// from it: the texture array, its view, the slot -> layer table.
-		std::vector<uint64_t> textureHandles;
+		// The loader's texture slots (BlocksLoader::gpuIds) and what is built
+		// from them: the texture array, its view, the slot -> layer table.
+		std::vector<uint64_t> textureSlots;
 		bool texturesDirty = false;
 		Texture textureArray = nullptr;
 		TextureView textureArrayView = nullptr;
@@ -1990,36 +1990,36 @@ namespace
 		return w.textureArray.createView(viewDesc);
 	}
 
-	// Builds the texture array and the slot -> layer table from the handle
-	// table. One layer per distinct texture: missing maps all point at the
+	// Builds the texture array and the slot -> layer table from the
+	// texture slots. One layer per distinct texture: missing maps all point at the
 	// loader's four defaults, so ~2000 slots share far fewer textures.
 	bool buildBlockTextures()
 	{
-		if (w.textureHandles.empty()) { return false; }
+		if (w.textureSlots.empty()) { return false; }
 		if (!ensureBlockTexturePipelines()) { return false; }
 		const auto start = std::chrono::steady_clock::now();
 
-		// A handle names a texture in its low 32 bits. Anything that is not a
-		// live wgpu2d texture (a GL-only name, a zero) shows the loader's
-		// default texture, slot 0, as a missing bindless handle would not.
-		auto textureOf = [](uint64_t handle) -> uint32_t
+		// A slot holds its texture's wgpu2d id. Anything that is not a live
+		// wgpu2d texture (a zero, an id since freed) shows the loader's
+		// default texture, slot 0.
+		auto textureOf = [](uint64_t slot) -> uint32_t
 		{
-			const uint32_t id = (uint32_t)(handle & 0xFFFFFFFFu);
-			return ((handle >> 32) && wgpuTextureView(id)) ? id : 0;
+			const uint32_t id = (uint32_t)slot;
+			return (slot <= 0xFFFFFFFFu && wgpuTextureView(id)) ? id : 0;
 		};
-		const uint32_t fallback = textureOf(w.textureHandles[0]);
+		const uint32_t fallback = textureOf(w.textureSlots[0]);
 		if (!fallback)
 		{
 			std::cerr << "WebGPU world: the default block texture is not a wgpu2d texture\n";
 			return false;
 		}
 
-		std::vector<uint32_t> layerOfSlot(w.textureHandles.size());
+		std::vector<uint32_t> layerOfSlot(w.textureSlots.size());
 		std::vector<uint32_t> textureOfLayer;
 		std::unordered_map<uint32_t, uint32_t> layerOfTexture;
-		for (size_t slot = 0; slot < w.textureHandles.size(); slot++)
+		for (size_t slot = 0; slot < w.textureSlots.size(); slot++)
 		{
-			uint32_t id = textureOf(w.textureHandles[slot]);
+			uint32_t id = textureOf(w.textureSlots[slot]);
 			if (!id) { id = fallback; }
 			auto found = layerOfTexture.find(id);
 			if (found == layerOfTexture.end())
@@ -2176,7 +2176,7 @@ namespace
 		if (!w.textureArrayView || !w.textureLayerBuffer || !w.sampler || scope.failed()) { return false; }
 
 		const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
-		std::cout << "WebGPU world block textures: " << layers << " layers for " << w.textureHandles.size()
+		std::cout << "WebGPU world block textures: " << layers << " layers for " << w.textureSlots.size()
 			<< " slots, " << blockTextureSize << "x" << blockTextureSize << " x " << blockTextureLevels
 			<< " levels, recorded in " << ms << " ms\n";
 		return true;
@@ -4110,9 +4110,9 @@ void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<fl
 	w.blockGeometryDirty = true;
 }
 
-void setBlockTextures(const std::vector<uint64_t> &handles)
+void setBlockTextures(const std::vector<uint64_t> &slots)
 {
-	w.textureHandles = handles;
+	w.textureSlots = slots;
 	w.texturesDirty = true;
 }
 
@@ -4645,6 +4645,12 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			<< " visible, " << facesDrawn << " faces (" << w.chunks.size() << " chunks, "
 			<< w.facesInUse << " faces in the arena)\n";
 	}
+}
+
+unsigned int newMeshId()
+{
+	static unsigned int next = 0;
+	return ++next;
 }
 
 void setMesh(unsigned int vao, const void *vertices, size_t vertexBytes,

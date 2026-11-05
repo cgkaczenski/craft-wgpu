@@ -220,10 +220,10 @@ constexpr bool hasGetDataToSend<T, std::void_t<decltype(std::declval<T>().getDat
 
 //todo remove in the future
 template <typename T, typename = void>
-constexpr bool hasSkinBindlessTexture = false;
+constexpr bool hasSkinTextureId = false;
 
 template <typename T>
-constexpr bool hasSkinBindlessTexture<T, std::void_t<decltype(std::declval<T>().skinBindlessTexture)>> = true;
+constexpr bool hasSkinTextureId<T, std::void_t<decltype(std::declval<T>().skinTextureId)>> = true;
 
 
 #pragma region has life

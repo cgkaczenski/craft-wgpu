@@ -21,7 +21,7 @@ struct Camera;
 struct PlayerConnectionData
 {
 	gl2d::Texture skin = {};
-	GLuint64 skinBindlessTexture = 0;
+	std::uint64_t skinTextureId = 0; // skin's wgpu2d id, as a texture slot
 
 	void cleanup()
 	{

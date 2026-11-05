@@ -57,9 +57,11 @@ namespace wgpuWorld
 
 	// ---- Models and items (milestone 10b) ------------------------------
 	//
-	// Meshes are named by the GL vertex array their data was made for (the
-	// null GL scaffold hands out unique names), so the draw lists below can
-	// name them the way the GL code binds them.
+	// Meshes are named by ids from newMeshId, which the models and items
+	// keep (their `vao` member) and the draw lists below name.
+
+	// A new mesh id, never 0 and never handed out before.
+	unsigned int newMeshId();
 
 	// A mesh's vertices and, if indexed, indices (indexBytes 2 or 4; 0 for
 	// none). Models use model.cpp's 36-byte vertex, items 8 floats.
@@ -107,11 +109,10 @@ namespace wgpuWorld
 	// builds for OpenGL's u_vertexData and vertexUV.
 	void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<float> &uvData);
 
-	// BlocksLoader::gpuIds, the bindless handle table the GL shader indexes
-	// with a face's texture index. On WebGPU each handle carries a wgpu2d
-	// texture id in its low 32 bits (nullGL's getTextureHandle); the world
-	// copies those textures into one texture array.
-	void setBlockTextures(const std::vector<uint64_t> &handles);
+	// BlocksLoader::gpuIds, the texture slots a face's texture index picks
+	// (4 per block), each a wgpu2d texture id. The world copies those
+	// textures into one texture array.
+	void setBlockTextures(const std::vector<uint64_t> &slots);
 
 	// A chunk's opaque faces, 4 ints each, exactly as Chunk::bake made them
 	// for OpenGL. Replaces what the chunk had; an empty vector frees it.

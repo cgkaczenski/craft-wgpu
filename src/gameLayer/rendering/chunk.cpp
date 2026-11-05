@@ -2421,18 +2421,8 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 
 	if (updateGeometry)
 	{
-		glBindBuffer(GL_ARRAY_BUFFER, opaqueGeometryBuffer);
-
-		//glBufferStorage(GL_ARRAY_BUFFER, opaqueGeometry.size() * sizeof(opaqueGeometry[0]),
-		//	opaqueGeometry.data(), GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT);
-		glBufferData(GL_ARRAY_BUFFER, opaqueGeometry.size() * sizeof(opaqueGeometry[0]),
-			opaqueGeometry.data(), GL_STATIC_DRAW);
-
 		elementCountSize = opaqueGeometry.size() / 4; //todo magic number
 
-		glBindBuffer(GL_SHADER_STORAGE_BUFFER, lightsBuffer);
-		glBufferData(GL_SHADER_STORAGE_BUFFER, lights.size() * sizeof(lights[0]),
-			lights.data(), GL_STREAM_READ);
 		lightsElementCountSize = lights.size();
 
 		wgpuWorld::setChunkFaces(this, opaqueGeometry);
@@ -2443,18 +2433,11 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 
 	if (updateTransparency)
 	{
-		glBindBuffer(GL_ARRAY_BUFFER, transparentGeometryBuffer);
-		glBufferData(GL_ARRAY_BUFFER, transparentGeometry.size() * sizeof(transparentGeometry[0]),
-			transparentGeometry.data(), GL_STATIC_DRAW);
-		//glBufferStorage(GL_ARRAY_BUFFER, transparentGeometry.size() * sizeof(transparentGeometry[0]),
-		//	transparentGeometry.data(), GL_MAP_PERSISTENT_BIT | GL_MAP_WRITE_BIT);
-
 		transparentElementCountSize = transparentGeometry.size() / 4; //todo magic number
 
 		wgpuWorld::setChunkTransparentFaces(this, transparentGeometry);
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
 
 }
 
@@ -2523,46 +2506,13 @@ bool Chunk::shouldBakeOnlyBecauseOfTransparency(Chunk *left, Chunk *right, Chunk
 
 void Chunk::createGpuData()
 {
-	//unsigned char winding[4] = {0,1,2,4};
-	unsigned char winding[4] = {0,1,2,3};
-
-	glGenBuffers(1, &opaqueGeometryBuffer);
-	glGenBuffers(1, &opaqueGeometryIndex);
-	glGenVertexArrays(1, &vao);
-	glBindVertexArray(vao);
-	glBindBuffer(GL_ARRAY_BUFFER, opaqueGeometryBuffer);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, opaqueGeometryIndex);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(winding), winding, GL_STATIC_DRAW);
-	setupVertexAttributes();
-
-	glGenBuffers(1, &transparentGeometryBuffer);
-	glGenBuffers(1, &transparentGeometryIndex);
-	glGenVertexArrays(1, &transparentVao);
-	glBindVertexArray(transparentVao);
-	glBindBuffer(GL_ARRAY_BUFFER, transparentGeometryBuffer);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, transparentGeometryIndex);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(winding), winding, GL_STATIC_DRAW);
-	setupVertexAttributes();
-
-	glBindVertexArray(0);
-
-	glGenBuffers(1, &lightsBuffer);
-	glBindBuffer(GL_SHADER_STORAGE_BUFFER, lightsBuffer);
-	glBindBuffer(GL_SHADER_STORAGE_BUFFER, 0);
-
+	// Nothing to make: wgpuWorld keys a chunk's faces by the chunk itself
+	// (setChunkFaces, setChunkTransparentFaces), on the first upload.
 }
 
 void Chunk::clearGpuData(BigGpuBuffer *gpuBuffer)
 {
 	wgpuWorld::removeChunk(this);
-
-	glDeleteBuffers(1, &opaqueGeometryBuffer);
-	glDeleteBuffers(1, &opaqueGeometryIndex);
-	glDeleteBuffers(1, &transparentGeometryBuffer);
-	glDeleteBuffers(1, &transparentGeometryIndex);
-	glDeleteBuffers(1, &lightsBuffer);
-	glDeleteVertexArrays(1, &vao);
-	glDeleteVertexArrays(1, &transparentVao);
 
 	if (gpuBuffer)
 	{

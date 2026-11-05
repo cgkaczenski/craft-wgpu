@@ -2766,7 +2766,7 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	AdaptiveExposure &adaptiveExposure,
 	bool showLightLevels, glm::dvec3 pointPos, bool underWater, int screenX, int screenY,
 	float deltaTime, float dayTime, 
-	GLuint64 currentSkinBindlessTexture, bool &playerClicked, float playerRunning,
+	std::uint64_t currentSkinTextureId, bool &playerClicked, float playerRunning,
 	BoneTransform &playerHand, int currentHeldItemIndex, float waterDropsStrength,
 	bool showHand, std::unordered_map<std::uint64_t, PlayerConnectionData> &playersConnectionData
 	)
@@ -3856,7 +3856,7 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 		renderEntities(deltaTime, c, modelsManager, blocksLoader,
 			entityManager, vp, c.getProjectionMatrix(), viewMatrix, posFloat, posInt,
 			programData.renderer.defaultShader.shadingSettings.exposure, chunkSystem, skyLightIntensity,
-			currentSkinBindlessTexture, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
+			currentSkinTextureId, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
 			showHand, playersConnectionData);
 		// The world's transparent passes come after the entities, as here.
 		wgpuWorld::renderTransparent();
@@ -3956,7 +3956,7 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 		renderEntities(deltaTime, c, modelsManager, blocksLoader,
 			entityManager, vp, c.getProjectionMatrix(), viewMatrix, posFloat, posInt,
 			programData.renderer.defaultShader.shadingSettings.exposure, chunkSystem, skyLightIntensity,
-			currentSkinBindlessTexture, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
+			currentSkinTextureId, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
 			showHand, playersConnectionData);
 		// The world's transparent passes come after the entities, as here.
 		wgpuWorld::renderTransparent();
@@ -4791,7 +4791,7 @@ void Renderer::renderEntities(
 	glm::vec3 posFloat,
 	glm::ivec3 posInt,
 	float exposure, ChunkSystem &chunkSystem, int 
-	skyLightIntensity, GLuint64 currentSkinBindlessTexture,
+	skyLightIntensity, std::uint64_t currentSkinTextureId,
 	bool &playerClicked, float playerRunning, BoneTransform &playerHand, int currentHeldItemIndex,
 	bool showHand, std::unordered_map<std::uint64_t, PlayerConnectionData> &playersConnectionData
 	)
@@ -4826,10 +4826,10 @@ void Renderer::renderEntities(
 		glm::ivec3 entityPositionInt = {};
 		glm::vec3 entityPositionFloat = {};
 		glm::vec3 color = {1,1,1}; float lightLevels = 15;
-		GLuint64 textureId0;
-		GLuint64 textureId1;
-		GLuint64 textureId2;
-		GLuint64 textureId3;
+		std::uint64_t textureId0;
+		std::uint64_t textureId1;
+		std::uint64_t textureId2;
+		std::uint64_t textureId3;
 	};
 
 	static std::vector<glm::mat4> skinningMatrix;
@@ -4840,7 +4840,7 @@ void Renderer::renderEntities(
 
 	// The same draws, for the WebGPU entity pass: bone matrices and
 	// per-entity data as the GL buffers get them, textures as wgpu2d ids (a
-	// handle carries its texture's id in the low 32 bits; see nullGL.cpp).
+	// texture slot is its texture's id, 0 for none).
 	static std::vector<glm::mat4> wgpuBones;
 	static std::vector<wgpuWorld::ModelInstance> wgpuModels;
 	static std::vector<wgpuWorld::ItemInstance> wgpuItems;
@@ -4848,7 +4848,7 @@ void Renderer::renderEntities(
 	wgpuModels.clear();
 	wgpuItems.clear();
 
-	auto textureIdOf = [](GLuint64 handle) -> uint32_t { return (handle >> 32) ? (uint32_t)handle : 0; };
+	auto textureIdOf = [](std::uint64_t slot) -> uint32_t { return (uint32_t)slot; };
 
 	auto addModel = [&](Model &model, const glm::mat4 *matrices, size_t count, const PerEntityData &data)
 	{
@@ -4963,15 +4963,15 @@ void Renderer::renderEntities(
 			//handItemMatrix = glm::translate(glm::vec3{0,0,2});
 
 			PerEntityData data = {};
-			//data.textureId1 = currentSkinBindlessTexture;
-			//data.textureId0 = currentSkinBindlessTexture;
-			//data.textureId2 = currentSkinBindlessTexture;
-			//data.textureId3 = currentSkinBindlessTexture;
+			//data.textureId1 = currentSkinTextureId;
+			//data.textureId0 = currentSkinTextureId;
+			//data.textureId2 = currentSkinTextureId;
+			//data.textureId3 = currentSkinTextureId;
 
-			data.textureId0 = modelsManager.temporaryPlayerHandBindlessTexture;
-			data.textureId1 = modelsManager.temporaryPlayerHandBindlessTexture;
-			data.textureId2 = modelsManager.temporaryPlayerHandBindlessTexture;
-			data.textureId3 = modelsManager.temporaryPlayerHandBindlessTexture;
+			data.textureId0 = modelsManager.temporaryPlayerHandTextureId;
+			data.textureId1 = modelsManager.temporaryPlayerHandTextureId;
+			data.textureId2 = modelsManager.temporaryPlayerHandTextureId;
+			data.textureId3 = modelsManager.temporaryPlayerHandTextureId;
 
 
 			glm::dvec3 position = glm::dvec3(posInt) + glm::dvec3(posFloat);
@@ -5075,10 +5075,10 @@ void Renderer::renderEntities(
 				if (found != playersConnectionData.end())
 				{
 					//todo armour here!
-					data.textureId0 = found->second.skinBindlessTexture;
+					data.textureId0 = found->second.skinTextureId;
 					data.textureId1 = modelsManager.gpuIds[ModelsManager::HelmetTestTexture];
-					data.textureId2 = found->second.skinBindlessTexture;
-					data.textureId3 = found->second.skinBindlessTexture;
+					data.textureId2 = found->second.skinTextureId;
+					data.textureId3 = found->second.skinTextureId;
 				}
 				else
 				{
@@ -5097,11 +5097,11 @@ void Renderer::renderEntities(
 				data.textureId3 = data.textureId0;
 			}
 
-			//if constexpr (hasSkinBindlessTexture<decltype(e.second)>)
+			//if constexpr (hasSkinTextureId<decltype(e.second)>)
 			//{
-			//	if (e.second.skinBindlessTexture)
+			//	if (e.second.skinTextureId)
 			//	{
-			//		data.textureId = e.second.skinBindlessTexture;
+			//		data.textureId = e.second.skinTextureId;
 			//	}
 			//	else
 			//	{
@@ -5298,14 +5298,9 @@ void Renderer::renderEntities(
 
 
 	static gl2d::Texture tempWhite;
-	static GLuint64 tempWhiteBindlessHandle = 0;
-	
 	if (!tempWhite.id)
 	{
 		tempWhite.create1PxSquare();
-	
-		tempWhiteBindlessHandle = glGetTextureHandleARB(tempWhite.id);
-		glMakeTextureHandleResidentARB(tempWhiteBindlessHandle);
 	}
 
 #pragma region item entities
@@ -5342,7 +5337,7 @@ void Renderer::renderEntities(
 					texture = geometry.model3D.gpuId;
 					if (texture == 0)
 					{
-						texture = tempWhiteBindlessHandle;
+						texture = tempWhite.id;
 					}
 
 					isA3DModel = true;

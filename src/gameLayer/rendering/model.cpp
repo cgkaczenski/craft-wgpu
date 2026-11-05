@@ -69,8 +69,7 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 	if (!temporaryPlayerHandTexture.id)
 	{
 		temporaryPlayerHandTexture.loadFromFile(RESOURCES_PATH "skins/mage.png", true);
-		temporaryPlayerHandBindlessTexture = glGetTextureHandleARB(temporaryPlayerHandTexture.id);
-		glMakeTextureHandleResidentARB(temporaryPlayerHandBindlessTexture);
+		temporaryPlayerHandTextureId = std::uint64_t(temporaryPlayerHandTexture.id);
 	}
 
 
@@ -109,8 +108,7 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 		t.createFromBuffer((char *)data, 2, 2, true, false);
 
 		texturesIds.push_back(t.id);
-		auto handle = glGetTextureHandleARB(t.id);
-		glMakeTextureHandleResidentARB(handle);
+		auto handle = std::uint64_t(t.id);
 		gpuIds.push_back(handle);
 	}
 
@@ -120,7 +118,7 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 		if (!appendMode && texturesIds[index] != texturesIds[0]) { return; } //we already have the texture
 
 		gl2d::Texture texture = {};
-		GLuint64 handle = 0;
+		std::uint64_t handle = 0;
 
 		if (isPlayerSkin)
 		{
@@ -134,17 +132,8 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 		if (texture.id)
 		{
 
-			texture.bind();
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-			glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 6.f);
-			glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 2.f);
-
-			glGenerateMipmap(GL_TEXTURE_2D);
-
-			handle = glGetTextureHandleARB(texture.id);
-			glMakeTextureHandleResidentARB(handle);
+			handle = std::uint64_t(texture.id);
 		}
 		else
 		{
@@ -221,15 +210,7 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 
 		if (scene)
 		{
-
-			glGenVertexArrays(1, &model.vao);
-			glBindVertexArray(model.vao);
-
-			glGenBuffers(1, &model.geometry);
-			glGenBuffers(1, &model.indexBuffer);
-
-			glBindBuffer(GL_ARRAY_BUFFER, model.geometry);
-			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, model.indexBuffer);
+			model.vao = wgpuWorld::newMeshId();
 
 			unsigned int vertexOffset = 0;
 
@@ -440,29 +421,9 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 
 			if (!model.vertexCount) { std::cout << "!!!!Error wrong model format!!!!!!!!!!!!!\n"; }
 
-			glBufferData(GL_ARRAY_BUFFER, vertexes.size() * sizeof(Data), vertexes.data(), GL_STATIC_DRAW);
-			glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
-
 			static_assert(sizeof(Data) == 36, "the WebGPU model pipeline reads 36-byte vertices");
 			wgpuWorld::setMesh(model.vao, vertexes.data(), vertexes.size() * sizeof(Data),
 				indices.data(), indices.size(), sizeof(unsigned int));
-
-			glEnableVertexAttribArray(0);
-			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 9, 0);
-			glEnableVertexAttribArray(1);
-			glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(float) * 9, (void *)(sizeof(float) * 3));
-			glEnableVertexAttribArray(2);
-			glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(float) * 9, (void *)(sizeof(float) * 6));
-			glEnableVertexAttribArray(3); //bone
-			glVertexAttribIPointer(3, 1, GL_SHORT, sizeof(float) * 9, (void *)(sizeof(float) * 8));
-
-			glEnableVertexAttribArray(4); //texture id
-			glVertexAttribIPointer(4, 1, GL_SHORT, sizeof(float) * 9, (void *)(sizeof(float) * 8 + sizeof(short)));
-
-
-
-			glBindVertexArray(0);
-
 		}
 		else if(reportErrors)
 		{
@@ -818,8 +779,6 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 	//todo check if it frees all of them
 	importer.FreeScene();
 
-
-	setupSSBO();
 }
 
 
@@ -922,28 +881,14 @@ void ModelsManager::clearAllModels()
 		{
 			if (texturesIds[i] != defaultTexture)
 			{
-				glDeleteTextures(1, &texturesIds[i]);
+				wgpu2d::cleanupTextureId(texturesIds[i]);
 			}
 		}
-		glDeleteTextures(1, &texturesIds[0]);
+		wgpu2d::cleanupTextureId(texturesIds[0]);
 	}
 
 	texturesIds.clear();
 	gpuIds.clear();
-
-}
-
-void ModelsManager::setupSSBO()
-{
-
-	if (!texturesSSBO)
-	{
-		glGenBuffers(1, &texturesSSBO);
-	}
-
-	glBindBuffer(GL_SHADER_STORAGE_BUFFER, texturesSSBO);
-	glBufferData(GL_SHADER_STORAGE_BUFFER, gpuIds.size() * sizeof(gpuIds[0]), gpuIds.data(), GL_STATIC_DRAW);
-	glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, texturesSSBO); //todo add some constatns here
 
 }
 
@@ -1061,9 +1006,6 @@ gl2d::Texture loadPlayerSkin(const char *path)
 void Model::cleanup()
 {
 	wgpuWorld::removeMesh(vao);
-	glDeleteBuffers(1, &indexBuffer);
-	glDeleteBuffers(1, &geometry);
-	glDeleteVertexArrays(1, &vao);
 
 	*this = {};
 }

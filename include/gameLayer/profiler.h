@@ -7,28 +7,6 @@
 #include <cstring>
 
 
-struct GPUProfiler
-{
-	std::vector<unsigned int> queryObjects;
-	std::vector<std::string> queryNames;
-	std::vector<bool> queryResults;
-	std::vector<float> queryTimersMs;
-	int currentQuery = 0;
-
-	void init(int maxQueries = 16);
-
-	void startFrame();
-
-	void cleanup();
-
-	void start(std::string name);
-
-	void end();
-
-	void getResults();
-};
-
-
 struct CharEquals
 {
 	bool operator()(const char * &__x, const char *&__y) const
@@ -37,17 +15,10 @@ struct CharEquals
 	}
 };
 
+// CPU time per frame and per named span, for the ImGui plots. (The GPU
+// timer queries GL had are gone with OpenGL, milestone 19b.)
 struct Profiler
 {
-
-	constexpr static int GPU_PROFILE_FRAMES = 5;
-	int currentGpuProfilerIndex = 0;
-
-	GPUProfiler gpuProfiler[5] = {};
-
-	bool gpuProfilingEnabeled = 0;
-	void initGPUProfiler();
-
 	bool pause = 0;
 
 	struct SavedData

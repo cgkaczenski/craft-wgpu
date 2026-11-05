@@ -1210,7 +1210,7 @@ void UiENgine::renderGameUI(float deltaTime, int w, int h
 							slotsCounter++;
 						}
 
-						GLuint textures[5] = {
+						unsigned int textures[5] = {
 							blocksLoader.texturesIdsItems[copperAxe - ItemsStartPoint],
 							blocksLoader.texturesIds[getGpuIdIndexForBlock(workBench, 0)], //todo crafting ui button
 							blocksLoader.blockUiTextures[interactingBlock].id,

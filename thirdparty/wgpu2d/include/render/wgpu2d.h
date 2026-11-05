@@ -315,6 +315,16 @@ namespace wgpu2d
 		std::vector<unsigned char> readTextureData(int mipLevel = 0, glm::ivec2 *outSize = nullptr);
 	};
 
+	// ourCraft: frees the texture with this id, for code that keeps bare
+	// ids (gl2d's glDeleteTextures). An id never issued, or already freed,
+	// is ignored; ids are never reused, so a stale one cannot free another.
+	inline void cleanupTextureId(uint32_t id)
+	{
+		Texture t;
+		t.id = id;
+		t.cleanup();
+	}
+
 	glm::vec4 computeTextureAtlas(int xCount, int yCount, int x, int y, bool flip = 0);
 	glm::vec4 computeTextureAtlasWithPadding(int mapXsize, int mapYsize, int xCount, int yCount, int x, int y, bool flip = 0);
 

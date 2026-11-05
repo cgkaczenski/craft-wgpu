@@ -4,8 +4,11 @@
 struct BlocksLoader
 {
 
-	std::vector<GLuint64> gpuIds;
-	std::vector<GLuint> texturesIds;
+	// Texture slots (4 per block: albedo, normal, material, parallax), each
+	// the wgpu2d id of the texture shown there (GL kept bindless handles
+	// here); texturesIds the same ids, as loaded.
+	std::vector<std::uint64_t> gpuIds;
+	std::vector<unsigned int> texturesIds;
 
 	//load all blocks loadallblocks
 	void loadAllTextures(std::string path, bool reportErrors);
@@ -17,14 +20,13 @@ struct BlocksLoader
 	gl2d::Texture spawnEgg;
 	gl2d::Texture spawnEggOverlay;
 
-	std::vector<GLuint64> gpuIdsItems;
-	std::vector<GLuint> texturesIdsItems;
+	std::vector<std::uint64_t> gpuIdsItems;
+	std::vector<unsigned int> texturesIdsItems;
 	
 
 	struct ItemGeometry2D
 	{
-		GLuint vao = 0;
-		GLuint buffer = 0;
+		unsigned int vao = 0; // the wgpuWorld mesh id (wgpuWorld::newMeshId)
 		unsigned int count = 0;
 
 		void clear();
@@ -32,12 +34,10 @@ struct BlocksLoader
 
 	struct ItemGeometry3D
 	{
-		GLuint vao = 0;
-		GLuint buffer = 0;
-		GLuint indexBuffer = 0;
+		unsigned int vao = 0; // the wgpuWorld mesh id (wgpuWorld::newMeshId)
 		unsigned int count = 0;
 
-		GLuint64 gpuId = 0;
+		std::uint64_t gpuId = 0; // texturesId's id, as a texture slot
 		gl2d::Texture texturesId;
 
 		void clear();

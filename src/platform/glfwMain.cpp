@@ -1,4 +1,5 @@
-#include <glad/glad.h>
+// No OpenGL header: the window is a WebGPU surface (wgpuWindow).
+#define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 #include <stb_image/stb_image.h>
 #include <stb_truetype/stb_truetype.h>
@@ -21,10 +22,10 @@
 #include <string>
 #include <vector>
 
-	#include "wgpuWindow.h"
-	#include "wgpuImgui.h"
-	#include "rendering/wgpuWorld.h"
-	#include "nullGL.h"
+#include "wgpuWindow.h"
+#include "wgpuImgui.h"
+#include "rendering/wgpuWorld.h"
+#include "nullGL.h"
 
 
 #ifdef _WIN32
@@ -40,7 +41,6 @@ extern "C"
 #if REMOVE_IMGUI == 0
 	#include "imgui.h"
 	#include "backends/imgui_impl_glfw.h"
-	#include "backends/imgui_impl_opengl3.h"
 	#include "imguiThemes.h"
 #endif
 
@@ -457,109 +457,6 @@ namespace platform
 #pragma endregion
 
 
-#ifdef __APPLE__
-static void APIENTRY appleCreateBuffers(GLsizei n, GLuint *buffers)
-{
-	glGenBuffers(n, buffers);
-}
-
-static void APIENTRY appleCreateVertexArrays(GLsizei n, GLuint *arrays)
-{
-	glGenVertexArrays(n, arrays);
-}
-
-static void APIENTRY appleBufferStorage(GLenum target, GLsizeiptr size, const void *data, GLbitfield)
-{
-	glBufferData(target, size, data, GL_STATIC_DRAW);
-}
-
-static void APIENTRY appleNamedBufferData(GLuint buffer, GLsizeiptr size, const void *data, GLenum usage)
-{
-	GLint previous = 0;
-	glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previous);
-	glBindBuffer(GL_ARRAY_BUFFER, buffer);
-	glBufferData(GL_ARRAY_BUFFER, size, data, usage);
-	glBindBuffer(GL_ARRAY_BUFFER, (GLuint)previous);
-}
-
-static GLuint64 APIENTRY appleGetTextureHandle(GLuint texture)
-{
-	return texture;
-}
-
-static void APIENTRY appleMakeTextureHandleResident(GLuint64)
-{
-}
-
-static void APIENTRY appleShaderStorageBlockBinding(GLuint, GLuint, GLuint)
-{
-}
-
-static GLuint APIENTRY appleGetProgramResourceIndex(GLuint, GLenum, const GLchar *)
-{
-	return GL_INVALID_INDEX;
-}
-
-static void APIENTRY appleMultiDrawElementsIndirect(GLenum, GLenum, const void *, GLsizei, GLsizei)
-{
-}
-
-static void APIENTRY appleUniformHandleui64(GLint, GLuint64)
-{
-}
-
-static void APIENTRY appleUniformHandleui64v(GLint, GLsizei, const GLuint64 *)
-{
-}
-
-static void APIENTRY applePushDebugGroup(GLenum, GLuint, GLsizei, const GLchar *)
-{
-}
-
-static void APIENTRY applePopDebugGroup()
-{
-}
-
-static void APIENTRY appleBlendFunci(GLuint, GLenum src, GLenum dst)
-{
-	glBlendFunc(src, dst);
-}
-
-static void installAppleGLFallbacks()
-{
-	if (!glad_glCreateBuffers) { glad_glCreateBuffers = appleCreateBuffers; }
-	if (!glad_glCreateVertexArrays) { glad_glCreateVertexArrays = appleCreateVertexArrays; }
-	if (!glad_glBufferStorage) { glad_glBufferStorage = appleBufferStorage; }
-	if (!glad_glNamedBufferData) { glad_glNamedBufferData = appleNamedBufferData; }
-	if (!glad_glGetTextureHandleARB) { glad_glGetTextureHandleARB = appleGetTextureHandle; }
-	if (!glad_glMakeTextureHandleResidentARB) { glad_glMakeTextureHandleResidentARB = appleMakeTextureHandleResident; }
-	if (!glad_glShaderStorageBlockBinding) { glad_glShaderStorageBlockBinding = appleShaderStorageBlockBinding; }
-	if (!glad_glGetProgramResourceIndex) { glad_glGetProgramResourceIndex = appleGetProgramResourceIndex; }
-	if (!glad_glMultiDrawElementsIndirect) { glad_glMultiDrawElementsIndirect = appleMultiDrawElementsIndirect; }
-	if (!glad_glUniformHandleui64ARB) { glad_glUniformHandleui64ARB = appleUniformHandleui64; }
-	if (!glad_glUniformHandleui64vARB) { glad_glUniformHandleui64vARB = appleUniformHandleui64v; }
-	if (!glad_glPushDebugGroup) { glad_glPushDebugGroup = applePushDebugGroup; }
-	if (!glad_glPopDebugGroup) { glad_glPopDebugGroup = applePopDebugGroup; }
-	if (!glad_glBlendFunci) { glad_glBlendFunci = appleBlendFunci; }
-}
-#endif
-
-bool HasExtension(const char *name)
-{
-	GLint count = 0;
-	glGetIntegerv(GL_NUM_EXTENSIONS, &count);
-
-	for (GLint i = 0; i < count; i++)
-	{
-		const char *ext = (const char *)glGetStringi(GL_EXTENSIONS, i);
-		if (strcmp(ext, name) == 0)
-			return true;
-	}
-
-	return false;
-}
-
-
 int main()
 {
 
@@ -631,8 +528,6 @@ int main()
 		return 1;
 	}
 	nullGL::install();
-
-	//enableReportGlErrors();
 
 #pragma endregion
 

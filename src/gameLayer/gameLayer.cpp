@@ -91,8 +91,6 @@ void loadOtherTextures(const char *basePath)
 		}
 
 		//programData.dudv.loadFromFile(RESOURCES_PATH "assets/otherTextures/wdudv.jpg", false, true);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	};
 
 	if (!programData.causticsTexture.id)
@@ -106,8 +104,6 @@ void loadOtherTextures(const char *basePath)
 
 		//programData.causticsTexture.loadFromFile(RESOURCES_PATH "assets/otherTextures/caustics3.png", false, true);
 		//programData.causticsTexture.loadFromFile(RESOURCES_PATH "assets/otherTextures/test.jpg", false, true);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	};
 
 	if (!programData.dudvNormal.id)
@@ -122,17 +118,12 @@ void loadOtherTextures(const char *basePath)
 		{
 			programData.dudvNormal.loadFromFile((p + "normal.jpg").c_str(), false, true); //best
 		}
-
-
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	};
 
 
 	if (!programData.aoTexture.id)
 	{
 		programData.aoTexture.loadFromFile((p+"ao.png").c_str(), false, true);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_MIRRORED_REPEAT);
 	};
 
 	if (!programData.brdfTexture.id)
@@ -312,9 +303,6 @@ bool initGame() //main server and title screen stuff
 
 	std::filesystem::create_directory(RESOURCES_PATH "../playerSettings/");
 
-
-	programData.GPUProfiler.initGPUProfiler();
-
 	gl2d::setVsync(false);
 
 	AudioEngine::init();
@@ -361,12 +349,6 @@ bool initGame() //main server and title screen stuff
 	}
 	
 	//programData.facesCount = blockData.size() / 4;
-
-	//glNamedBufferData(programData.renderer.vertexBuffer, 0, 0, GL_DYNAMIC_DRAW);
-
-	//glEnable(GL_LINE_WIDTH);
-	glLineWidth(4);
-
 
 	//KeyValuePair settings;
 	//settings.loadElementsFromFile(RESOURCES_PATH "test.txt");
@@ -484,14 +466,6 @@ bool gameLogic(float deltaTime)
 	h = platform::getWindowSizeY();
 
 	programData.ui.renderer2d.updateWindowMetrics(w, h);
-
-
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-	glEnable(GL_DEPTH_TEST);
-	glEnable(GL_CULL_FACE);
-	glDisable(GL_BLEND);
-	//glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
 #pragma endregion
 

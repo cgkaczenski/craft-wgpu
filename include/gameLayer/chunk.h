@@ -131,17 +131,15 @@ struct Chunk
 	BlocksWithDataHolder blockData;
 
 
-	GLuint opaqueGeometryBuffer = 0;
-	GLuint opaqueGeometryIndex = 0;
-	GLuint vao = 0;
+	// vao, transparentVao and lightsBuffer: always 0, named only by
+	// renderer.cpp's GL passes until milestone 19c removes them.
+	unsigned int vao = 0;
 	size_t elementCountSize = 0;
 
-	GLuint transparentGeometryBuffer = 0;
-	GLuint transparentGeometryIndex = 0;
-	GLuint transparentVao = 0;
+	unsigned int transparentVao = 0;
 	size_t transparentElementCountSize = 0;
 
-	GLuint lightsBuffer = 0;
+	unsigned int lightsBuffer = 0;
 	size_t lightsElementCountSize = 0;
 
 	unsigned char currentLod = 0;

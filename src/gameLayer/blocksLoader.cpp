@@ -1038,10 +1038,6 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 		path += ".png";
 
 		backgroundTexture.loadFromFile(path.c_str(), true, true);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	}
 	
 	
@@ -1089,8 +1085,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 			t.createFromBuffer((char *)data, 2, 2, true, false);
 
 			texturesIds.push_back(t.id);
-			auto handle = glGetTextureHandleARB(t.id);
-			glMakeTextureHandleResidentARB(handle);
+			auto handle = std::uint64_t(t.id);
 			gpuIds.push_back(handle);
 		}
 
@@ -1110,8 +1105,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 			t.createFromBuffer((char *)data, 1, 1, true, false);
 
 			texturesIds.push_back(t.id);
-			auto handle = glGetTextureHandleARB(t.id);
-			glMakeTextureHandleResidentARB(handle);
+			auto handle = std::uint64_t(t.id);
 			gpuIds.push_back(handle);
 		}
 
@@ -1130,8 +1124,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 			gl2d::Texture t;
 			t.createFromBuffer((char *)data, 1, 1, true, false);
 			texturesIds.push_back(t.id);
-			auto handle = glGetTextureHandleARB(t.id);
-			glMakeTextureHandleResidentARB(handle);
+			auto handle = std::uint64_t(t.id);
 
 			gpuIds.push_back(handle);
 		}
@@ -1151,8 +1144,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 			gl2d::Texture t;
 			t.createFromBuffer((char *)data, 1, 1, true, false);
 			texturesIds.push_back(t.id);
-			auto handle = glGetTextureHandleARB(t.id);
-			glMakeTextureHandleResidentARB(handle);
+			auto handle = std::uint64_t(t.id);
 
 			gpuIds.push_back(handle);
 		}
@@ -1162,20 +1154,16 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 
 	auto setGpuIds = [&](int blockIndex) 
 	{
-		auto handle = glGetTextureHandleARB(texturesIds[blockIndex + 0]);
-		glMakeTextureHandleResidentARB(handle);
+		auto handle = std::uint64_t(texturesIds[blockIndex + 0]);
 		gpuIds[blockIndex + 0] = handle;
 
-		handle = glGetTextureHandleARB(texturesIds[blockIndex + 1]);
-		glMakeTextureHandleResidentARB(handle);
+		handle = std::uint64_t(texturesIds[blockIndex + 1]);
 		gpuIds[blockIndex + 1] = handle;
 
-		handle = glGetTextureHandleARB(texturesIds[blockIndex + 2]);
-		glMakeTextureHandleResidentARB(handle);
+		handle = std::uint64_t(texturesIds[blockIndex + 2]);
 		gpuIds[blockIndex + 2] = handle;
 
-		handle = glGetTextureHandleARB(texturesIds[blockIndex + 3]);
-		glMakeTextureHandleResidentARB(handle);
+		handle = std::uint64_t(texturesIds[blockIndex + 3]);
 		gpuIds[blockIndex + 3] = handle;
 	};
 
@@ -1185,20 +1173,8 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 		gl2d::Texture t;
 		
 		if (!loadFromFileWithAplhaFixing(t, path.c_str(), true, false, isNormalMap, errors)) { return 0; }
-		t.bind();
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 		
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 4.f);
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 4.f);
-
-		glGenerateMipmap(GL_TEXTURE_2D);
-
-
-		auto handle = glGetTextureHandleARB(t.id);
-		glMakeTextureHandleResidentARB(handle);
+		auto handle = std::uint64_t(t.id);
 
 
 		if (appendMode)
@@ -1317,15 +1293,6 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 
 		t.createFromBuffer((char *)data.data(), size.x, size.y, true, true);
 		texturesIds[desinationIndex + 0] = t.id;
-
-		t.bind();
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 4.f);
-		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 4.f);
-		glGenerateMipmap(GL_TEXTURE_2D);
 
 		//setGpuIds(desinationIndex);
 	};
@@ -1468,17 +1435,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 				t.createFromBuffer((char *)data.data(), size.x * magnify, size.y * magnify, true, true);
 				texturesIds[i * 4 + 1] = t.id;
 
-				t.bind();
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-				//glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 6.f);
-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 4.f);
-				glGenerateMipmap(GL_TEXTURE_2D);
-
-				auto handle = glGetTextureHandleARB(texturesIds[i*4 + 1]);
-				glMakeTextureHandleResidentARB(handle);
+				auto handle = std::uint64_t(texturesIds[i*4 + 1]);
 				gpuIds[i * 4 + 1] = handle;
 
 			}
@@ -1557,17 +1514,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 				t.createFromBuffer((char *)data.data(), size.x * magnify, size.y * magnify, true, true);
 				texturesIds[i * 4 + 3] = t.id;
 
-				t.bind();
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_NEAREST);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-				//glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 6.f);
-				glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 4.f);
-				glGenerateMipmap(GL_TEXTURE_2D);
-
-				auto handle = glGetTextureHandleARB(texturesIds[i * 4 + 3]);
-				glMakeTextureHandleResidentARB(handle);
+				auto handle = std::uint64_t(texturesIds[i * 4 + 3]);
 				gpuIds[i * 4 + 3] = handle;
 
 			}
@@ -1613,15 +1560,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 			}
 			else
 			{
-				t.bind();
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-				glGenerateMipmap(GL_TEXTURE_2D);
-
-
-				auto handle = glGetTextureHandleARB(t.id);
-				glMakeTextureHandleResidentARB(handle);
+				auto handle = std::uint64_t(t.id);
 
 				if (appendMode)
 				{
@@ -1698,8 +1637,7 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 			spawnEggSize.x, spawnEggSize.y, true, false);
 
 		texturesIdsItems[index] = newTexture.id;
-		auto handle = glGetTextureHandleARB(newTexture.id);
-		glMakeTextureHandleResidentARB(handle);
+		auto handle = std::uint64_t(newTexture.id);
 		gpuIdsItems[index] = handle;
 
 
@@ -1741,11 +1679,6 @@ void BlocksLoader::setupAllColors()
 		t.id = texturesIds[idIndex];
 
 		int mipmap = 0;
-		//glBindTexture(GL_TEXTURE_2D, t.id);
-		//glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, &mipmap);
-		//mipmap += 1;
-		//
-
 
 		glm::ivec2 size = {};
 		auto data = t.readTextureData(mipmap, &size);
@@ -1791,22 +1724,22 @@ void BlocksLoader::clearAllTextures()
 	{
 		if (texturesIds[i * 4] != texturesIds[0])
 		{
-			glDeleteTextures(1, &texturesIds[i * 4]);
+			wgpu2d::cleanupTextureId(texturesIds[i * 4]);
 		}
 
 		if (texturesIds[i * 4 + 1] != texturesIds[1])
 		{
-			glDeleteTextures(1, &texturesIds[i * 4 +1]);
+			wgpu2d::cleanupTextureId(texturesIds[i * 4 +1]);
 		}
 
 		if (texturesIds[i * 4 + 2] != texturesIds[2])
 		{
-			glDeleteTextures(1, &texturesIds[i * 4 + 2]);
+			wgpu2d::cleanupTextureId(texturesIds[i * 4 + 2]);
 		}
 
 		if (texturesIds[i * 4 + 3] != texturesIds[3])
 		{
-			glDeleteTextures(1, &texturesIds[i * 4 + 3]);
+			wgpu2d::cleanupTextureId(texturesIds[i * 4 + 3]);
 		}
 	}
 
@@ -1814,7 +1747,7 @@ void BlocksLoader::clearAllTextures()
 	{
 		if (t != texturesIds[0])
 		{
-			glDeleteTextures(1, &t);
+			wgpu2d::cleanupTextureId(t);
 		}
 	}
 
@@ -1824,7 +1757,6 @@ void BlocksLoader::clearAllTextures()
 	}
 	blockUiTextures.clear();
 
-	glDeleteTextures(4, &texturesIds[0]);
 	texturesIds.clear();
 	gpuIds.clear();
 
@@ -1856,10 +1788,7 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		result = {};
 
-		glGenVertexArrays(1, &result.vao);
-		glBindVertexArray(result.vao);
-		glGenBuffers(1, &result.buffer);
-		glBindBuffer(GL_ARRAY_BUFFER, result.buffer);
+		result.vao = wgpuWorld::newMeshId();
 
 		float thick = 1.f / 8;
 		//float thick = 2;
@@ -2175,18 +2104,6 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		}
 
-
-
-		glBufferStorage(GL_ARRAY_BUFFER, finalData.size() * sizeof(float),
-			finalData.data(), 0);
-
-		glEnableVertexAttribArray(0);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), 0);
-		glEnableVertexAttribArray(1);
-		glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(3 * sizeof(float)));
-		glEnableVertexAttribArray(2);
-		glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(6 * sizeof(float)));
-
 		result.count = finalData.size() / 8;
 
 		wgpuWorld::setMesh(result.vao, finalData.data(), finalData.size() * sizeof(float), nullptr, 0, 0);
@@ -2224,14 +2141,7 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		if (scene)
 		{
-
-			glGenVertexArrays(1, &result.vao);
-			glBindVertexArray(result.vao);
-
-			glGenBuffers(1, &result.buffer);
-			glBindBuffer(GL_ARRAY_BUFFER, result.buffer);
-			glGenBuffers(1, &result.indexBuffer);
-			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, result.indexBuffer);
+			result.vao = wgpuWorld::newMeshId();
 
 			unsigned int vertexOffset = 0;
 
@@ -2280,19 +2190,6 @@ void BlocksLoader::loadAllItemsGeometry()
 				result.clear();
 				return false;
 			}
-
-			glBufferStorage(GL_ARRAY_BUFFER, finalData.size() * sizeof(float),
-				finalData.data(), 0);
-
-			glEnableVertexAttribArray(0);
-			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), 0);
-			glEnableVertexAttribArray(1);
-			glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(3 * sizeof(float)));
-			glEnableVertexAttribArray(2);
-			glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void *)(6 * sizeof(float)));
-
-			glBufferStorage(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(indices[0]),
-				indices.data(), 0);
 
 			wgpuWorld::setMesh(result.vao, finalData.data(), finalData.size() * sizeof(float),
 				indices.data(), indices.size(), sizeof(indices[0]));
@@ -2360,14 +2257,11 @@ void BlocksLoader::loadAllItemsGeometry()
 					if (result.texturesId.id != 0)
 					{
 						// Requires ARB_bindless_texture
-						GLuint64 handle = glGetTextureHandleARB(result.texturesId.id);
-						glMakeTextureHandleResidentARB(handle);
+						std::uint64_t handle = result.texturesId.id;
 						result.gpuId = handle;
 					}
 				}
 			}
-
-			glBindVertexArray(0);
 
 			return true;
 		}
@@ -2434,7 +2328,6 @@ void BlocksLoader::loadAllItemsGeometry()
 
 		}
 	}
-	glBindVertexArray(0);
 
 	importer.FreeScene();
 
@@ -2470,18 +2363,12 @@ uint16_t getGpuIdIndexForBlock(short type, int face)
 void BlocksLoader::ItemGeometry2D::clear()
 {
 	wgpuWorld::removeMesh(vao);
-	glDeleteBuffers(1, &buffer);
-	glDeleteVertexArrays(1, &vao);
 	*this = {};
 }
 
 void BlocksLoader::ItemGeometry3D::clear()
 {
 	wgpuWorld::removeMesh(vao);
-
-	glDeleteBuffers(1, &buffer);
-	glDeleteVertexArrays(1, &vao);
-	glDeleteBuffers(1, &indexBuffer);
 
 	texturesId.cleanup();
 

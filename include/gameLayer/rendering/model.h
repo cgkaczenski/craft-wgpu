@@ -1,5 +1,5 @@
 #pragma once
-#include <glad/glad.h>
+#include <cstdint>
 #include <vector>
 #include <gl2d/gl2d.h>
 
@@ -104,9 +104,7 @@ struct Animatable
 struct Model
 {
 
-	GLuint geometry = 0;
-	GLuint indexBuffer = 0;
-	GLuint vao = 0;
+	unsigned int vao = 0; // the wgpuWorld mesh id (wgpuWorld::newMeshId)
 	size_t vertexCount = 0;
 	std::vector<glm::mat4> transforms;
 
@@ -249,15 +247,12 @@ struct ModelsManager
 		HelmetTestTexture,
 	};
 
-	std::vector<GLuint64> gpuIds;
-	std::vector<GLuint> texturesIds;
-
-	GLuint texturesSSBO = 0;
+	// Texture slots, each the wgpu2d id of its texture.
+	std::vector<std::uint64_t> gpuIds;
+	std::vector<unsigned int> texturesIds;
 
 	gl2d::Texture temporaryPlayerHandTexture = {};
-	GLuint64 temporaryPlayerHandBindlessTexture = 0;
-
-	void setupSSBO();
+	std::uint64_t temporaryPlayerHandTextureId = 0;
 };
 
 

@@ -170,20 +170,6 @@ good performance.\n-Fancy: significant performance cost but looks very nice.");
 	programData.ui.menuRenderer.colorPicker("Lift", &getShadingSettings().toneMapLift[0], DEFAULT_COLOR_PICKER_TRANSPARENT);
 	programData.ui.menuRenderer.colorPicker("Gain", &getShadingSettings().toneMapGain[0], DEFAULT_COLOR_PICKER_TRANSPARENT);
 
-	//glUniform1f(applyToneMapper.u_saturation, shadingSettings.toneMapSaturation);
-	//glUniform1f(applyToneMapper.u_vibrance, shadingSettings.toneMapVibrance);
-	//glUniform1f(applyToneMapper.u_gamma, shadingSettings.toneMapGamma);
-	//glUniform1f(applyToneMapper.u_shadowBoost, shadingSettings.toneMapShadowBoost);
-	//glUniform1f(applyToneMapper.u_highlightBoost, shadingSettings.toneMapHighlightBoost);
-	//glUniform3f(applyToneMapper.u_lift, shadingSettings.toneMapLift.x, shadingSettings.toneMapLift.y, shadingSettings.toneMapLift.z);
-	//glUniform3f(applyToneMapper.u_gain, shadingSettings.toneMapGain.x, shadingSettings.toneMapGain.y, shadingSettings.toneMapGain.z);
-
-
-
-
-
-
-
 	programData.ui.menuRenderer.EndMenu();
 
 #pragma endregion

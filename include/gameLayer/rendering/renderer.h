@@ -485,7 +485,7 @@ struct Renderer
 		AdaptiveExposure &adaptiveExposure,
 		bool showLightLevels, glm::dvec3 pointPos,
 		bool underWater, int screenX, int screenY, float deltaTime, float dayTime,
-		GLuint64 currentSkinBindlessTexture, bool &playerClicked, float playerRunning,
+		std::uint64_t currentSkinTextureId, bool &playerClicked, float playerRunning,
 		BoneTransform &playerHand, int currentHeldItemIndex, float waterDropsStrength,
 		bool showHand, std::unordered_map<std::uint64_t, PlayerConnectionData> &playersConnectionData);
 	
@@ -498,7 +498,7 @@ struct Renderer
 		BlocksLoader &blocksLoader, ClientEntityManager &entityManager,
 		glm::mat4 &vp, const glm::mat4 &projection, glm::mat4 &viewMatrix, glm::vec3 posFloat, glm::ivec3 posInt,
 		float exposure, ChunkSystem &chunkSystem, int skyLightIntensity,
-		GLuint64 currentSkinBindlessTexture,
+		std::uint64_t currentSkinTextureId,
 		bool &playerClicked, float playerRunning, BoneTransform &playerHand,
 		int currentHeldItemIndex, bool showHand, std::unordered_map<std::uint64_t, PlayerConnectionData> &playersConnectionData
 		);

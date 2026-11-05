@@ -103,7 +103,7 @@ struct GameData
 
 	std::string currentSkinName = "";
 	gl2d::Texture currentSkinTexture = {};
-	GLuint64 currentSkinBindlessTexture = 0;
+	std::uint64_t currentSkinTextureId = 0;
 	BattleUI battleUI;
 	 
 	BoneTransform playerFOVHandTransform{
@@ -168,18 +168,8 @@ void loadCurrentSkin()
 	}
 
 	//todo repeating code
-	gameData.currentSkinTexture.bind();
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, 6.f);
-	glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_LOD, 2.f);
-
-	glGenerateMipmap(GL_TEXTURE_2D);
-
-
-	gameData.currentSkinBindlessTexture = glGetTextureHandleARB(gameData.currentSkinTexture.id);
-	glMakeTextureHandleResidentARB(gameData.currentSkinBindlessTexture);
+	gameData.currentSkinTextureId = std::uint64_t(gameData.currentSkinTexture.id);
 
 	sendPlayerSkinPacket(getServer(), getConnectionData().cid, gameData.currentSkinTexture);
 
@@ -345,7 +335,6 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	{
 		gameData.c.aspectRatio = (float)w / h;
 	}
-	glViewport(0, 0, w, h);
 
 	auto &player = gameData.entityManager.localPlayer;
 
@@ -1833,7 +1822,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 			gameData.c, programData, programData.blocksLoader, gameData.entityManager,
 			programData.modelsManager, 
 			gameData.adaptiveExposure, gameData.showLightLevels,
-			gameData.point, underWater, w, h, deltaTime, dayTime, gameData.currentSkinBindlessTexture,
+			gameData.point, underWater, w, h, deltaTime, dayTime, gameData.currentSkinTextureId,
 			gameData.handHit, isPlayerMovingSpeed, gameData.playerFOVHandTransform,
 			gameData.currentItemSelected, finalDropStrength, 
 			gameData.showUI, gameData.playersConnectionData
@@ -2545,8 +2534,6 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 			ImGui::Text("fps: %d", programData.currentFps);
 
 			gameData.gameplayFrameProfiler.displayPlot("Gameplay Frame");
-
-			programData.GPUProfiler.displayPlot("GPU");
 
 		}
 		ImGui::End();
