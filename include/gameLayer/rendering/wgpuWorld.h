@@ -167,6 +167,20 @@ namespace wgpuWorld
 		float fogDistance = 100;  // GL's u_fogDistance: the view distance less a chunk
 		float fogGradient = 16;   // the fogGradient setting; 0 turns the near fog off
 		bool underWater = false;  // GL fogs only above water
+
+		// Milestone 15: the post chain's settings (toneMap.frag's uniforms,
+		// as the renderer computes them). Lift and gain already mapped
+		// (* 0.2 - 0.1 and * 0.4 + 0.8).
+		int tonemapper = 0;       // 0 ACES, 1 AgX, 2 ZCAM, 3 Uncharted 2, 4 PBR Neutral
+		float saturation = 1;
+		float vibrance = 1;
+		float gamma = 1;
+		float shadowBoost = 0;
+		float highlightBoost = 0;
+		float vignette = 0.15f;
+		glm::vec3 lift = {0, 0, 0};
+		glm::vec3 gain = {1, 1, 1};
+		bool fxaa = true;
 	};
 
 	// Records the world's opaque pass for this frame and prepares the

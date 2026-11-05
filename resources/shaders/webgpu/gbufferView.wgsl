@@ -1,13 +1,10 @@
 // Milestone 11: turns one G-buffer attachment into something a screen can
-// show. Two uses, one shader:
-//   - the composite: the HDR color drawn onto the surface at the end of the
-//     world (`view` 0): GL's toneMap.frag with its default settings, which
-//     is the exposure, the ACES fit (tonemapper 0) and the sRGB curve
-//     (milestone 12, when lit colors went past 1). The post chain (milestone
-//     15) adds the rest: the other tone mappers, color grading, the dither,
-//     the vignette, FXAA.
-//   - the debug views: each attachment drawn into a small wgpu2d target that
-//     the ImGui "G-buffer" header shows (wgpuWorld::gBufferPreview).
+// show: the debug views, each attachment drawn into a small wgpu2d target
+// that the ImGui "G-buffer" header shows (wgpuWorld::gBufferPreview), or
+// onto the surface instead of the post chain with WGPU_GBUFFER_VIEW=1-5.
+// View 0, the HDR color, gets the exposure, the ACES fit and the sRGB curve
+// only; the frame itself goes through post.wgsl (milestone 15), which adds
+// GL's grading, the other tone mappers, the dither, the vignette and FXAA.
 //
 // A fullscreen triangle: three vertices, no buffers, covering the target. Its
 // uv runs 0..1 across the target with v down (render targets are top-first),

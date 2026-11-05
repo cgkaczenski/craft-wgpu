@@ -106,6 +106,17 @@ namespace
 	};
 	static_assert(sizeof(SkyBakeParams) == 80, "must match sky.wgsl's BakeParams");
 
+	// Milestone 15: post.wgsl's PostUniforms.
+	struct PostUniforms
+	{
+		glm::vec4 grade; // exposure, saturation, vibrance, gamma
+		glm::vec4 boost; // shadow boost, highlight boost, vignette
+		glm::vec4 lift;
+		glm::vec4 gain;
+		glm::ivec4 mode; // x tone mapper
+	};
+	static_assert(sizeof(PostUniforms) == 80, "must match post.wgsl's PostUniforms");
+
 	// GL's three skies, each a cubemap of 128x128 faces.
 	enum SkyKind { DaySky, TwilightSky, NightSky, SkyKinds };
 	constexpr uint32_t skyCubeSize = 128;
@@ -329,6 +340,23 @@ namespace
 		// fboSkyBox): what the fog mixes toward.
 		Texture skyTexture = nullptr;
 		TextureView skyView = nullptr;
+
+		// Milestone 15: the post chain (post.wgsl). The tone mapper reads
+		// the HDR color; with FXAA on it writes the FXAA input (GL's
+		// fboCoppy, in its rg11b10ufloat), which FXAA reads onto the
+		// surface, else it writes the surface itself.
+		BindGroupLayout postBindGroupLayout = nullptr;
+		PipelineLayout postPipelineLayout = nullptr;
+		RenderPipeline toneMapToTexturePipeline = nullptr;
+		RenderPipeline toneMapToSurfacePipeline = nullptr;
+		RenderPipeline fxaaPipeline = nullptr;
+		Buffer postUniformBuffer = nullptr;
+		Sampler postSampler = nullptr;
+		Texture fxaaInputTexture = nullptr; // the surface's size; remade with the targets
+		TextureView fxaaInputView = nullptr;
+		BindGroup toneMapBindGroup = nullptr;   // reads the HDR color
+		BindGroup fxaaBindGroup = nullptr;      // reads the FXAA input
+		bool fxaa = true;                       // this frame's setting
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
@@ -1350,10 +1378,53 @@ namespace
 			}
 		}
 
+		// The post chain (milestone 15): tone map, then FXAA onto the
+		// surface; or, with FXAA off, the tone map onto the surface. A
+		// WGPU_GBUFFER_VIEW other than 0 shows that attachment instead.
+		const bool chain = w.compositeView == 0;
+		if (chain && w.fxaa)
+		{
+			CommandEncoder encoder = wgpuFrameEncoder();
+			if (!encoder) { return; }
+			RenderPassColorAttachment color = Default;
+			color.view = w.fxaaInputView;
+			color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+			color.resolveTarget = nullptr;
+			color.loadOp = LoadOp::Clear;
+			color.storeOp = StoreOp::Store;
+			color.clearValue = Color{ 0.0, 0.0, 0.0, 1.0 };
+			RenderPassDescriptor passDesc = Default;
+			passDesc.label = StringView("world tone map pass");
+			passDesc.colorAttachmentCount = 1;
+			passDesc.colorAttachments = &color;
+			passDesc.depthStencilAttachment = nullptr;
+			passDesc.occlusionQuerySet = nullptr;
+			passDesc.timestampWrites = nullptr;
+			RenderPassEncoder toneMapPass = encoder.beginRenderPass(passDesc);
+			toneMapPass.setPipeline(w.toneMapToTexturePipeline);
+			toneMapPass.setBindGroup(0, w.toneMapBindGroup, 0, nullptr);
+			toneMapPass.draw(3, 1, 0, 0);
+			toneMapPass.end();
+			toneMapPass.release();
+		}
+
 		RenderPassEncoder pass = wgpuCurrentRenderPass();
 		if (!pass) { return; }
-		pass.setPipeline(w.viewPipelines[w.compositeView]);
-		pass.setBindGroup(0, w.viewBindGroup, 0, nullptr);
+		if (!chain)
+		{
+			pass.setPipeline(w.viewPipelines[w.compositeView]);
+			pass.setBindGroup(0, w.viewBindGroup, 0, nullptr);
+		}
+		else if (w.fxaa)
+		{
+			pass.setPipeline(w.fxaaPipeline);
+			pass.setBindGroup(0, w.fxaaBindGroup, 0, nullptr);
+		}
+		else
+		{
+			pass.setPipeline(w.toneMapToSurfacePipeline);
+			pass.setBindGroup(0, w.toneMapBindGroup, 0, nullptr);
+		}
 		pass.draw(3, 1, 0, 0);
 		// The 2D pass is wgpu2d's: it ends it, and its own draws rebind.
 	}
@@ -1903,15 +1974,17 @@ namespace
 
 	void releaseTargets()
 	{
-		for (BindGroup *group : { &w.peelBindGroup, &w.viewBindGroup })
+		for (BindGroup *group : { &w.peelBindGroup, &w.viewBindGroup, &w.toneMapBindGroup, &w.fxaaBindGroup })
 		{
 			if (*group) { group->release(); *group = nullptr; }
 		}
-		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView, &w.depthSampleView, &w.skyView })
+		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView, &w.depthSampleView, &w.skyView,
+			&w.fxaaInputView })
 		{
 			if (*view) { view->release(); *view = nullptr; }
 		}
-		for (Texture *texture : { &w.depthTexture, &w.peelDepthTexture, &w.peelColorTexture, &w.skyTexture })
+		for (Texture *texture : { &w.depthTexture, &w.peelDepthTexture, &w.peelColorTexture, &w.skyTexture,
+			&w.fxaaInputTexture })
 		{
 			if (*texture) { texture->destroy(); texture->release(); *texture = nullptr; }
 		}
@@ -1947,7 +2020,12 @@ namespace
 		// the sky pass beside the HDR color, then read by the fog.
 		w.skyTexture = createTarget("world sky", w.hdrFormat,
 			TextureUsage::RenderAttachment | TextureUsage::TextureBinding, width, height);
-		if (!w.depthTexture || !w.peelDepthTexture || !w.peelColorTexture || !w.skyTexture) { return false; }
+		// The FXAA input (milestone 15): the tone mapped image, in GL's
+		// format for it (fboCoppy is R11F_G11F_B10F).
+		w.fxaaInputTexture = createTarget("world FXAA input", w.hdrFormat,
+			TextureUsage::RenderAttachment | TextureUsage::TextureBinding, width, height);
+		if (!w.depthTexture || !w.peelDepthTexture || !w.peelColorTexture || !w.skyTexture
+			|| !w.fxaaInputTexture) { return false; }
 
 		// The G-buffer: drawn into, then read by the debug views (and, from
 		// milestone 12 on, the lighting). The HDR color is also the peel's
@@ -1976,7 +2054,9 @@ namespace
 			TextureAspect::All, TextureUsage::TextureBinding);
 		w.skyView = createTargetView(w.skyTexture, "world sky view", w.hdrFormat,
 			TextureAspect::All, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
-		if (!w.depthView || !w.peelDepthView || !w.peelColorView || !w.skyView) { return false; }
+		w.fxaaInputView = createTargetView(w.fxaaInputTexture, "world FXAA input view", w.hdrFormat,
+			TextureAspect::All, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+		if (!w.depthView || !w.peelDepthView || !w.peelColorView || !w.skyView || !w.fxaaInputView) { return false; }
 
 		// The frame group: the peel's copies and the sky, all the size of
 		// the surface, so remade with them.
@@ -1997,6 +2077,27 @@ namespace
 		groupDesc.entries = entries;
 		w.peelBindGroup = wgpuDevice().createBindGroup(groupDesc);
 		if (!w.peelBindGroup || scope.failed()) { return false; }
+
+		// The post passes' groups (milestone 15): each the uniforms, its
+		// source, the sampler.
+		auto postGroup = [&](TextureView sourceView, const char *label)
+		{
+			BindGroupEntry postEntries[3];
+			for (uint32_t i = 0; i < 3; i++) { postEntries[i] = Default; postEntries[i].binding = i; }
+			postEntries[0].buffer = w.postUniformBuffer;
+			postEntries[0].size = sizeof(PostUniforms);
+			postEntries[1].textureView = sourceView;
+			postEntries[2].sampler = w.postSampler;
+			BindGroupDescriptor postDesc = Default;
+			postDesc.label = StringView(label);
+			postDesc.layout = w.postBindGroupLayout;
+			postDesc.entryCount = 3;
+			postDesc.entries = postEntries;
+			return wgpuDevice().createBindGroup(postDesc);
+		};
+		w.toneMapBindGroup = postGroup(w.gBufferViews[GColor], "world tone map bind group");
+		w.fxaaBindGroup = postGroup(w.fxaaInputView, "world FXAA bind group");
+		if (!w.toneMapBindGroup || !w.fxaaBindGroup) { return false; }
 
 		// What the composite and the debug views read: the four targets,
 		// the depth, the uniforms.
@@ -2279,6 +2380,102 @@ namespace
 		w.indirectBuffer = buffer;
 		w.indirectCapacity = capacity;
 		return true;
+	}
+
+	// ---- Milestone 15: the post chain (post.wgsl) -------------------------
+
+	bool createPost()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/post.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world post chain");
+
+		BufferDescriptor bufferDesc = Default;
+		bufferDesc.label = StringView("world post uniforms");
+		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
+		bufferDesc.size = sizeof(PostUniforms);
+		bufferDesc.mappedAtCreation = false;
+		w.postUniformBuffer = wgpuDevice().createBuffer(bufferDesc);
+
+		// GL's FBO textures: linear, clamped. FXAA reads between texels.
+		SamplerDescriptor samplerDesc = Default;
+		samplerDesc.label = StringView("world post sampler");
+		samplerDesc.addressModeU = AddressMode::ClampToEdge;
+		samplerDesc.addressModeV = AddressMode::ClampToEdge;
+		samplerDesc.addressModeW = AddressMode::ClampToEdge;
+		samplerDesc.magFilter = FilterMode::Linear;
+		samplerDesc.minFilter = FilterMode::Linear;
+		samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
+		samplerDesc.lodMinClamp = 0.0f;
+		samplerDesc.lodMaxClamp = 32.0f;
+		samplerDesc.compare = CompareFunction::Undefined;
+		samplerDesc.maxAnisotropy = 1;
+		w.postSampler = wgpuDevice().createSampler(samplerDesc);
+		if (!w.postUniformBuffer || !w.postSampler) { module.release(); return false; }
+
+		BindGroupLayoutEntry entries[3];
+		for (uint32_t i = 0; i < 3; i++)
+		{
+			entries[i] = Default;
+			entries[i].binding = i;
+			entries[i].visibility = ShaderStage::Fragment;
+			entries[i].buffer.type = BufferBindingType::BindingNotUsed;
+			entries[i].sampler.type = SamplerBindingType::BindingNotUsed;
+			entries[i].texture.sampleType = TextureSampleType::BindingNotUsed;
+			entries[i].storageTexture.access = StorageTextureAccess::BindingNotUsed;
+		}
+		entries[0].buffer.type = BufferBindingType::Uniform;
+		entries[0].buffer.hasDynamicOffset = false;
+		entries[0].buffer.minBindingSize = sizeof(PostUniforms);
+		entries[1].texture.sampleType = TextureSampleType::Float;
+		entries[1].texture.viewDimension = TextureViewDimension::_2D;
+		entries[1].texture.multisampled = false;
+		entries[2].sampler.type = SamplerBindingType::Filtering;
+		BindGroupLayoutDescriptor layoutDesc = Default;
+		layoutDesc.label = StringView("world post bind group layout");
+		layoutDesc.entryCount = 3;
+		layoutDesc.entries = entries;
+		w.postBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
+		if (!w.postBindGroupLayout) { module.release(); return false; }
+		w.postPipelineLayout = createPipelineLayout("world post pipeline layout", &w.postBindGroupLayout, 1);
+
+		// Each pass a fullscreen triangle into one target, no blending.
+		auto pass = [&](const char *label, const char *fragmentEntry, TextureFormat format)
+		{
+			ColorTargetState target = Default;
+			target.format = format;
+			target.blend = nullptr;
+			target.writeMask = ColorWriteMask::All;
+			FragmentState fragment = Default;
+			fragment.module = module;
+			fragment.entryPoint = StringView(fragmentEntry);
+			fragment.targetCount = 1;
+			fragment.targets = &target;
+			RenderPipelineDescriptor desc = Default;
+			desc.label = StringView(label);
+			desc.layout = w.postPipelineLayout;
+			desc.vertex.module = module;
+			desc.vertex.entryPoint = StringView("vs_fullscreen");
+			desc.vertex.bufferCount = 0;
+			desc.vertex.buffers = nullptr;
+			desc.primitive.topology = PrimitiveTopology::TriangleList;
+			desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+			desc.primitive.frontFace = FrontFace::CCW;
+			desc.primitive.cullMode = CullMode::None;
+			desc.depthStencil = nullptr;
+			desc.fragment = &fragment;
+			desc.multisample.count = 1;
+			desc.multisample.mask = 0xFFFFFFFFu;
+			desc.multisample.alphaToCoverageEnabled = false;
+			return wgpuDevice().createRenderPipeline(desc);
+		};
+		w.toneMapToTexturePipeline = pass("world tone map, to the FXAA input", "fs_toneMap", w.hdrFormat);
+		w.toneMapToSurfacePipeline = pass("world tone map, to the surface", "fs_toneMap", wgpuSurfaceFormat());
+		w.fxaaPipeline = pass("world FXAA", "fs_fxaa", wgpuSurfaceFormat());
+
+		const bool invalid = scope.failed();
+		module.release();
+		return w.toneMapToTexturePipeline && w.toneMapToSurfacePipeline && w.fxaaPipeline && !invalid;
 	}
 
 	// ---- Milestone 14: the sky (sky.wgsl) -------------------------------
@@ -2655,7 +2852,7 @@ namespace
 		}
 
 		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines()
-			|| !createSky())
+			|| !createSky() || !createPost())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -2927,6 +3124,16 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	sky.sunParams = glm::vec4(lighting.sunTwilight, 1.f, 0.f, 0.f);
 	sky.moonParams = glm::vec4(0.f, 1.f, 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.skyUniformBuffer, 0, &sky, sizeof(sky));
+
+	// Milestone 15: the post chain's settings, for the composite.
+	PostUniforms post;
+	post.grade = glm::vec4(lighting.exposure, lighting.saturation, lighting.vibrance, lighting.gamma);
+	post.boost = glm::vec4(lighting.shadowBoost, lighting.highlightBoost, lighting.vignette, 0.f);
+	post.lift = glm::vec4(lighting.lift, 0.f);
+	post.gain = glm::vec4(lighting.gain, 0.f);
+	post.mode = glm::ivec4(std::clamp(lighting.tonemapper, 0, 4), 0, 0, 0);
+	wgpuQueue().writeBuffer(w.postUniformBuffer, 0, &post, sizeof(post));
+	w.fxaa = lighting.fxaa;
 
 	const auto recordStart = std::chrono::steady_clock::now();
 
@@ -3564,6 +3771,14 @@ void shutdown()
 		if (*buffer) { buffer->release(); *buffer = nullptr; }
 	}
 	if (w.skySampler) { w.skySampler.release(); w.skySampler = nullptr; }
+	for (RenderPipeline *pipeline : { &w.toneMapToTexturePipeline, &w.toneMapToSurfacePipeline, &w.fxaaPipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	if (w.postPipelineLayout) { w.postPipelineLayout.release(); w.postPipelineLayout = nullptr; }
+	if (w.postBindGroupLayout) { w.postBindGroupLayout.release(); w.postBindGroupLayout = nullptr; }
+	if (w.postUniformBuffer) { w.postUniformBuffer.release(); w.postUniformBuffer = nullptr; }
+	if (w.postSampler) { w.postSampler.release(); w.postSampler = nullptr; }
 	w.boundSunView = nullptr;
 	w.boundMoonView = nullptr;
 	w.skyBaked = false;

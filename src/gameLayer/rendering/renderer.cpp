@@ -3155,6 +3155,17 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	lighting.fogDistance = (chunkSystem.squareSize / 2.f) * CHUNK_SIZE - CHUNK_SIZE;
 	lighting.fogGradient = getShadingSettings().fogGradient;
 	lighting.underWater = underWater;
+	// Milestone 15: the tone mapper's and FXAA's settings, as GL sets them.
+	lighting.tonemapper = getShadingSettings().tonemapper;
+	lighting.saturation = getShadingSettings().toneMapSaturation;
+	lighting.vibrance = getShadingSettings().toneMapVibrance;
+	lighting.gamma = getShadingSettings().toneMapGamma;
+	lighting.shadowBoost = getShadingSettings().toneMapShadowBoost;
+	lighting.highlightBoost = getShadingSettings().toneMapHighlightBoost;
+	lighting.vignette = getShadingSettings().vignette;
+	lighting.lift = getShadingSettings().toneMapLift * glm::vec3(0.2f) - glm::vec3(0.1f);
+	lighting.gain = getShadingSettings().toneMapGain * glm::vec3(0.4f) + glm::vec3(0.8f);
+	lighting.fxaa = getShadingSettings().FXAA;
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 #endif
