@@ -3124,11 +3124,15 @@ bool wgpuInit(WGPUSurface surface, int width, int height)
 	// fails over one: ourCraft's world draws its chunks with indirect draws,
 	// which need firstInstance in the indirect arguments (each chunk's range
 	// of the face arena) and, for one call per pass, wgpu-native's
-	// MultiDrawIndirect. Callers check device.hasFeature before using them.
+	// MultiDrawIndirect. Its G-buffer's HDR color and bloom targets are
+	// rg11b10ufloat, which a render pass may only draw into with
+	// RG11B10UfloatRenderable. Callers check device.hasFeature before using
+	// them.
 	std::vector<WGPUFeatureName> requiredFeatures;
 	const WGPUFeatureName wanted[] = {
 		WGPUFeatureName_IndirectFirstInstance,
 		(WGPUFeatureName)WGPUNativeFeature_MultiDrawIndirect,
+		WGPUFeatureName_RG11B10UfloatRenderable,
 	};
 	for (WGPUFeatureName f : wanted)
 	{

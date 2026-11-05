@@ -37,6 +37,9 @@
 #include <cameraShaker.h>
 #include <blockUpdates.h>
 #include <climits>
+#if RENDERER_WEBGPU
+#include "rendering/wgpuWorld.h"
+#endif
 
 struct GameData
 {
@@ -2310,6 +2313,24 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 
 			ImGui::NewLine();
+
+#if RENDERER_WEBGPU
+			// Milestone 11: the G-buffer's attachments and depth. The images
+			// are WebGPU targets, top row first: default uvs, unlike the GL
+			// images below.
+			if (ImGui::CollapsingHeader("G-buffer",
+				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))
+			{
+				const ImVec2 display = ImGui::GetIO().DisplaySize;
+				const ImVec2 size = {256, display.x > 0 ? 256 * display.y / display.x : 256};
+				for (int i = 0; i < wgpuWorld::gBufferViewCountTotal(); i++)
+				{
+					ImGui::TextUnformatted(wgpuWorld::gBufferViewName(i));
+					const uint32_t id = wgpuWorld::gBufferPreview(i);
+					if (id) { ImGui::Image((ImTextureID)(intptr_t)id, size); }
+				}
+			}
+#endif
 
 			if (ImGui::CollapsingHeader("Sun Shadow Map",
 				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding))

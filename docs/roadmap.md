@@ -128,10 +128,13 @@ game code stay as it is.
 | 1 | `RGB16F` | View-space positions | `rgba16float` (no 3-channel targets in WebGPU) |
 | 2 | `RGB16UI` | Normals | `rgba16uint` |
 | 3 | `R11F_G11F_B10F` | Bloom input | as slot 0 |
-| 4 | `GL_RED` | Material (roughness) | `r8unorm` |
+| 4 | `GL_RED` | Material (roughness) | the alpha of slot 1 |
 
-Check this against `maxColorAttachmentBytesPerSample` (default limit 32)
-before milestone 11. Other targets: `fboCoppy`, two god-ray targets,
+Milestone 11 checked this against `maxColorAttachmentBytesPerSample` (32 by
+default; wgpu-native v24 does not report the adapter's own): as a render
+target `rg11b10ufloat` costs 8 bytes, not the 4 it stores, so GL's five
+slots come to 8 + 8 + 8 + 8 + 1 = 33. The roughness moved into slot 1's
+alpha, which GL's `RGB16F` never had: four targets, exactly 32. Other targets: `fboCoppy`, two god-ray targets,
 `fboLastFrame` and `fboLastFramePositions` (history for SSR), `fboHBAO`,
 `fboSkyBox`, two bloom ping-pong targets.
 
@@ -242,7 +245,7 @@ ourCraft. Phases B–D are where the new 3D concepts are.
 
 | # | Milestone | Ends with | Type |
 |---|---|---|---|
-| 11 | G-buffer | Multiple render targets, the formats table above, depth prepass plus `Equal` solid pass. Each attachment shown in an ImGui debug view. | Learning |
+| 11 | G-buffer | Done. The 3D world draws into off-screen targets instead of the surface: the G-buffer (`rg11b10ufloat` HDR color, `rgba16float` view-space positions with the roughness in their alpha, `rgba16uint` packed normals, `rg11b10ufloat` bloom) and the depth. Four targets, not GL's five: see "Render targets" for the 32-byte budget. wgpu2d requests `RG11B10UfloatRenderable`. Opaque chunks: the depth prepass (`fs_depth`, alpha test, every color target `writeMask` None, GL's `glColorMask(0)`) and the solid pass (`Equal`, no depth writes) in one render pass, the shared vertex output `@invariant`; the renderer's `zprepass` off gives one `Less` pass. Cubes and entities write the G-buffer too (GL's entity shaders write all of fboMain); glass and water blend into the HDR color alone, and the peel copies it rather than the surface. The HDR color holds linear light like GL's: each world shader keeps its unlit math and converts its result with GL's sRGB curve, and the composite (`gbufferView.wgsl`, a fullscreen triangle into wgpu2d's 2D pass) converts back; the crack decal and gizmo lines still draw on the surface after it, as GL draws them after its post. The same shader draws each attachment, the roughness and the depth into small wgpu2d targets for the ImGui "G-buffer" header (client controll window), only while it is open; `WGPU_GBUFFER_VIEW=0-5` puts one on the screen instead. Normals are the face's (GL's cross product for non-cube shapes; entities by the inverse transpose, via cofactors, sign kept for the mirrored hand); normal and material maps are not loaded yet, so the roughness is GL's 0.9 and bloom is 0. Checked against a build of milestone 10b on the same frames: within 2 levels everywhere (`rg11b10` rounding) but for a gizmo line lying in a block face (a depth tie) and a few edge pixels, water and its peel included; prepass off differs by 4 pixels. Transparent faces write no positions or normals yet (SSR, milestone 17). | Learning |
 | 12 | Sun, ambient, block light | Baked light levels from face data, sun and ambient, point lights from a storage buffer, PBR with the BRDF LUT. The big `defaultShader.frag` translation lands here; split it as you go. | Learning |
 | 13 | Shadows | Depth-only pipelines, comparison samplers, three cascades, the sun shadow. | Learning |
 | 14 | Sky | Atmospheric scattering, rendering into cubemap faces through per-face texture views, IBL convolution and specular prefilter, the sun disc. | Learning |

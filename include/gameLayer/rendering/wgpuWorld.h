@@ -96,8 +96,10 @@ namespace wgpuWorld
 	void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<ModelInstance> &models,
 		const std::vector<ItemInstance> &items);
 
-	// The transparent passes render prepared (water peel, glass): call once
-	// after renderEntities.
+	// The transparent passes render prepared (water peel, glass), then the
+	// composite: the HDR color onto the screen (WGPU_GBUFFER_VIEW=1-5 shows
+	// another attachment instead). Call once after renderEntities; the
+	// decal and the gizmo lines draw after it, on the screen.
 	void renderTransparent();
 
 	// The corner table (4 corners x 3 floats per face orientation) and the UV
@@ -124,16 +126,29 @@ namespace wgpuWorld
 	void removeChunk(const Chunk *chunk);
 
 	// Records the world's opaque pass for this frame and prepares the
-	// transparent ones (renderTransparent records them): clears color and
-	// depth, draws the opaque faces of `visibleChunks` (the renderer's
-	// frustum-culled list, sorted far to near) and the dropped block cubes,
-	// then, later, their transparent faces
-	// blended back to front. With `waterPeel` (GL's waterType 1) water shows
-	// what is under it through a depth peel; without it, water is plain
-	// see-through. `waterColor` is GL's u_waterColor, in linear space. Call
-	// inside an open frame, before the 2D layer draws.
+	// transparent ones (renderTransparent records them): clears the
+	// G-buffer (GL's fboMain: HDR color, positions with the roughness in
+	// their alpha, normals, bloom) and depth, draws the opaque faces of `visibleChunks` (the
+	// renderer's frustum-culled list, sorted far to near) and the dropped
+	// block cubes into it, then, later, their transparent faces blended back
+	// to front. With `depthPrepass` (the renderer's zprepass) the faces go
+	// through a depth-only pass first and are shaded where depth is Equal.
+	// With `waterPeel` (GL's waterType 1) water shows what is under it
+	// through a depth peel; without it, water is plain see-through.
+	// `waterColor` is GL's u_waterColor, in linear space. Call inside an open
+	// frame, before the 2D layer draws.
 	void render(Camera &camera, const std::vector<Chunk *> &visibleChunks,
-		const std::vector<BlockCube> &blockCubes, const glm::vec3 &waterColor, bool waterPeel);
+		const std::vector<BlockCube> &blockCubes, const glm::vec3 &waterColor, bool waterPeel,
+		bool depthPrepass);
+
+	// Milestone 11's debug views of the G-buffer, for ImGui: view `view`
+	// (0 to gBufferViewCountTotal() - 1, named by gBufferViewName) as a
+	// wgpu2d texture id, or 0 before its first frame. Asking is what makes
+	// the next frame draw it, so a closed ImGui header costs nothing. Rows
+	// are top first (ImGui's default uvs).
+	uint32_t gBufferPreview(int view);
+	const char *gBufferViewName(int view);
+	int gBufferViewCountTotal();
 
 	// The block-breaking crack over a block's faces (Renderer::renderDecal):
 	// `faces` in the chunk face format, `crackFrame` 0-10, `crackTexture` a

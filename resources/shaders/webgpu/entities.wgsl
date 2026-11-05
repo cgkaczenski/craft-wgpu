@@ -19,6 +19,12 @@
 //
 // Group 0 is the world's bind group (wgpuWorld.cpp); only the bindings used
 // here are declared, and they must match chunkFaces.wgsl's.
+//
+// Milestone 11: cubes, models and items draw into the G-buffer, as GL's
+// blockEntity/basicEntity/itemEntity.frag write fboMain's targets: linear
+// color, view-space position (roughness 0.9 in its alpha), packed normal,
+// no bloom.
+// Gizmo lines draw on the screen after the composite, as GL draws them.
 
 struct Uniforms {
     viewProjection: mat4x4f,
@@ -26,11 +32,52 @@ struct Uniforms {
     positionFloat: vec4f,
     waterColor: vec4f,
     planes: vec4f,
+    view: mat4x4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(3) var<storage, read> textureLayers: array<u32>;
 @group(0) @binding(4) var blockTextures: texture_2d_array<f32>;
 @group(0) @binding(5) var blockSampler: sampler;
+
+// The G-buffer (chunkFaces.wgsl's GBuffer).
+struct GBuffer {
+    @location(0) color: vec4f,
+    @location(1) position: vec4f, // w: roughness
+    @location(2) normal: vec4u,
+    @location(3) bloom: vec4f,
+};
+
+fn toLinear(c: vec3f) -> vec3f {
+    let low = c / 12.92;
+    let high = pow((c + 0.055) / 1.055, vec3f(2.4));
+    return select(high, low, c < vec3f(0.04045));
+}
+
+fn packNormal(n: vec3f) -> vec4u {
+    return vec4u(min(vec3u((n + 1.0) * 0.5 * 65536.0), vec3u(65535u)), 0u);
+}
+
+// GL's normalize(transpose(inverse(m)) * n), for the 3x3 part of m. The
+// inverse transpose is the cofactor matrix over the determinant; its columns
+// are cross products of m's. Only the determinant's sign matters once the
+// result is normalized: the hand is mirrored (negative scale), and dropping
+// the sign would turn its normals inward.
+fn transformNormal(m: mat4x4f, n: vec3f) -> vec3f {
+    let a = m[0].xyz;
+    let b = m[1].xyz;
+    let c = m[2].xyz;
+    let cofactor = mat3x3f(cross(b, c), cross(c, a), cross(a, b));
+    return normalize(cofactor * n) * sign(dot(a, cross(b, c)));
+}
+
+fn gBuffer(color: vec3f, relative: vec3f, normal: vec3f) -> GBuffer {
+    var out: GBuffer;
+    out.color = vec4f(color, 1.0);
+    out.position = vec4f((u.view * vec4f(relative, 1.0)).xyz, 0.9);
+    out.normal = packNormal(normal);
+    out.bloom = vec4f(0.0);
+    return out;
+}
 
 // ---- Dropped block items ----------------------------------------------
 
@@ -54,6 +101,8 @@ struct CubeOutput {
     @location(0) uv: vec2f,
     @location(1) @interpolate(flat) layer: u32,
     @location(2) @interpolate(flat) brightness: f32,
+    @location(3) relative: vec3f,
+    @location(4) normal: vec3f,
 };
 
 @vertex
@@ -77,14 +126,17 @@ fn vs_cube(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) ins
     out.uv = uv;
     out.layer = textureLayers[slot];
     out.brightness = cube.positionFloat.w;
+    out.relative = relative;
+    // Scaled evenly, so the normal is the cube's own.
+    out.normal = vec3f(cubeVertices[base + 3u], cubeVertices[base + 4u], cubeVertices[base + 5u]);
     return out;
 }
 
 @fragment
-fn fs_cube(in: CubeOutput) -> @location(0) vec4f {
+fn fs_cube(in: CubeOutput) -> GBuffer {
     let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
     if (albedo.a <= 0.0) { discard; }
-    return vec4f(albedo.rgb * in.brightness, 1.0);
+    return gBuffer(toLinear(albedo.rgb * in.brightness), in.relative, normalize(in.normal));
 }
 
 // ---- Gizmo lines --------------------------------------------------------
@@ -135,6 +187,8 @@ struct EntityOutput {
     @location(0) uv: vec2f,
     @location(1) @interpolate(flat) textureIndex: u32,
     @location(2) @interpolate(flat) brightness: vec3f,
+    @location(3) relative: vec3f,
+    @location(4) normal: vec3f,
 };
 
 struct ModelVertex {
@@ -158,6 +212,8 @@ fn vs_model(v: ModelVertex, @builtin(instance_index) instance: u32) -> EntityOut
     out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
     out.textureIndex = u32(clamp(v.boneAndTexture.y, 0, 3));
     out.brightness = m.brightness.rgb;
+    out.relative = relative;
+    out.normal = transformNormal(skin, v.normal);
     return out;
 }
 
@@ -176,10 +232,10 @@ fn entityAlbedo(in: EntityOutput) -> vec4f {
 }
 
 @fragment
-fn fs_model(in: EntityOutput) -> @location(0) vec4f {
+fn fs_model(in: EntityOutput) -> GBuffer {
     let c = entityAlbedo(in);
     if (c.a < 0.5) { discard; }
-    return vec4f(c.rgb * in.brightness, 1.0);
+    return gBuffer(toLinear(c.rgb * in.brightness), in.relative, normalize(in.normal));
 }
 
 struct ItemVertex {
@@ -199,12 +255,14 @@ fn vs_item(v: ItemVertex, @builtin(instance_index) instance: u32) -> EntityOutpu
     out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
     out.textureIndex = 0u;
     out.brightness = vec3f(item.positionFloat.w);
+    out.relative = relative;
+    out.normal = transformNormal(item.model, v.normal);
     return out;
 }
 
 @fragment
-fn fs_item(in: EntityOutput) -> @location(0) vec4f {
+fn fs_item(in: EntityOutput) -> GBuffer {
     let c = textureSample(entityTexture0, blockSampler, in.uv);
     if (c.a <= 0.0) { discard; }
-    return vec4f(c.rgb * in.brightness, 1.0);
+    return gBuffer(toLinear(c.rgb * in.brightness), in.relative, normalize(in.normal));
 }

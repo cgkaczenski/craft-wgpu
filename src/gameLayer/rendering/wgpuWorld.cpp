@@ -36,6 +36,7 @@
 #include "chunk.h"
 
 #include <render/wgpuFrame.h>
+#include <render/wgpu2d.h>
 #include <webgpu/webgpu.hpp>
 
 #include <glm/glm.hpp>
@@ -72,8 +73,9 @@ namespace
 		glm::vec4 positionFloat;
 		glm::vec4 waterColor; // rgb, output (sRGB) space
 		glm::vec4 planes;     // x near, y far
+		glm::mat4 view;       // Camera::getViewMatrix, for G-buffer positions
 	};
-	static_assert(sizeof(Uniforms) == 128, "uniform layout must match chunkFaces.wgsl");
+	static_assert(sizeof(Uniforms) == 192, "uniform layout must match chunkFaces.wgsl");
 
 	// One face: short orientation, short texture, ivec3 position.
 	constexpr uint64_t faceBytes = 4 * sizeof(int);
@@ -81,6 +83,28 @@ namespace
 	// The depth convention: 0..1, near at 0, Less (docs/roadmap.md).
 	constexpr TextureFormat depthFormat = TextureFormat::Depth32Float;
 	constexpr float depthClear = 1.0f;
+
+	// Milestone 11: fboMain's targets (docs/roadmap.md, "Render targets"),
+	// in defaultShader.frag's output order, less one. WebGPU limits what a
+	// pixel's color attachments may cost together (maxColorAttachmentBytes-
+	// PerSample, 32 by default), and as a render target rg11b10ufloat costs
+	// 8 bytes, not the 4 it stores: GL's five (8 + 8 + 8 + 8 + 1) come to
+	// 33. GL's positions are RGB16F with no alpha, and here they are rgba16f,
+	// so the roughness (GL's fifth target, an r8) rides in their alpha: four
+	// targets, exactly 32. HDR color and bloom are rg11b10ufloat when the
+	// device can render to it, else rgba16float (also 8 bytes).
+	enum GBufferSlot { GColor, GPosition, GNormal, GBloom, GBufferSlots };
+	const char *const gBufferSlotNames[GBufferSlots] =
+		{ "world HDR color", "world positions and roughness", "world normals", "world bloom" };
+
+	// The debug views (gbufferView.wgsl's `view`): the four targets, the
+	// roughness (the positions' alpha) and the depth. The view shader's
+	// bindings: the four targets, the depth, the uniforms.
+	constexpr int gBufferViewCount = 6;
+	constexpr int viewBindings = GBufferSlots + 2;
+	const char *const gBufferViewLabels[gBufferViewCount] =
+		{ "HDR color", "View-space position", "Normal", "Bloom", "Roughness", "Depth" };
+	constexpr int previewWidth = 320; // the views' targets; height follows the aspect
 
 	// The arena starts at a million faces (16 MiB) and doubles when full.
 	constexpr uint64_t initialArenaFaces = 1u << 20;
@@ -194,6 +218,24 @@ namespace
 		// Milestone 10b: the inventory's block icons, drawn into wgpu2d
 		// targets (renderBlockIcons). Made on first use.
 		RenderPipeline iconPipeline = nullptr;
+
+		// Milestone 11: the G-buffer and what reads it. `pipeline` is the
+		// solid pass after the prepass (Equal, no depth writes).
+		TextureFormat hdrFormat = TextureFormat::RGBA16Float;
+		RenderPipeline prepassPipeline = nullptr;   // depth only, every target masked
+		RenderPipeline solidLessPipeline = nullptr; // the solid pass with the prepass off
+		Texture gBufferTextures[GBufferSlots] = {};
+		TextureView gBufferViews[GBufferSlots] = {};
+		TextureView depthSampleView = nullptr;      // the depth, for the depth view
+		BindGroupLayout viewBindGroupLayout = nullptr;
+		PipelineLayout viewPipelineLayout = nullptr;
+		BindGroup viewBindGroup = nullptr;          // the targets above; remade with them
+		RenderPipeline viewPipelines[gBufferViewCount] = {};
+		bool frameRendered = false;  // render drew the G-buffer; renderTransparent composites it
+		int compositeView = 0;       // WGPU_GBUFFER_VIEW: which view the composite shows
+		wgpu2d::FrameBuffer previews[gBufferViewCount];
+		uint32_t previewsWanted = 0; // bits: views asked for since the last frame
+		uint32_t previewsDrawn = 0;  // bits: views with a frame drawn in them
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
@@ -531,6 +573,35 @@ namespace
 		w.textureBindGroupLayout = wgpuDevice().createBindGroupLayout(textureLayoutDesc);
 		if (!w.textureBindGroupLayout) { return false; }
 
+		// The G-buffer views' group (gbufferView.wgsl): every attachment,
+		// loaded rather than sampled (no filtering: the normals are integers,
+		// and the rest is shown texel for texel), and the uniforms.
+		BindGroupLayoutEntry viewEntries[viewBindings];
+		for (uint32_t i = 0; i < (uint32_t)viewBindings; i++)
+		{
+			viewEntries[i] = Default;
+			viewEntries[i].binding = i;
+			viewEntries[i].visibility = ShaderStage::Fragment;
+			viewEntries[i].buffer.type = BufferBindingType::BindingNotUsed;
+			viewEntries[i].sampler.type = SamplerBindingType::BindingNotUsed;
+			viewEntries[i].storageTexture.access = StorageTextureAccess::BindingNotUsed;
+			viewEntries[i].texture.sampleType = TextureSampleType::UnfilterableFloat;
+			viewEntries[i].texture.viewDimension = TextureViewDimension::_2D;
+			viewEntries[i].texture.multisampled = false;
+		}
+		viewEntries[GNormal].texture.sampleType = TextureSampleType::Uint;
+		viewEntries[GBufferSlots].texture.sampleType = TextureSampleType::Depth;
+		viewEntries[GBufferSlots + 1].texture.sampleType = TextureSampleType::BindingNotUsed;
+		viewEntries[GBufferSlots + 1].buffer.type = BufferBindingType::Uniform;
+		viewEntries[GBufferSlots + 1].buffer.hasDynamicOffset = false;
+		viewEntries[GBufferSlots + 1].buffer.minBindingSize = 0;
+		BindGroupLayoutDescriptor viewLayoutDesc = Default;
+		viewLayoutDesc.label = StringView("world G-buffer view bind group layout");
+		viewLayoutDesc.entryCount = viewBindings;
+		viewLayoutDesc.entries = viewEntries;
+		w.viewBindGroupLayout = wgpuDevice().createBindGroupLayout(viewLayoutDesc);
+		if (!w.viewBindGroupLayout) { return false; }
+
 		BufferDescriptor bufferDesc = Default;
 		bufferDesc.label = StringView("world uniforms");
 		bufferDesc.usage = BufferUsage::Uniform | BufferUsage::CopyDst;
@@ -538,6 +609,58 @@ namespace
 		bufferDesc.mappedAtCreation = false;
 		w.uniformBuffer = wgpuDevice().createBuffer(bufferDesc);
 		return (bool)w.uniformBuffer && !scope.failed();
+	}
+
+	TextureFormat gBufferFormat(int slot)
+	{
+		switch (slot)
+		{
+			case GPosition: return TextureFormat::RGBA16Float; // xyz position, w roughness
+			case GNormal: return TextureFormat::RGBA16Uint;
+			default: return w.hdrFormat; // color, bloom
+		}
+	}
+
+	// Which color attachments a pipeline draws into; a pipeline must name
+	// the formats of the pass it is used in, slot for slot.
+	enum class ColorTargets
+	{
+		None,          // depth only (the water depth pass)
+		GBuffer,       // the G-buffer's four
+		GBufferMasked, // the four, nothing written: the prepass (glColorMask 0)
+		Hdr,           // the HDR color alone: the transparent passes
+		Surface,       // the screen, after the composite: decal, lines
+	};
+
+	uint32_t colorTargets(ColorTargets kind, const BlendState *blend, ColorTargetState (&out)[GBufferSlots])
+	{
+		for (ColorTargetState &t : out)
+		{
+			t = Default;
+			t.blend = nullptr;
+			t.writeMask = ColorWriteMask::All;
+		}
+		switch (kind)
+		{
+			case ColorTargets::None: return 0;
+			case ColorTargets::GBuffer:
+			case ColorTargets::GBufferMasked:
+				for (int i = 0; i < GBufferSlots; i++)
+				{
+					out[i].format = gBufferFormat(i);
+					if (kind == ColorTargets::GBufferMasked) { out[i].writeMask = ColorWriteMask::None; }
+				}
+				return GBufferSlots;
+			case ColorTargets::Hdr:
+				out[0].format = w.hdrFormat;
+				out[0].blend = blend;
+				return 1;
+			case ColorTargets::Surface:
+				out[0].format = wgpuSurfaceFormat();
+				out[0].blend = blend;
+				return 1;
+		}
+		return 0;
 	}
 
 	// One pipeline of the chunk face module. What GL switches between draws
@@ -548,8 +671,9 @@ namespace
 		const char *label = "";
 		PipelineLayout layout = nullptr;
 		const char *fragmentEntry = "fs_main";
-		bool colorTarget = true;  // false: depth only
+		ColorTargets targets = ColorTargets::GBuffer;
 		bool blend = false;       // GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA
+		bool depthWrite = true;
 		CompareFunction depthCompare = CompareFunction::Less;
 		CullMode cull = CullMode::Back;
 		int passMode = -1;        // the WGSL `passMode` override, -1 to leave it
@@ -598,10 +722,11 @@ namespace
 		desc.primitive.cullMode = p.cull;
 		desc.primitive.unclippedDepth = false;
 
-		// Depth writes stay on for every pass, as GL's depth mask did.
+		// Depth writes stay on for every pass but the solid pass after a
+		// prepass (where Equal could only write what is already there).
 		DepthStencilState depth = Default;
 		depth.format = depthFormat;
-		depth.depthWriteEnabled = OptionalBool::True;
+		depth.depthWriteEnabled = p.depthWrite ? OptionalBool::True : OptionalBool::False;
 		depth.depthCompare = p.depthCompare;
 		depth.stencilFront.compare = CompareFunction::Always;
 		depth.stencilFront.failOp = StencilOperation::Keep;
@@ -621,10 +746,8 @@ namespace
 		blend.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
 		blend.alpha = blend.color; // glBlendFunci sets both
 
-		ColorTargetState colorTarget = Default;
-		colorTarget.format = wgpuSurfaceFormat();
-		colorTarget.blend = p.blend ? &blend : nullptr;
-		colorTarget.writeMask = ColorWriteMask::All;
+		ColorTargetState targets[GBufferSlots];
+		const uint32_t targetCount = colorTargets(p.targets, p.blend ? &blend : nullptr, targets);
 
 		ConstantEntry constant = Default;
 		constant.key = StringView("passMode");
@@ -635,8 +758,8 @@ namespace
 		fragment.entryPoint = StringView(p.fragmentEntry);
 		fragment.constantCount = p.passMode >= 0 ? 1 : 0;
 		fragment.constants = p.passMode >= 0 ? &constant : nullptr;
-		fragment.targetCount = p.colorTarget ? 1 : 0;
-		fragment.targets = p.colorTarget ? &colorTarget : nullptr;
+		fragment.targetCount = targetCount;
+		fragment.targets = targetCount ? targets : nullptr;
 		desc.fragment = &fragment;
 
 		desc.multisample.count = 1;
@@ -669,25 +792,43 @@ namespace
 		w.transparentPipelineLayout = createPipelineLayout("world transparent pipeline layout", groups, 2);
 		if (!w.pipelineLayout || !w.transparentPipelineLayout) { module.release(); return false; }
 
-		// The opaque faces: the solid pass.
+		// The opaque faces (milestone 11): the depth prepass (zpass, GL_LESS,
+		// color masked), then the solid pass into the G-buffer with GL_EQUAL
+		// and nothing left to write to depth. Without the prepass (the
+		// renderer's zprepass off), the solid pass is GL_LESS on its own.
+		FacePipelineDesc prepass;
+		prepass.label = "world depth prepass";
+		prepass.layout = w.pipelineLayout;
+		prepass.fragmentEntry = "fs_depth";
+		prepass.targets = ColorTargets::GBufferMasked;
+		w.prepassPipeline = createFacePipeline(module, prepass);
+
 		FacePipelineDesc opaque;
 		opaque.label = "world opaque faces";
 		opaque.layout = w.pipelineLayout;
+		opaque.depthCompare = CompareFunction::Equal;
+		opaque.depthWrite = false;
 		w.pipeline = createFacePipeline(module, opaque);
+
+		opaque.label = "world opaque faces, no prepass";
+		opaque.depthCompare = CompareFunction::Less;
+		opaque.depthWrite = true;
+		w.solidLessPipeline = createFacePipeline(module, opaque);
 
 		// Pass 4: water into the peel depth, no color (glColorMask 0).
 		FacePipelineDesc waterDepth;
 		waterDepth.label = "world water depth";
 		waterDepth.layout = w.pipelineLayout;
 		waterDepth.fragmentEntry = "fs_waterDepth";
-		waterDepth.colorTarget = false;
+		waterDepth.targets = ColorTargets::None;
 		w.waterDepthPipeline = createFacePipeline(module, waterDepth);
 
-		// Pass 5: the peel, blended, GL_LESS, culled.
+		// Pass 5: the peel, blended, GL_LESS, culled, into the HDR color.
 		FacePipelineDesc peel;
 		peel.label = "world transparent peel";
 		peel.layout = w.transparentPipelineLayout;
 		peel.fragmentEntry = "fs_blend";
+		peel.targets = ColorTargets::Hdr;
 		peel.blend = true;
 		peel.passMode = 0;
 		w.peelPipeline = createFacePipeline(module, peel);
@@ -712,6 +853,7 @@ namespace
 		decal.label = "world crack decal";
 		decal.layout = w.decalPipelineLayout;
 		decal.fragmentEntry = "fs_decal";
+		decal.targets = ColorTargets::Surface;
 		decal.depthCompare = CompareFunction::LessEqual;
 		decal.zBias = -0.000001f;
 		w.decalPipeline = createFacePipeline(module, decal);
@@ -749,17 +891,19 @@ namespace
 		depth.depthBiasSlopeScale = 0.f;
 		depth.depthBiasClamp = 0.f;
 
-		ColorTargetState colorTarget = Default;
-		colorTarget.format = wgpuSurfaceFormat();
-		colorTarget.blend = nullptr;
-		colorTarget.writeMask = ColorWriteMask::All;
+		// Cubes, models and items write the G-buffer, as GL's entity shaders
+		// write fboMain's five targets; lines draw on the screen.
+		ColorTargetState gBufferTargets[GBufferSlots];
+		ColorTargetState surfaceTargets[GBufferSlots];
+		const uint32_t gBufferTargetCount = colorTargets(ColorTargets::GBuffer, nullptr, gBufferTargets);
+		colorTargets(ColorTargets::Surface, nullptr, surfaceTargets);
 
 		FragmentState fragment = Default;
 		fragment.module = module;
 		fragment.constantCount = 0;
 		fragment.constants = nullptr;
-		fragment.targetCount = 1;
-		fragment.targets = &colorTarget;
+		fragment.targetCount = gBufferTargetCount;
+		fragment.targets = gBufferTargets;
 
 		// Cubes: no vertex buffers, everything from storage. Back faces culled,
 		// as GL draws entities: every triangle of vertexDataOriginal winds
@@ -808,7 +952,11 @@ namespace
 		desc.primitive.cullMode = CullMode::None; // lines have no facing
 		depth.depthCompare = CompareFunction::LessEqual;
 		fragment.entryPoint = StringView("fs_line");
+		fragment.targetCount = 1;
+		fragment.targets = surfaceTargets;
 		w.linePipeline = wgpuDevice().createRenderPipeline(desc);
+		fragment.targetCount = gBufferTargetCount;
+		fragment.targets = gBufferTargets;
 
 		// Models and items: indexed or not, both culled like nothing (GL's
 		// hand is mirrored with scale(-1, 1, 1), which turns its winding
@@ -859,6 +1007,194 @@ namespace
 		const bool invalid = scope.failed();
 		module.release();
 		return w.cubePipeline && w.linePipeline && w.modelPipeline && w.itemPipeline && !invalid;
+	}
+
+	// The composite and the debug views (gbufferView.wgsl): one pipeline per
+	// view, the `view` override picking the attachment. All draw into
+	// targets of the surface's format (the surface, or wgpu2d render
+	// targets), with no depth and no blending.
+	bool createViewPipelines()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/gbufferView.wgsl");
+		if (!module) { return false; }
+
+		ErrorScope scope("world G-buffer view pipelines");
+
+		w.viewPipelineLayout = createPipelineLayout("world G-buffer view pipeline layout", &w.viewBindGroupLayout, 1);
+		if (!w.viewPipelineLayout) { module.release(); return false; }
+
+		ColorTargetState target = Default;
+		target.format = wgpuSurfaceFormat();
+		target.blend = nullptr;
+		target.writeMask = ColorWriteMask::All;
+
+		for (int i = 0; i < gBufferViewCount; i++)
+		{
+			ConstantEntry constant = Default;
+			constant.key = StringView("view");
+			constant.value = (double)i;
+
+			FragmentState fragment = Default;
+			fragment.module = module;
+			fragment.entryPoint = StringView("fs_view");
+			fragment.constantCount = 1;
+			fragment.constants = &constant;
+			fragment.targetCount = 1;
+			fragment.targets = &target;
+
+			RenderPipelineDescriptor desc = Default;
+			desc.label = StringView(gBufferViewLabels[i]);
+			desc.layout = w.viewPipelineLayout;
+			desc.vertex.module = module;
+			desc.vertex.entryPoint = StringView("vs_fullscreen");
+			desc.vertex.constantCount = 0;
+			desc.vertex.constants = nullptr;
+			desc.vertex.bufferCount = 0;
+			desc.vertex.buffers = nullptr;
+			desc.primitive.topology = PrimitiveTopology::TriangleList;
+			desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+			desc.primitive.frontFace = FrontFace::CCW;
+			desc.primitive.cullMode = CullMode::None;
+			desc.primitive.unclippedDepth = false;
+			desc.depthStencil = nullptr;
+			desc.fragment = &fragment;
+			desc.multisample.count = 1;
+			desc.multisample.mask = 0xFFFFFFFFu;
+			desc.multisample.alphaToCoverageEnabled = false;
+			w.viewPipelines[i] = wgpuDevice().createRenderPipeline(desc);
+			if (!w.viewPipelines[i]) { break; }
+		}
+
+		const bool invalid = scope.failed();
+		module.release();
+		for (RenderPipeline &pipeline : w.viewPipelines) { if (!pipeline) { return false; } }
+		return !invalid;
+	}
+
+	// A render pass on the G-buffer's five targets and the depth: the opaque
+	// pass (clearing them) and the entity pass (keeping what is there).
+	RenderPassEncoder beginGBufferPass(CommandEncoder encoder, bool clear, const char *label)
+	{
+		RenderPassColorAttachment colors[GBufferSlots];
+		for (int i = 0; i < GBufferSlots; i++)
+		{
+			colors[i] = Default;
+			colors[i].view = w.gBufferViews[i];
+			colors[i].depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+			colors[i].resolveTarget = nullptr;
+			colors[i].loadOp = clear ? LoadOp::Clear : LoadOp::Load;
+			colors[i].storeOp = StoreOp::Store;
+			// Black where nothing is drawn (the sky comes in milestone 14);
+			// for the normals, 0 is "no normal".
+			colors[i].clearValue = Color{ 0.0, 0.0, 0.0, 0.0 };
+		}
+
+		RenderPassDepthStencilAttachment depthAttachment = Default;
+		depthAttachment.view = w.depthView;
+		depthAttachment.depthLoadOp = clear ? LoadOp::Clear : LoadOp::Load;
+		depthAttachment.depthStoreOp = StoreOp::Store;
+		depthAttachment.depthClearValue = depthClear;
+		depthAttachment.depthReadOnly = false;
+		depthAttachment.stencilLoadOp = LoadOp::Undefined;
+		depthAttachment.stencilStoreOp = StoreOp::Undefined;
+		depthAttachment.stencilClearValue = 0;
+		depthAttachment.stencilReadOnly = false;
+
+		RenderPassDescriptor passDesc = Default;
+		passDesc.label = StringView(label);
+		passDesc.colorAttachmentCount = GBufferSlots;
+		passDesc.colorAttachments = colors;
+		passDesc.depthStencilAttachment = &depthAttachment;
+		passDesc.occlusionQuerySet = nullptr;
+		passDesc.timestampWrites = nullptr;
+		return encoder.beginRenderPass(passDesc);
+	}
+
+	// A render pass on the HDR color alone and the depth, keeping both: the
+	// transparent passes.
+	RenderPassEncoder beginHdrPass(CommandEncoder encoder, const char *label)
+	{
+		RenderPassColorAttachment color = Default;
+		color.view = w.gBufferViews[GColor];
+		color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+		color.resolveTarget = nullptr;
+		color.loadOp = LoadOp::Load;
+		color.storeOp = StoreOp::Store;
+
+		RenderPassDepthStencilAttachment depthAttachment = Default;
+		depthAttachment.view = w.depthView;
+		depthAttachment.depthLoadOp = LoadOp::Load;
+		depthAttachment.depthStoreOp = StoreOp::Store;
+		depthAttachment.depthClearValue = depthClear;
+		depthAttachment.depthReadOnly = false;
+		depthAttachment.stencilLoadOp = LoadOp::Undefined;
+		depthAttachment.stencilStoreOp = StoreOp::Undefined;
+		depthAttachment.stencilClearValue = 0;
+		depthAttachment.stencilReadOnly = false;
+
+		RenderPassDescriptor passDesc = Default;
+		passDesc.label = StringView(label);
+		passDesc.colorAttachmentCount = 1;
+		passDesc.colorAttachments = &color;
+		passDesc.depthStencilAttachment = &depthAttachment;
+		passDesc.occlusionQuerySet = nullptr;
+		passDesc.timestampWrites = nullptr;
+		return encoder.beginRenderPass(passDesc);
+	}
+
+	// The asked-for debug views, each into its own small wgpu2d target, and
+	// then the composite: the HDR color (or WGPU_GBUFFER_VIEW's attachment)
+	// onto the screen, in the frame's 2D pass, under the UI. The views go
+	// first: they need the frame encoder, which ends the 2D pass.
+	void compositeFrame()
+	{
+		if (!w.frameRendered || !w.viewBindGroup) { return; }
+		w.frameRendered = false;
+
+		const uint32_t wanted = w.previewsWanted;
+		w.previewsWanted = 0;
+		if (wanted)
+		{
+			const int previewHeight = std::max(1, previewWidth * w.depthHeight / std::max(1, w.depthWidth));
+			CommandEncoder encoder = wgpuFrameEncoder();
+			for (int i = 0; i < gBufferViewCount && encoder; i++)
+			{
+				if (!(wanted & (1u << i))) { continue; }
+				w.previews[i].resize(previewWidth, previewHeight);
+				TextureView target = wgpuTextureView(w.previews[i].texture.id);
+				if (!target) { continue; }
+
+				RenderPassColorAttachment color = Default;
+				color.view = target;
+				color.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
+				color.resolveTarget = nullptr;
+				color.loadOp = LoadOp::Clear;
+				color.storeOp = StoreOp::Store;
+				color.clearValue = Color{ 0.0, 0.0, 0.0, 1.0 };
+				RenderPassDescriptor passDesc = Default;
+				passDesc.label = StringView("world G-buffer view");
+				passDesc.colorAttachmentCount = 1;
+				passDesc.colorAttachments = &color;
+				passDesc.depthStencilAttachment = nullptr;
+				passDesc.occlusionQuerySet = nullptr;
+				passDesc.timestampWrites = nullptr;
+				RenderPassEncoder pass = encoder.beginRenderPass(passDesc);
+				pass.setPipeline(w.viewPipelines[i]);
+				pass.setBindGroup(0, w.viewBindGroup, 0, nullptr);
+				pass.draw(3, 1, 0, 0);
+				pass.end();
+				pass.release();
+				wgpuMarkTargetDrawn(w.previews[i].texture.id);
+				w.previewsDrawn |= 1u << i;
+			}
+		}
+
+		RenderPassEncoder pass = wgpuCurrentRenderPass();
+		if (!pass) { return; }
+		pass.setPipeline(w.viewPipelines[w.compositeView]);
+		pass.setBindGroup(0, w.viewBindGroup, 0, nullptr);
+		pass.draw(3, 1, 0, 0);
+		// The 2D pass is wgpu2d's: it ends it, and its own draws rebind.
 	}
 
 	Buffer makeStorageBuffer(const void *data, uint64_t bytes, const char *label)
@@ -1279,8 +1615,11 @@ namespace
 
 	void releaseTargets()
 	{
-		if (w.peelBindGroup) { w.peelBindGroup.release(); w.peelBindGroup = nullptr; }
-		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView })
+		for (BindGroup *group : { &w.peelBindGroup, &w.viewBindGroup })
+		{
+			if (*group) { group->release(); *group = nullptr; }
+		}
+		for (TextureView *view : { &w.depthView, &w.peelDepthView, &w.peelColorView, &w.depthSampleView })
 		{
 			if (*view) { view->release(); *view = nullptr; }
 		}
@@ -1288,7 +1627,13 @@ namespace
 		{
 			if (*texture) { texture->destroy(); texture->release(); *texture = nullptr; }
 		}
+		for (int i = 0; i < GBufferSlots; i++)
+		{
+			if (w.gBufferViews[i]) { w.gBufferViews[i].release(); w.gBufferViews[i] = nullptr; }
+			if (w.gBufferTextures[i]) { w.gBufferTextures[i].destroy(); w.gBufferTextures[i].release(); w.gBufferTextures[i] = nullptr; }
+		}
 	}
+
 
 	// The depth texture and the peel's copies have to match the surface's
 	// size exactly (copies and attachments both demand it), so they follow it.
@@ -1299,17 +1644,35 @@ namespace
 
 		ErrorScope scope("world render targets");
 
-		// The depth buffer: also a copy source, for the peel.
+		// The depth buffer: also a copy source, for the peel, and sampled by
+		// the depth view.
 		w.depthTexture = createTarget("world depth", depthFormat,
-			TextureUsage::RenderAttachment | TextureUsage::CopySrc, width, height);
+			TextureUsage::RenderAttachment | TextureUsage::CopySrc | TextureUsage::TextureBinding, width, height);
 		// The peel depth: a copy of it, drawn into (water) and then read.
 		w.peelDepthTexture = createTarget("world peel depth", depthFormat,
 			TextureUsage::RenderAttachment | TextureUsage::CopyDst | TextureUsage::TextureBinding, width, height);
-		// The peel color: a copy of the surface, in its format (a texture
+		// The peel color: a copy of the HDR color, in its format (a texture
 		// copy keeps the format; it cannot convert).
-		w.peelColorTexture = createTarget("world peel color", wgpuSurfaceFormat(),
+		w.peelColorTexture = createTarget("world peel color", w.hdrFormat,
 			TextureUsage::CopyDst | TextureUsage::TextureBinding, width, height);
 		if (!w.depthTexture || !w.peelDepthTexture || !w.peelColorTexture) { return false; }
+
+		// The G-buffer: drawn into, then read by the debug views (and, from
+		// milestone 12 on, the lighting). The HDR color is also the peel's
+		// copy source.
+		for (int i = 0; i < GBufferSlots; i++)
+		{
+			TextureUsage usage = TextureUsage::RenderAttachment | TextureUsage::TextureBinding;
+			if (i == GColor) { usage = usage | TextureUsage::CopySrc; }
+			w.gBufferTextures[i] = createTarget(gBufferSlotNames[i], gBufferFormat(i), usage, width, height);
+			if (!w.gBufferTextures[i]) { return false; }
+			w.gBufferViews[i] = createTargetView(w.gBufferTextures[i], gBufferSlotNames[i], gBufferFormat(i),
+				TextureAspect::All, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+			if (!w.gBufferViews[i]) { return false; }
+		}
+		w.depthSampleView = createTargetView(w.depthTexture, "world depth sample view", depthFormat,
+			TextureAspect::DepthOnly, TextureUsage::TextureBinding);
+		if (!w.depthSampleView) { return false; }
 
 		w.depthView = createTargetView(w.depthTexture, "world depth view", depthFormat,
 			TextureAspect::DepthOnly, TextureUsage::RenderAttachment);
@@ -1317,7 +1680,7 @@ namespace
 		// sampled) in different passes.
 		w.peelDepthView = createTargetView(w.peelDepthTexture, "world peel depth view", depthFormat,
 			TextureAspect::DepthOnly, TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
-		w.peelColorView = createTargetView(w.peelColorTexture, "world peel color view", wgpuSurfaceFormat(),
+		w.peelColorView = createTargetView(w.peelColorTexture, "world peel color view", w.hdrFormat,
 			TextureAspect::All, TextureUsage::TextureBinding);
 		if (!w.depthView || !w.peelDepthView || !w.peelColorView) { return false; }
 
@@ -1336,9 +1699,27 @@ namespace
 		w.peelBindGroup = wgpuDevice().createBindGroup(groupDesc);
 		if (!w.peelBindGroup || scope.failed()) { return false; }
 
+		// What the composite and the debug views read: the four targets,
+		// the depth, the uniforms.
+		BindGroupEntry viewEntries[viewBindings];
+		for (int i = 0; i < viewBindings; i++) { viewEntries[i] = Default; viewEntries[i].binding = i; }
+		for (int i = 0; i < GBufferSlots; i++) { viewEntries[i].textureView = w.gBufferViews[i]; }
+		viewEntries[GBufferSlots].textureView = w.depthSampleView;
+		viewEntries[GBufferSlots + 1].buffer = w.uniformBuffer;
+		viewEntries[GBufferSlots + 1].size = sizeof(Uniforms);
+		BindGroupDescriptor viewGroupDesc = Default;
+		viewGroupDesc.label = StringView("world G-buffer view bind group");
+		viewGroupDesc.layout = w.viewBindGroupLayout;
+		viewGroupDesc.entryCount = viewBindings;
+		viewGroupDesc.entries = viewEntries;
+		w.viewBindGroup = wgpuDevice().createBindGroup(viewGroupDesc);
+		if (!w.viewBindGroup || scope.failed()) { return false; }
+
 		w.depthWidth = width;
 		w.depthHeight = height;
-		std::cout << "WebGPU world targets: " << width << "x" << height << " (depth, peel depth, peel color)\n";
+		std::cout << "WebGPU world targets: " << width << "x" << height
+			<< " (G-buffer, HDR " << (w.hdrFormat == TextureFormat::RG11B10Ufloat ? "rg11b10ufloat" : "rgba16float")
+			<< "; depth, peel depth, peel color)\n";
 		return true;
 	}
 
@@ -1606,7 +1987,16 @@ namespace
 		if (w.initialized) { return true; }
 		if (w.failed || !wgpuDevice()) { return false; }
 
-		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines())
+		// The G-buffer's HDR format first: the pipelines name it.
+		w.hdrFormat = wgpuDevice().hasFeature(FeatureName::RG11B10UfloatRenderable)
+			? TextureFormat::RG11B10Ufloat : TextureFormat::RGBA16Float;
+		if (const char *view = std::getenv("WGPU_GBUFFER_VIEW"))
+		{
+			w.compositeView = std::clamp(std::atoi(view), 0, gBufferViewCount - 1);
+			std::cout << "WebGPU world: the composite shows " << gBufferViewLabels[w.compositeView] << "\n";
+		}
+
+		if (!createLayoutAndUniforms() || !createPipelines() || !createEntityPipelines() || !createViewPipelines())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -1784,7 +2174,7 @@ void removeChunk(const Chunk *chunk)
 }
 
 void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std::vector<BlockCube> &blockCubes,
-	const glm::vec3 &waterColor, bool waterPeel)
+	const glm::vec3 &waterColor, bool waterPeel, bool depthPrepass)
 {
 	if (!initialize()) { return; }
 	if (!updateResources()) { return; }
@@ -1824,6 +2214,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	};
 	uniforms.waterColor = glm::vec4(toSrgb(waterColor.r), toSrgb(waterColor.g), toSrgb(waterColor.b), 1.f);
 	uniforms.planes = glm::vec4(camera.closePlane, camera.farPlane, 0.f, 0.f);
+	uniforms.view = camera.getViewMatrix();
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
 
 	const auto recordStart = std::chrono::steady_clock::now();
@@ -1867,7 +2258,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	}
 	const uint32_t finalFirst = peelFirst + peelCount;
 	const uint32_t finalCount = (uint32_t)w.drawArgs.size() - finalFirst;
-	const uint32_t drawCalls = opaqueCount + (waterPeel ? 2 * peelCount : 0) + finalCount;
+	const uint32_t drawCalls = opaqueCount * (depthPrepass ? 2 : 1) + (waterPeel ? 2 * peelCount : 0) + finalCount;
 
 	DrawMode mode = w.drawMode;
 	if (mode != DrawMode::Direct && !w.drawArgs.empty())
@@ -1882,13 +2273,23 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		else { mode = DrawMode::Direct; }
 	}
 
-	// Solid pass: clears color (if nothing has yet) and depth.
+	// The opaque pass, into the G-buffer (milestone 11), clearing it and the
+	// depth: GL's depth prepass and solid pass in one render pass, so the
+	// depth stays on chip between them. The prepass writes depth only (every
+	// color target masked, glColorMask 0); the solid pass then shades each
+	// pixel once, where its depth is Equal to the nearest.
 	{
-		RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, true, depthClear, "world opaque pass");
-		if (!pass) { return; }
+		CommandEncoder encoder = wgpuFrameEncoder();
+		if (!encoder) { return; }
+		RenderPassEncoder pass = beginGBufferPass(encoder, true, "world opaque pass");
 		if (w.arena && opaqueCount)
 		{
-			bindFaces(pass, w.pipeline, false);
+			if (depthPrepass)
+			{
+				bindFaces(pass, w.prepassPipeline, false);
+				drawRecords(pass, mode, 0, opaqueCount);
+			}
+			bindFaces(pass, depthPrepass ? w.pipeline : w.solidLessPipeline, false);
 			drawRecords(pass, mode, 0, opaqueCount);
 		}
 
@@ -1906,7 +2307,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	}
 
 	// The transparent passes wait for renderTransparent, after the entities
-	// (GL's order: solid pass, entities, depth copy, transparency).
+	// (GL's order: solid pass, entities, depth copy, transparency), and
+	// the composite after them.
+	w.frameRendered = true;
 	w.pendingTransparent = w.arena && finalCount;
 	w.pending.mode = mode;
 	w.pending.waterPeel = waterPeel;
@@ -1993,7 +2396,7 @@ void removeMesh(unsigned int vao)
 void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<ModelInstance> &models,
 	const std::vector<ItemInstance> &items)
 {
-	if (!w.initialized || !w.bindGroup || !w.depthView) { return; }
+	if (!w.initialized || !w.bindGroup || !w.depthView || !w.frameRendered) { return; }
 	if (models.empty() && items.empty()) { w.lastModelDraws = w.lastItemDraws = 0; return; }
 	if (!ensureWhiteTexture()) { return; }
 
@@ -2048,8 +2451,10 @@ void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<Model
 
 	// One draw per instance: each has its own textures (one bind group per
 	// combination), and firstInstance picks its record.
-	RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world entity pass");
-	if (!pass) { return; }
+	// Into the G-buffer, as GL's entity shaders write fboMain.
+	CommandEncoder encoder = wgpuFrameEncoder();
+	if (!encoder) { return; }
+	RenderPassEncoder pass = beginGBufferPass(encoder, false, "world entity pass");
 	pass.setBindGroup(0, w.bindGroup, 0, nullptr);
 	pass.setBindGroup(1, w.entityBindGroup, 0, nullptr);
 
@@ -2100,7 +2505,7 @@ void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<Model
 
 void renderTransparent()
 {
-	if (!w.pendingTransparent) { return; }
+	if (!w.pendingTransparent) { compositeFrame(); return; }
 	w.pendingTransparent = false;
 
 	const DrawMode mode = w.pending.mode;
@@ -2146,11 +2551,10 @@ void renderTransparent()
 				pass.release();
 			}
 
-			// The peel (5): what lies beyond that surface, onto the frame.
+			// The peel (5): what lies beyond that surface, into the HDR color.
 			if (peelCount)
 			{
-				RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world peel pass");
-				if (!pass) { return; }
+				RenderPassEncoder pass = beginHdrPass(encoder, "world peel pass");
 				bindFaces(pass, w.peelPipeline, true);
 				drawRecords(pass, mode, peelFirst, peelCount);
 				pass.end();
@@ -2159,21 +2563,39 @@ void renderTransparent()
 
 			// Copy color and depth (6): what the water will show under it.
 			// Always, so far-LOD water never reads an old frame.
-			encoder = wgpuFrameEncoder();
-			copyWholeTexture(encoder, wgpuFrameTexture(), w.peelColorTexture, width, height);
+			copyWholeTexture(encoder, w.gBufferTextures[GColor], w.peelColorTexture, width, height);
 			copyWholeTexture(encoder, w.depthTexture, w.peelDepthTexture, width, height);
 		}
 
 		// The final transparency (7).
 		{
-			RenderPassEncoder pass = wgpuBeginSurfacePassWithDepth(w.depthView, false, depthClear, "world transparent pass");
-			if (!pass) { return; }
+			RenderPassEncoder pass = beginHdrPass(encoder, "world transparent pass");
 			bindFaces(pass, waterPeel ? w.finalPeelPipeline : w.finalPlainPipeline, true);
 			drawRecords(pass, mode, finalFirst, finalCount);
 			pass.end();
 			pass.release();
 		}
 	}
+
+	compositeFrame();
+}
+
+uint32_t gBufferPreview(int view)
+{
+	if (view < 0 || view >= gBufferViewCount) { return 0; }
+	w.previewsWanted |= 1u << view;
+	// Nothing until a frame has been drawn into it (the next one).
+	return (w.previewsDrawn & (1u << view)) ? w.previews[view].texture.id : 0;
+}
+
+const char *gBufferViewName(int view)
+{
+	return (view >= 0 && view < gBufferViewCount) ? gBufferViewLabels[view] : "";
+}
+
+int gBufferViewCountTotal()
+{
+	return gBufferViewCount;
 }
 
 void renderDecal(const std::vector<int> &faces, int crackFrame, unsigned int crackTexture)
@@ -2270,6 +2692,18 @@ void shutdown()
 		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
 	}
 	if (w.transparentPipelineLayout) { w.transparentPipelineLayout.release(); w.transparentPipelineLayout = nullptr; }
+	for (RenderPipeline *pipeline : { &w.prepassPipeline, &w.solidLessPipeline })
+	{
+		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
+	}
+	for (RenderPipeline &pipeline : w.viewPipelines)
+	{
+		if (pipeline) { pipeline.release(); pipeline = nullptr; }
+	}
+	if (w.viewPipelineLayout) { w.viewPipelineLayout.release(); w.viewPipelineLayout = nullptr; }
+	if (w.viewBindGroupLayout) { w.viewBindGroupLayout.release(); w.viewBindGroupLayout = nullptr; }
+	for (wgpu2d::FrameBuffer &preview : w.previews) { preview.cleanup(); }
+	w.previewsDrawn = 0;
 	for (RenderPipeline *pipeline : { &w.cubePipeline, &w.decalPipeline, &w.linePipeline, &w.iconPipeline })
 	{
 		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }

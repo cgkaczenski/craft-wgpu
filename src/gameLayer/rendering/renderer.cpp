@@ -3036,7 +3036,7 @@ void Renderer::renderFromBakedData(SunShadow &sunShadow, ChunkSystem &chunkSyste
 	}
 
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, defaultShader.shadingSettings.waterColor,
-		getShadingSettings().waterType != 0);
+		getShadingSettings().waterType != 0, zprepass);
 #endif
 
 

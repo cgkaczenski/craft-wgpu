@@ -39,6 +39,19 @@
 // six faces of the block being broken, with the `zBias` override pulling
 // them toward the camera, and fs_decal sampling one frame of crack.png.
 //
+// G-buffer (milestone 11): the opaque faces are drawn twice into fboMain's
+// targets (four here: the roughness rides in the positions' alpha, see
+// wgpuWorld.cpp's GBufferSlot). fs_depth is the depth prepass (zpass.frag: depth only, the
+// alpha test still cutting leaves); fs_main then runs once per visible pixel,
+// with depth compare Equal, writing GBuffer below. Both passes must compute
+// the same depth for Equal to hold, hence @invariant on the position.
+//
+// Color: the HDR target holds linear light, as GL's does. This world is
+// still unlit, so each fragment does its old math on texture colors as they
+// are (sRGB) and converts the result with toLinear; wgpuWorld's composite
+// converts back for the screen. Blending therefore happens in linear light,
+// as in GL.
+//
 // Conventions (docs/roadmap.md): positions camera-relative, depth 0..1.
 // No animation yet (grass, leaves sway and water waves in defaultShader.vert)
 // and no lighting: albedo times the orientation shade.
@@ -56,6 +69,9 @@ struct Uniforms {
     // x near plane, y far plane: to turn depth back into distance. z the
     // crack frame, 0-10, for fs_decal (written when a decal is drawn).
     planes: vec4f,
+    // Camera::getViewMatrix (rotation only): camera-relative positions to
+    // view space, for the G-buffer's positions (GL's u_view).
+    view: mat4x4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> vertexData: array<f32>;
@@ -85,7 +101,9 @@ struct FaceInput {
 };
 
 struct VertexOutput {
-    @builtin(position) position: vec4f,
+    // @invariant: the prepass and the solid pass are different pipelines,
+    // and Equal needs them to land on the same depth bit for bit.
+    @invariant @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
     @location(1) @interpolate(flat) layer: u32,
     @location(2) shade: f32,
@@ -118,6 +136,30 @@ const waterMask = array<f32, 24>(
 
 const stripToCorner = array<u32, 4>(0u, 1u, 3u, 2u);
 
+fn cornerShape(row: i32, corner: u32) -> vec3f {
+    let base = u32(row) * 12u + corner * 3u;
+    return vec3f(vertexData[base], vertexData[base + 1u], vertexData[base + 2u]);
+}
+
+// GL's linear <-> sRGB (defaultShader.frag's toLinearSRGB, and its inverse).
+fn toLinear(c: vec3f) -> vec3f {
+    let low = c / 12.92;
+    let high = pow((c + 0.055) / 1.055, vec3f(2.4));
+    return select(high, low, c < vec3f(0.04045));
+}
+
+fn fromLinear(c: vec3f) -> vec3f {
+    let low = c * 12.92;
+    let high = 1.055 * pow(c, vec3f(1.0 / 2.4)) - 0.055;
+    return select(high, low, c < vec3f(0.0031308));
+}
+
+// defaultShader.frag's fromFloatTouShort: [-1, 1] to [0, 65536], clamped to
+// 65535 (GL's 65536 for a component of exactly 1 does not fit 16 bits).
+fn packNormal(n: vec3f) -> vec4u {
+    return vec4u(min(vec3u((n + 1.0) * 0.5 * 65536.0), vec3u(65535u)), 0u);
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOutput {
     let orientation = face.orientationAndTexture.x;
@@ -133,8 +175,7 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
     if (orientation >= 10 && orientation < 16) { row = orientation - 10; }
 
     let corner = stripToCorner[vertexIndex];
-    let base = u32(row) * 12u + corner * 3u;
-    var shape = vec3f(vertexData[base], vertexData[base + 1u], vertexData[base + 2u]);
+    var shape = cornerShape(row, corner);
 
     // Water's surface corners sit 0.08 below the block top (GL adds waves
     // on top of that; they come with the rest of the animation).
@@ -149,9 +190,18 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
     var shade = 1.0;
     if (orientation >= 0 && orientation < 16) { shade = vertexColor[orientation]; }
 
-    var normal = vec3f(0.0, 1.0, 0.0);
+    // defaultShader.vert's normals: the table for cube faces and water, and
+    // for every other shape (grass, leaves, models) the face's own plane from
+    // three of its corners, as GL takes it.
+    var normal: vec3f;
     if (orientation >= 0 && orientation < 6) { normal = faceNormals[orientation]; }
     else if (orientation >= 22 && orientation < 28) { normal = faceNormals[orientation - 22]; }
+    else {
+        let p1 = cornerShape(row, corner);
+        let p2 = cornerShape(row, (corner + 1u) % 4u);
+        let p3 = cornerShape(row, (corner + 2u) % 4u);
+        normal = normalize(cross(p3 - p2, p1 - p2));
+    }
 
     // UVs are indexed by the orientation itself, leaves included
     // (defaultShader.vert's calculateUVs).
@@ -169,12 +219,38 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
     return out;
 }
 
+// The depth prepass (zpass.frag): no color, only the alpha test.
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+fn fs_depth(in: VertexOutput) {
     let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
-    // GL's alpha test: cut-out leaves, grass and flowers.
     if (albedo.a <= 0.0) { discard; }
-    return vec4f(albedo.rgb * in.shade, 1.0);
+}
+
+// fboMain's targets, in defaultShader.frag's order, GL's fifth (the
+// roughness, out_materials) in the positions' alpha.
+struct GBuffer {
+    @location(0) color: vec4f,      // HDR color, linear
+    @location(1) position: vec4f,   // xyz view-space position (out_screenSpacePositions), w roughness
+    @location(2) normal: vec4u,     // packNormal (out_normals)
+    @location(3) bloom: vec4f,      // emissive light for bloom (out_bloom)
+};
+
+@fragment
+fn fs_main(in: VertexOutput) -> GBuffer {
+    let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
+    // GL's alpha test: cut-out leaves, grass and flowers. After the prepass
+    // this only matters with the prepass off; with it, Equal has already
+    // dropped the cut-out pixels' fragments.
+    if (albedo.a <= 0.0) { discard; }
+
+    var out: GBuffer;
+    out.color = vec4f(toLinear(albedo.rgb * in.shade), 1.0);
+    // No material maps yet: GL's roughness without them, and no emission.
+    out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, 0.9);
+    // The face's normal: normal maps come with the lighting (milestone 12).
+    out.normal = packNormal(in.normal);
+    out.bloom = vec4f(0.0);
+    return out;
 }
 
 fn isWater(in: VertexOutput) -> bool {
@@ -219,7 +295,7 @@ fn fs_blend(in: VertexOutput) -> @location(0) vec4f {
         // abs: the final pass draws back faces too (no culling), and GL's
         // float target would take the >1 alpha a negative dotNV gives.
         let alpha = 1.0 - (1.0 - albedo.a) * abs(dotNV);
-        return vec4f(albedo.rgb * in.shade, alpha);
+        return vec4f(toLinear(albedo.rgb * in.shade), alpha);
     }
 
     // Water: its own color, not the texture's.
@@ -234,18 +310,22 @@ fn fs_blend(in: VertexOutput) -> @location(0) vec4f {
         // What is under the water, darkening with depth, mixed with the
         // surface by the view angle. GL also distorts the lookup with the
         // animated dudv map; that comes with the animation.
-        var under = textureLoad(peelColor, pixel, 0).rgb;
+        // The copy is of the HDR target (linear): back to the space this
+        // shader mixes in, then the result to linear again.
+        var under = fromLinear(textureLoad(peelColor, pixel, 0).rgb);
         under = mix(under, u.waterColor.rgb * 0.7, 0.6 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0));
-        return vec4f(mix(under, color, mixFactor), 1.0);
+        return vec4f(toLinear(mix(under, color, mixFactor)), 1.0);
     }
 
     // No peel: the water itself is see-through, more so looking down.
     let depthMix = 0.4 * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0);
     color = mix(color, u.waterColor.rgb * 0.7, depthMix);
-    return vec4f(color, pow(mixFactor, 0.7));
+    return vec4f(toLinear(color), pow(mixFactor, 0.7));
 }
 
 // The crack (decal.frag): frame planes.z of the strip, opaque where drawn.
+// Drawn on the screen after the composite, as GL draws it after its post
+// pass, so its color stays as the texture holds it.
 // crack.png is a wgpu2d texture, stored top row first, where GL's gl2d
 // stored it bottom row first (stbi flip on load): v is flipped to match.
 @fragment
