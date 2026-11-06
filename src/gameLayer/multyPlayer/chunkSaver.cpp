@@ -668,3 +668,42 @@ bool WorldSaver::loadEntityId(std::uint64_t &eid)
 
 	return success;
 }
+
+
+// Milestone G1: clock.bin is a version, the size of WorldClock, then the
+// WorldClock. A file of another version or size is ignored (a new clock).
+static constexpr std::uint32_t worldClockFileVersion = 1;
+
+void WorldSaver::saveWorldClock(const WorldClock &clock)
+{
+	std::string fileName = savePath + "/clock.bin";
+	std::ofstream f(fileName, std::ios::binary | std::ios::trunc);
+	if (!f.is_open()) { return; }
+
+	std::uint32_t header[2] = {worldClockFileVersion, (std::uint32_t)sizeof(WorldClock)};
+	WorldClock copy = clock;
+	appendData(f, header, sizeof(header));
+	appendData(f, &copy, sizeof(copy));
+}
+
+bool WorldSaver::loadWorldClock(WorldClock &clock)
+{
+	std::string fileName = savePath + "/clock.bin";
+	std::ifstream f(fileName, std::ios::binary);
+	if (!f.is_open()) { return false; }
+
+	std::uint32_t header[2] = {};
+	if (!readData(f, header, sizeof(header))) { return false; }
+	if (header[0] != worldClockFileVersion || header[1] != sizeof(WorldClock)) { return false; }
+
+	WorldClock loaded;
+	if (!readData(f, &loaded, sizeof(loaded))) { return false; }
+	if (!std::isfinite(loaded.worldSeconds) || loaded.dayLengthSeconds < 1
+		|| loaded.weather >= WEATHER_COUNT || loaded.nextWeather >= WEATHER_COUNT)
+	{
+		return false;
+	}
+
+	clock = loaded;
+	return true;
+}

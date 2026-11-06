@@ -2,6 +2,7 @@
 #include <chunk.h>
 #include <fstream>
 #include <string>
+#include <gameplay/weather.h>
 
 struct SavedChunk;
 struct EntityData;
@@ -32,6 +33,10 @@ struct WorldSaver
 	void saveEntityId(std::uint64_t eid);
 
 	bool loadEntityId(std::uint64_t &eid);
+
+	// Milestone G1: the world clock and the weather, in clock.bin.
+	void saveWorldClock(const WorldClock &clock);
+	bool loadWorldClock(WorldClock &clock);
 
 	glm::ivec3 spawnPosition = glm::ivec3(0, 107, 0); //todo probably move from here
 

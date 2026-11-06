@@ -8,11 +8,6 @@ here. Drafted 2026-11-06, after milestone 19d of the WebGPU port
 
 ## Ground rules
 
-- **Use the decomp to read designs. Write the code yourself.** It is rebuilt
-  from a commercial executable, and its own README limits it to research,
-  modding and preservation. Read how a system is shaped (its data, its states,
-  how it is driven), then write that from scratch here. Do not copy functions,
-  struct layouts or names.
 - The useful part is usually the **data model**, not the code. FNV's code is
   Gamebryo, D3D9-era and built around ESM/ESP forms; none of that transfers.
 - Multiplayer first: anything with state (time, weather, needs, AI) is owned by
@@ -26,22 +21,22 @@ The order follows dependencies: the presentation layer first, because it sits
 on the post passes the port just finished, then the condition evaluator that
 AI, perks and survival all use, then the systems built on it.
 
-| # | Milestone | Depends on |
-|---|---|---|
-| G1 | Day/night and weather | |
-| G2 | Imagespace modifiers | G1 (weather uses them) |
-| G3 | Screen splatter | G2 |
-| G4 | Impact data | |
-| G5 | Acoustic spaces and location music | |
-| G6 | Condition evaluator | |
-| G7 | AI packages and schedules | G1 (time of day), G6 |
-| G8 | AI LOD tiers | G7 |
-| G9 | Detection and stealth | G6, G7 |
-| G10 | Leveled lists | G6 |
-| G11 | Survival needs | G2, G6 |
-| G12 | Destructible objects | G4 |
-| G13 | Perks, XP and challenges | G6 |
-| Later | Distant LOD terrain | |
+| #     | Milestone                          | Depends on             |
+| ----- | ---------------------------------- | ---------------------- |
+| G1    | Day/night and weather              |                        |
+| G2    | Imagespace modifiers               | G1 (weather uses them) |
+| G3    | Screen splatter                    | G2                     |
+| G4    | Impact data                        |                        |
+| G5    | Acoustic spaces and location music |                        |
+| G6    | Condition evaluator                |                        |
+| G7    | AI packages and schedules          | G1 (time of day), G6   |
+| G8    | AI LOD tiers                       | G7                     |
+| G9    | Detection and stealth              | G6, G7                 |
+| G10   | Leveled lists                      | G6                     |
+| G11   | Survival needs                     | G2, G6                 |
+| G12   | Destructible objects               | G4                     |
+| G13   | Perks, XP and challenges           | G6                     |
+| Later | Distant LOD terrain                |                        |
 
 ## Presentation
 
@@ -66,6 +61,39 @@ commented out.
   [`worldGenerator.cpp`](../src/gameLayer/worldGenerator.cpp)'s biomes.
 - Rain and snow particles; covers the "day night and skybox" item in
   [`hardertodos.md`](../hardertodos.md).
+
+**G1a, done (branch `gameplay-g1-weather`):**
+
+- `WorldClock` ([`weather.h`](../include/gameLayer/gameplay/weather.h)):
+  world seconds, day length (20 minutes), a stop switch, the weather, the
+  next weather and the transition between them. The server owns it, saves it
+  as `clock.bin` every 5 seconds and at shutdown, and sends it
+  (`headerUpdateWorldClock`) on join, once a second and on any change.
+  Clients advance their copy between packets. Worlds without `clock.bin`
+  start at 0.1 (morning), clear.
+- Four weathers (clear, cloudy, rain, storm) chosen by a Markov chain (no
+  storm straight out of clear), each lasting minutes, changing over 30-60 s
+  with a smoothstep blend. Over 200 simulated hours: 52% clear, 28% cloudy,
+  16% rain, 4% storm.
+- Each weather is a `WeatherLook` applied on top of the time of day: sun and
+  ambient strength, sky light levels off, the sky toward grey (`sky.wgsl`'s
+  `overcastSky`, so the fog greys with it), the sun, moon, god rays and lens
+  flare hidden, and GL's `rainStrength` fog term, which was a constant 0, now
+  fed from the weather.
+- Commands: `/time`, `/time set <0..1 | sunrise | day | noon | sunset |
+  night | midnight>`, `/time stop`, `/time start`, `/time length <minutes>`,
+  `/weather`, `/weather <clear | cloudy | rain | storm> [seconds]`. The
+  client control panel shows the clock and can override the time and the
+  weather locally, for looking.
+- Checked: copies of `test` with each weather at 0.15 (screenshots), a 30 s
+  day running from dusk into night while clear turns to rain, `clock.bin`
+  saved and reloaded, and the clock logic in a standalone test.
+  Not checked in the game: the commands themselves (the input script cannot
+  type chat).
+
+**G1b, left:** rain and snow particles (with a top-block height map so they
+stop at roofs), precipitation by biome (snow when cold, none in deserts),
+per-biome weather weights, rain and thunder sounds, lightning.
 
 ### G2. Imagespace modifiers
 

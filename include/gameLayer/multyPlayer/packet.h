@@ -15,6 +15,7 @@
 #include <gl2d/gl2d.h>
 #include <gameplay/life.h>
 #include <gameplay/battleUI.h>
+#include <gameplay/weather.h>
 
 using EventCounter = unsigned int;
 using RevisionNumber = unsigned int;
@@ -94,6 +95,7 @@ enum : std::uint32_t
 	headerClientChangeBlockData,
 	headerChangeBlockData,
 	headerTrainingDummyGotAttacked, //from server to players!
+	headerUpdateWorldClock, //from server to players: the time of day and the weather (G1)
 
 };
 
@@ -131,6 +133,11 @@ struct Packet_DisconectOtherPlayer
 struct Packet_ClientUpdateTimer
 {
 	std::uint64_t timer = 0;
+};
+
+struct Packet_UpdateWorldClock
+{
+	WorldClock clock = {};
 };
 
 //also used for Packet_ClientDamageLocallyAndDied

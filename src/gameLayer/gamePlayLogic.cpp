@@ -37,6 +37,7 @@
 #include <blockUpdates.h>
 #include <climits>
 #include "rendering/wgpuWorld.h"
+#include <gameplay/weather.h>
 
 struct GameData
 {
@@ -1759,11 +1760,28 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	//
 #pragma region weather and time
 
-	static float dayTime = 0.25;
+	// Milestone G1: the server's clock and weather, advanced here between
+	// its packets. The client control panel can override either, to look at
+	// a time or a weather without changing the world.
+	static bool overrideDayTime = false;
+	static float overriddenDayTime = 0.25f;
+	static bool overrideWeather = false;
+	static int overriddenWeather = weatherClear;
+	static int overriddenNextWeather = weatherRain;
+	static float overriddenTransition = 0;
+
+	auto &worldClock = getClientWorldClock();
+	worldClock.advance(deltaTime);
+
+	float dayTime = overrideDayTime ? overriddenDayTime : worldClock.dayTime();
 	programData.renderer.sunPos = calculateSunPosition(dayTime);
-	
-	//dayTime += deltaTime * 0.05f;
-	if (dayTime > 0) { dayTime -= (int)dayTime; }
+
+	programData.renderer.weather = worldClock.look();
+	if (overrideWeather)
+	{
+		programData.renderer.weather = mixWeatherLooks(getWeatherLook(overriddenWeather),
+			getWeatherLook(overriddenNextWeather), overriddenTransition);
+	}
 
 #pragma endregion
 
@@ -2068,7 +2086,32 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		if (ImGui::Begin("client controll"))
 		{
 
-			ImGui::SliderFloat("Day time", &dayTime, 0, 1);
+			{
+				auto &clock = getClientWorldClock();
+				ImGui::Text("Day %d, time of day %.3f%s", 
+					(int)(clock.worldSeconds / std::max(clock.dayLengthSeconds, 1.f)), clock.dayTime(),
+					clock.dayCycle ? "" : " (stopped)");
+				if (clock.weather == clock.nextWeather)
+				{
+					ImGui::Text("Weather: %s", getWeatherName(clock.weather));
+				}
+				else
+				{
+					ImGui::Text("Weather: %s, turning %s (%.0f%%)", getWeatherName(clock.weather),
+						getWeatherName(clock.nextWeather), clock.transition * 100.f);
+				}
+
+				ImGui::Checkbox("Override day time", &overrideDayTime);
+				if (overrideDayTime) { ImGui::SliderFloat("Day time", &overriddenDayTime, 0, 1); }
+
+				ImGui::Checkbox("Override weather", &overrideWeather);
+				if (overrideWeather)
+				{
+					ImGui::Combo("Weather", &overriddenWeather, "clear\0cloudy\0rain\0storm\0");
+					ImGui::Combo("Next weather", &overriddenNextWeather, "clear\0cloudy\0rain\0storm\0");
+					ImGui::SliderFloat("Transition", &overriddenTransition, 0, 1);
+				}
+			}
 
 			if (centerChunk)
 			{

@@ -168,6 +168,12 @@ namespace wgpuWorld
 		float fogDistance = 100;  // GL's u_fogDistance: the view distance less a chunk
 		float fogGradient = 16;   // the fogGradient setting; 0 turns the near fog off
 		bool underWater = false;  // GL fogs only above water
+		// Milestone G1, the weather: how far the sky goes to grey (and the sun
+		// and moon fade) and how much darker that grey is, both 0..1; and
+		// GL's rainStrength for the near fog, 0..1.
+		float overcast = 0;
+		float skyDarken = 0;
+		float rain = 0;
 
 		// Milestone 15: the post chain's settings (toneMap.frag's uniforms,
 		// as the renderer computes them). Lift and gain already mapped

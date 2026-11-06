@@ -7,6 +7,7 @@
 #include "blocks.h"
 #include <unordered_map>
 #include <rendering/model.h>
+#include <gameplay/weather.h>
 
 struct BlocksLoader;
 struct ChunkSystem;
@@ -104,6 +105,10 @@ struct Renderer
 	float waterTimer = 0;
 
 	glm::vec3 sunPos = glm::normalize(glm::vec3(-1, 0.84, -1));//todo change
+
+	// Milestone G1: how the weather changes this frame's look (set each frame
+	// from the world clock, before renderFromBakedData).
+	WeatherLook weather;
 };
 
 // Debug cubes and lines, drawn by wgpuWorld as line segments.

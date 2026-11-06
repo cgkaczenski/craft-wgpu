@@ -76,6 +76,26 @@ void broadCast(Packet p, void *data, size_t size, ENetPeer *peerToIgnore, bool r
 	broadCastNotLocked(p, data, size, peerToIgnore, reliable, channel);
 }
 
+// Milestone G1: the world clock and the weather, to one player (peer) or to
+// all of them (nullptr).
+static void sendWorldClock(ENetPeer *peer, bool reliable)
+{
+	Packet packet;
+	packet.header = headerUpdateWorldClock;
+
+	Packet_UpdateWorldClock packetData;
+	packetData.clock = getServerWorldClock();
+
+	if (peer)
+	{
+		sendPacket(peer, packet, (const char *)&packetData, sizeof(packetData), reliable, channelHandleConnections);
+	}
+	else
+	{
+		broadCast(packet, &packetData, sizeof(packetData), nullptr, reliable, channelHandleConnections);
+	}
+}
+
 //TODO REMOVE
 bool checkIfPlayerShouldGetChunk(glm::ivec2 playerPos2D,
 	glm::ivec2 chunkPos, int playerSquareDistance)
@@ -295,6 +315,8 @@ void addConnection(ENetHost *server, ENetEvent &event, WorldSaver &worldSaver)
 		sendPacket(event.peer, packet, (const char *)&packetData,
 			sizeof(packetData), true, channelHandleConnections);
 	}
+
+	sendWorldClock(event.peer, true);
 
 	//send inventory
 	{
@@ -974,6 +996,11 @@ void enetServerFunction(std::string path)
 	wg.init();
 	ENetEvent event = {};
 
+	// Milestone G1: the world's clock and weather, or a new world's.
+	getServerWorldClock() = makeNewWorldClock();
+	worldSaver.loadWorldClock(getServerWorldClock());
+	serverWorldClockChanged() = false;
+
 
 	//todo will remove later!
 	std::ifstream seedFile(std::string(RESOURCES_PATH "worlds/") + path + "/seed.txt");
@@ -1043,6 +1070,8 @@ void enetServerFunction(std::string path)
 
 	float sendEntityTimer = 0.5;
 	float sentTimerUpdateTimer = 1;
+	float saveWorldClockTimer = 5;
+	std::minstd_rand weatherRng(std::random_device{}());
 
 	float tickTimer = 0;
 
@@ -1137,10 +1166,31 @@ void enetServerFunction(std::string path)
 
 				broadCast(packet, &packetData, sizeof(packetData), nullptr, false, channelHandleConnections);
 
+				sendWorldClock(nullptr, false);
 			}
 
 
 
+		}
+	#pragma endregion
+
+	#pragma region world clock and weather (G1)
+		{
+			serverUpdateWorldClock(getServerWorldClock(), deltaTime, weatherRng);
+
+			// A new weather, or a command: everyone hears at once, reliably.
+			if (serverWorldClockChanged())
+			{
+				serverWorldClockChanged() = false;
+				sendWorldClock(nullptr, true);
+			}
+
+			saveWorldClockTimer -= deltaTime;
+			if (saveWorldClockTimer <= 0)
+			{
+				saveWorldClockTimer = 5;
+				worldSaver.saveWorldClock(getServerWorldClock());
+			}
 		}
 	#pragma endregion
 
@@ -1152,6 +1202,7 @@ void enetServerFunction(std::string path)
 		serverProfiler.endFrame();
 	}
 
+	worldSaver.saveWorldClock(getServerWorldClock());
 	clearSD(worldSaver);
 	wg.clear();
 	structuresManager.clear();

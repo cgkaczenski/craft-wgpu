@@ -80,7 +80,7 @@ namespace
 		glm::vec4 ambientColor;  // rgb
 		glm::ivec4 lightParams;  // x sky light intensity, y point lights, z shadows setting, w SSR
 		glm::mat4 shadowMatrices[3]; // camera-relative to each cascade's clip space, 0..1 deep
-		glm::vec4 fogParams;         // x fog distance, y near fog gradient, z underwater
+		glm::vec4 fogParams;         // x fog distance, y near fog gradient, z underwater, w rain (G1)
 		glm::mat4 projection;        // view to clip space, for the reflections (milestone 17)
 		glm::vec4 underWaterColor;   // rgb the color, w darken strength (milestone 18)
 		glm::vec4 underWaterParams;  // x darken distance, y fog gradient under water
@@ -108,8 +108,9 @@ namespace
 		glm::vec4 moonParams;
 		glm::vec4 raySunParams;          // the same for the god rays' copies (milestone 18)
 		glm::vec4 rayMoonParams;
+		glm::vec4 weather;               // x overcast, y how much darker the grey (milestone G1)
 	};
-	static_assert(sizeof(SkyUniforms) == 272, "must match sky.wgsl's SkyUniforms");
+	static_assert(sizeof(SkyUniforms) == 288, "must match sky.wgsl's SkyUniforms");
 
 	// Milestone 18: godRays.wgsl's RayUniforms and underwater.wgsl's WarpUniforms.
 	struct RayUniforms
@@ -4357,7 +4358,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	{
 		uniforms.shadowMatrices[i] = glm::mat4(depthToZeroOne * lighting.shadowCascades[i] * fromCamera);
 	}
-	uniforms.fogParams = glm::vec4(lighting.fogDistance, lighting.fogGradient, lighting.underWater ? 1.f : 0.f, 0.f);
+	uniforms.fogParams = glm::vec4(lighting.fogDistance, lighting.fogGradient, lighting.underWater ? 1.f : 0.f,
+		glm::clamp(lighting.rain, 0.f, 1.f));
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
 
 	// Milestone 14: the sky's uniforms. The sun at sunPos and the moon
@@ -4368,11 +4370,15 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	sky.weights = glm::vec4(lighting.skyWeights, 0.f);
 	sky.sunMatrix = sunMatrix(camera, lighting.sunPosition, 0.9f);
 	sky.moonMatrix = sunMatrix(camera, -lighting.sunPosition, 0.6f);
-	sky.sunParams = glm::vec4(lighting.sunTwilight, 1.f, 0.f, 0.f);
-	sky.moonParams = glm::vec4(0.f, 1.f, 0.f, 0.f);
+	// Milestone G1: clouds hide the sun and the moon, and so their god rays.
+	const float overcast = glm::clamp(lighting.overcast, 0.f, 1.f);
+	const float clearSky = 1.f - overcast;
+	sky.sunParams = glm::vec4(lighting.sunTwilight, clearSky, 0.f, 0.f);
+	sky.moonParams = glm::vec4(0.f, clearSky, 0.f, 0.f);
 	// renderSun's second drawing, for the god rays.
-	sky.raySunParams = glm::vec4(std::max(lighting.sunTwilight, 0.5f), 1.f, 0.f, 0.f);
-	sky.rayMoonParams = glm::vec4(0.f, 0.35f, 0.f, 0.f);
+	sky.raySunParams = glm::vec4(std::max(lighting.sunTwilight, 0.5f), clearSky, 0.f, 0.f);
+	sky.rayMoonParams = glm::vec4(0.f, 0.35f * clearSky, 0.f, 0.f);
+	sky.weather = glm::vec4(overcast, glm::clamp(lighting.skyDarken, 0.f, 1.f), 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.skyUniformBuffer, 0, &sky, sizeof(sky));
 
 	// Milestone 15: the post chain's settings, for the composite.

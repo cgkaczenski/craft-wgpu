@@ -123,6 +123,9 @@ struct SkyUniforms {
     // them again with the twilight at least 0.5 and the moon at 0.35.
     raySunParams: vec4f,
     rayMoonParams: vec4f,
+    // Milestone G1, the weather: x how far the sky goes to grey (overcast,
+    // 0..1), y how much darker that grey is (0..1).
+    weather: vec4f,
 };
 @group(0) @binding(0) var<uniform> sky: SkyUniforms;
 @group(0) @binding(1) var daySky: texture_cube<f32>;
@@ -144,9 +147,10 @@ struct SkyTargets {
 fn fs_sky(in: FullscreenOutput) -> SkyTargets {
     let far = sky.inverseViewProjection * vec4f(in.ndc, 1.0, 1.0);
     let direction = normalize(far.xyz / far.w);
-    let color = (textureSample(daySky, skySampler, direction).rgb * sky.weights.x
+    var color = (textureSample(daySky, skySampler, direction).rgb * sky.weights.x
         + textureSample(twilightSky, skySampler, direction).rgb * sky.weights.y
         + textureSample(nightSky, skySampler, direction).rgb * sky.weights.z) * 1.2;
+    color = overcastSky(color);
     var out: SkyTargets;
     out.sky = vec4f(color, 1.0);
     out.color = vec4f(color, 1.0);
@@ -163,6 +167,18 @@ struct SunOutput {
 // turns toward the sun, so 4 units out along the sun's direction, as a
 // strip. The depth goes to the far plane (gl_Position.z = w), so anything
 // drawn hides it.
+// Milestone G1: clouds. The sky toward a grey as bright as it was on average
+// (so the time of day still shows: a grey day, a darker grey dusk, a dark
+// night), a little blue, darker by the weather's skyDarken. The fog of the lit
+// shaders reads this sky, so it greys with it.
+fn overcastSky(color: vec3f) -> vec3f {
+    let overcast = sky.weather.x;
+    if (overcast <= 0.0) { return color; }
+    let brightness = dot(color, vec3f(1.0 / 3.0));
+    let grey = vec3f(brightness) * vec3f(0.94, 0.97, 1.0) * (1.0 - sky.weather.y);
+    return mix(color, grey, overcast);
+}
+
 @vertex
 fn vs_sun(@builtin(vertex_index) index: u32, @builtin(instance_index) instance: u32) -> SunOutput {
     let corner = vec2f(f32(index & 1u) * 2.0 - 1.0, f32(index >> 1u) * 2.0 - 1.0);

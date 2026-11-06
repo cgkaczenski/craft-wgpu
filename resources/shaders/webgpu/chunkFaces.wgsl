@@ -685,22 +685,28 @@ fn reflectSurface(in: VertexOutput, s: Shaded) -> Reflection {
 // how much of the lit color is left at `dist` blocks from the camera, the
 // rest going to the sky behind. A near haze thickening with distance, more
 // so low down (airDensity grows with height above 60), and a hard edge at
-// u_fogDistance so the world's end fades into the sky. GL's rain and
-// time-of-day terms are constants there (rainStrength 0, tmult 0) and are
-// folded in. GL divides by the near fog's density, so its setting of 0
-// ("disables" the near fog, by the menu) makes a NaN; here 0 skips it.
+// u_fogDistance so the world's end fades into the sky. GL's rainStrength was
+// a constant 0 there; milestone G1 feeds it from the weather (fogParams.w):
+// rain thins the density a little, flattens the height falloff and raises
+// the haze. GL's time-of-day term (tmult) was commented out, its rain end
+// kept here: tmult = rainStrength. GL divides by the near fog's density, so
+// its setting of 0 ("disables" the near fog, by the menu) makes a NaN; here 0
+// skips it.
 fn computeFog(distance: f32, fragmentHeight: f32) -> f32 {
-    let density = u.fogParams.y;
+    let rain = u.fogParams.w;
+    let density = u.fogParams.y * (1.0 - rain * 0.115);
     let airDensity = max(fragmentHeight / 10.0, 6.0);
     let eyeBrightnessSmooth = 120.0;
 
     var near = 1.0;
     if (density > 0.0) {
         let d = pow(distance * 0.8, 0.85);
-        let height = airDensity;
-        let haze = 2.625 / exp(-60.0 / 10.0 / density) * exp(-airDensity / density)
-            * (1.0 - exp(-pow(d, 2.712) * height / density / 6000.0 / 13.0)) / height;
-        near = 1.0 - clamp(haze, 0.0, 1.0) * clamp((eyeBrightnessSmooth / 255.0 - 2.0 / 16.0) * 4.0, 0.0, 1.0);
+        let height = mix(airDensity, 6.0, rain);
+        let tmult = rain;
+        let haze = (2.625 + rain * 3.4) / exp(-60.0 / 10.0 / density) * exp(-airDensity / density)
+            * (1.0 - exp(-pow(d, 2.712) * height / density / (6000.0 - tmult * tmult * 2000.0) / 13.0)) / height;
+        near = 1.0 - pow(clamp(haze, 0.0, 1.0), 1.0 - rain * 0.63)
+            * clamp((eyeBrightnessSmooth / 255.0 - 2.0 / 16.0) * 4.0, 0.0, 1.0);
     }
 
     let far = pow(exp(-pow(distance / u.fogParams.x, 32.0)), 0.10);

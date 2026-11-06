@@ -22,6 +22,7 @@
 #include <lightSystem.h>
 #include <rendering/renderSettings.h>
 #include <vector>
+#include <algorithm>
 
 #include <imgui-docking/imgui/imgui.h>
 
@@ -1850,7 +1851,10 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		float nightSkyLight = 3;
 		float twilightLight = 9;
 
-		skyLightIntensity = std::roundf(doDayLightCalculations(daySkyLight, nightSkyLight, twilightLight));
+		// Milestone G1: clouds and rain take sky light levels off.
+		skyLightIntensity = std::roundf(doDayLightCalculations(daySkyLight, nightSkyLight, twilightLight)
+			- weather.skyLightDrop);
+		skyLightIntensity = std::clamp(skyLightIntensity, 0, 15);
 		
 		//std::cout << skyLightIntensity << "\n";
 	}
@@ -1862,7 +1866,8 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		glm::vec3 nightSkyLight = (glm::vec3(47, 135, 244) / 255.f) * 0.2f;
 		glm::vec3 twilightLight = (glm::vec3(255, 159, 107) / 255.f) * 0.3f;
 		
-		sunLightColor = doDayLightCalculations(daySkyLight, nightSkyLight, twilightLight);
+		sunLightColor = doDayLightCalculations(daySkyLight, nightSkyLight, twilightLight)
+			* weather.sunStrength;
 	}
 
 	glm::vec3 ambientColor = {1,1,1};
@@ -1871,7 +1876,8 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		glm::vec3 nightSkyLight = (glm::vec3(47, 135, 244) / 255.f) * 0.6f;
 		glm::vec3 twilightLight = (glm::vec3(255, 159, 107) / 255.f) * 0.7f;
 
-		ambientColor = doDayLightCalculations(daySkyLight, nightSkyLight, twilightLight);
+		ambientColor = doDayLightCalculations(daySkyLight, nightSkyLight, twilightLight)
+			* weather.ambientStrength;
 	}
 
 	
@@ -2012,6 +2018,11 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	lighting.fogDistance = (chunkSystem.squareSize / 2.f) * CHUNK_SIZE - CHUNK_SIZE;
 	lighting.fogGradient = getShadingSettings().fogGradient;
 	lighting.underWater = underWater;
+	// Milestone G1: the weather's grey sky (which also hides the sun and the
+	// moon) and the rain's thicker near fog.
+	lighting.overcast = weather.overcast;
+	lighting.skyDarken = weather.skyDarken;
+	lighting.rain = weather.rain;
 	// Milestone 15: the tone mapper's and FXAA's settings, as GL sets them.
 	lighting.tonemapper = getShadingSettings().tonemapper;
 	lighting.saturation = getShadingSettings().toneMapSaturation;
@@ -2153,6 +2164,7 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 			glm::vec2 vectorTwardsCenter = (center - sunPos) * 2.f;
 
 			float globalBrightness = (1 - (glm::length(center - sunPos) / 0.6f)) * sunOcclusionFactor;
+			globalBrightness *= 1.f - weather.overcast; // G1: no flare through clouds
 
 			if (globalBrightness > 0)
 			{

@@ -28,6 +28,9 @@
 #include <gameplay/gameplayRules.h>
 #include <gameplay/food.h>
 #include <profiler.h>
+#include <cstdio>
+#include <cmath>
+#include <algorithm>
 #include <magic_enum.hpp>
 
 static std::atomic<bool> serverRunning = false;
@@ -1292,7 +1295,113 @@ std::string executeServerCommand(std::uint64_t cid, const char *command)
 			return "Invalid command!";
 		}
 
+		// Milestone G1: the world clock. /time, /time set <0..1 or a name>,
+		// /time stop, /time start, /time length <minutes per day>.
+		if (consumeStringToken("time"))
+		{
+			auto &clock = getServerWorldClock();
+			auto report = [&]()
+			{
+				char text[128] = {};
+				std::snprintf(text, sizeof(text), "Time of day %.3f, day %d, %.1f minutes a day%s",
+					clock.dayTime(), (int)(clock.worldSeconds / std::max(clock.dayLengthSeconds, 1.f)),
+					clock.dayLengthSeconds / 60.f, clock.dayCycle ? "" : ", stopped");
+				return std::string(text);
+			};
 
+			if (isEof()) { return report(); }
+
+			if (consumeStringToken("set"))
+			{
+				const struct { const char *name; float time; } named[] =
+				{
+					{"sunrise", 0.f}, {"day", 0.1f}, {"noon", 0.25f},
+					{"sunset", 0.5f}, {"night", 0.6f}, {"midnight", 0.75f},
+				};
+
+				double number = 0;
+				bool found = false;
+				if (consumeNumber(&number))
+				{
+					found = number >= 0 && number <= 1;
+				}
+				else
+				{
+					for (auto &n : named)
+					{
+						if (consumeStringToken(n.name)) { number = n.time; found = true; break; }
+					}
+				}
+				if (!found) { return "Usage: /time set <0..1, sunrise, day, noon, sunset, night or midnight>"; }
+
+				clock.setDayTime((float)number);
+				serverWorldClockChanged() = true;
+				return report();
+			}
+
+			if (consumeStringToken("stop"))
+			{
+				clock.dayCycle = 0;
+				serverWorldClockChanged() = true;
+				return report();
+			}
+
+			if (consumeStringToken("start"))
+			{
+				clock.dayCycle = 1;
+				serverWorldClockChanged() = true;
+				return report();
+			}
+
+			if (consumeStringToken("length"))
+			{
+				double minutes = 0;
+				if (!consumeNumber(&minutes) || minutes < 0.1 || minutes > 24 * 60)
+				{
+					return "Usage: /time length <minutes per day, 0.1 to 1440>";
+				}
+				// The same time of day at the new length.
+				const float dayTime = clock.dayTime();
+				const double days = std::floor(clock.worldSeconds / std::max(clock.dayLengthSeconds, 1.f));
+				clock.dayLengthSeconds = (float)(minutes * 60);
+				clock.worldSeconds = (days + dayTime) * clock.dayLengthSeconds;
+				serverWorldClockChanged() = true;
+				return report();
+			}
+
+			return "Usage: /time [set <time>, stop, start, length <minutes>]";
+		}
+
+		// /weather, /weather <clear, cloudy, rain or storm> [seconds to change].
+		if (consumeStringToken("weather"))
+		{
+			auto &clock = getServerWorldClock();
+			if (isEof())
+			{
+				if (clock.weather == clock.nextWeather)
+				{
+					return std::string("Weather: ") + getWeatherName(clock.weather);
+				}
+				return std::string("Weather: ") + getWeatherName(clock.weather) + ", turning "
+					+ getWeatherName(clock.nextWeather);
+			}
+
+			for (int i = 0; i < WEATHER_COUNT; i++)
+			{
+				if (consumeStringToken(getWeatherName(i)))
+				{
+					double seconds = 10;
+					consumeNumber(&seconds);
+					clock.startWeather(i, (float)std::max(seconds, 0.0));
+					// It holds for a while before the server picks another.
+					clock.secondsUntilChange = 10 * 60;
+					serverWorldClockChanged() = true;
+					return std::string("Weather turning ") + getWeatherName(i);
+				}
+			}
+
+			return "Usage: /weather <clear, cloudy, rain or storm> [seconds]";
+		}
 
 	}
 

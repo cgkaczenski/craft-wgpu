@@ -653,6 +653,15 @@ void recieveDataClient(ENetEvent &event,
 			break;
 		}
 
+		case headerUpdateWorldClock:
+		{
+			if (sizeof(Packet_UpdateWorldClock) != size) { break; }
+
+			Packet_UpdateWorldClock *p = (Packet_UpdateWorldClock *)data;
+			getClientWorldClock() = p->clock;
+			break;
+		}
+
 		case headerRemoveEntity:
 		{
 			if (sizeof(Packet_RemoveEntity) != size) { break; } //todo logs or something

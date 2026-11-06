@@ -37,7 +37,8 @@ struct Uniforms {
     // Milestone 14's fog (GL's ShadingSettings): x u_fogDistance, where the
     // far fog closes (the view distance less a chunk), y u_fogCloseGradient
     // (the fogGradient setting; 0 disables the near fog), z 1 underwater
-    // (GL fogs only above water), w unused.
+    // (GL fogs only above water), w the weather's rainStrength (0..1;
+    // milestone G1).
     fogParams: vec4f,
     // Milestone 17: the camera's projection (perspectiveRH_ZO; GL's
     // u_cameraProjection, whose x, y and w rows are the same), view space
