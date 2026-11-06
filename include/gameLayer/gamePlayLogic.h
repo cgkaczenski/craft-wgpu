@@ -8,6 +8,15 @@
 #include <rendering/model.h>
 #include <rendering/UiEngine.h>
 
+// The debug windows' ImGui flags: ImGuiWindowFlags_NoDocking, so they float
+// and can be collapsed (a docked window cannot). Also undocks a window that
+// imgui.ini has docked.
+constexpr int debugWindowFlags = 1 << 21;
+
+// Called inside a debug window's ImGui::Begin: moves the window off the client
+// control window's title bar if it lies over it (gamePlayLogic.cpp).
+void keepDebugWindowOffClientControl(float yOffset);
+
 struct ProgramData
 {
 

@@ -601,7 +601,8 @@ bool gameLogic(float deltaTime)
 
 
 				ImGui::PushStyleColor(ImGuiCol_WindowBg, {26 / 255.f,26 / 255.f,26 / 255.f,0.5f});
-				ImGui::Begin("Server window");
+				ImGui::Begin("Server window", nullptr, debugWindowFlags);
+				keepDebugWindowOffClientControl(120);
 
 				ImGui::Text("Server Chunk Capacity: %d", getChunkCapacity());
 				ImGui::Text("Server Ticke per seccond: %d", getServerTicksPerSeccond());

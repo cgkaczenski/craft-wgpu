@@ -254,6 +254,36 @@ bool initGameplay(ProgramData &programData, const char *c) //GAME STUFF!
 
 //todo: bug: use the same revision for inventory and block placement and also resend block pos or something
 
+#if REMOVE_IMGUI == 0
+// The debug windows float (debugWindowFlags: a docked ImGui window has no
+// collapse button, and imgui.ini had them docked into one column), and a
+// debug window lying over the client control's title bar, which holds the
+// arrow that collapses it, moves to its right, yOffset down. A window put
+// anywhere else stays where it is.
+static_assert(debugWindowFlags == ImGuiWindowFlags_NoDocking, "gamePlayLogic.h's debugWindowFlags");
+static ImVec2 clientControlWindowPos = {-1, -1};
+static ImVec2 clientControlWindowSize = {0, 0};
+
+void keepDebugWindowOffClientControl(float yOffset)
+{
+	if (clientControlWindowPos.x < 0) { return; }
+	const ImVec2 pos = ImGui::GetWindowPos();
+	const ImVec2 size = ImGui::GetWindowSize();
+	const ImVec2 titleMin = clientControlWindowPos;
+	const ImVec2 titleMax = {clientControlWindowPos.x + clientControlWindowSize.x,
+		clientControlWindowPos.y + ImGui::GetFrameHeight()};
+	const bool overTitle = pos.x < titleMax.x && pos.x + size.x > titleMin.x
+		&& pos.y < titleMax.y && pos.y + size.y > titleMin.y;
+	if (overTitle)
+	{
+		ImGui::SetWindowPos({clientControlWindowPos.x + clientControlWindowSize.x + 8,
+			clientControlWindowPos.y + yOffset});
+	}
+}
+#else
+void keepDebugWindowOffClientControl(float yOffset) {}
+#endif
+
 void playSoundAndShakeForPlayerTakingDamage()
 {
 	AudioEngine::playHurtSound();
@@ -2083,14 +2113,32 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 		//if (ImGui::Begin("camera controll", &gameData.escapePressed))
 		ImGui::PushStyleColor(ImGuiCol_WindowBg, {26/255.f,26/255.f,26/255.f,0.5f});
-		if (ImGui::Begin("client controll"))
+		// Its place, so the other debug windows keep off its title bar (and
+		// its collapse arrow): keepDebugWindowOffClientControl.
+		const bool clientControlOpen = ImGui::Begin("client controll", nullptr, debugWindowFlags);
+		clientControlWindowPos = ImGui::GetWindowPos();
+		clientControlWindowSize = ImGui::GetWindowSize();
+		if (clientControlOpen)
 		{
 
+			// Milestone G1: the world clock and the weather. The world's own
+			// controls send the same commands as typing them in chat (/time,
+			// /weather), so the server stays the owner and every player sees
+			// the change; the preview only changes this screen.
+			if (ImGui::CollapsingHeader("Time and weather",
+				ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_FramePadding | ImGuiTreeNodeFlags_DefaultOpen))
 			{
 				auto &clock = getClientWorldClock();
-				ImGui::Text("Day %d, time of day %.3f%s", 
+				auto sendServerCommand = [&](const std::string &command)
+				{
+					std::string text = "/" + command; // the chat's command prefix
+					sendPacket(getServer(), headerSendChat, player.entityId,
+						text.data(), text.size() + 1, true, channelHandleConnections);
+				};
+
+				ImGui::Text("Day %d, time %.3f%s",
 					(int)(clock.worldSeconds / std::max(clock.dayLengthSeconds, 1.f)), clock.dayTime(),
-					clock.dayCycle ? "" : " (stopped)");
+					clock.dayCycle ? "" : ", stopped");
 				if (clock.weather == clock.nextWeather)
 				{
 					ImGui::Text("Weather: %s", getWeatherName(clock.weather));
@@ -2100,6 +2148,65 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 					ImGui::Text("Weather: %s, turning %s (%.0f%%)", getWeatherName(clock.weather),
 						getWeatherName(clock.nextWeather), clock.transition * 100.f);
 				}
+
+				// The window is narrow: a slider leaves room for the button
+				// beside it, and the named times go two to a row.
+				const ImGuiStyle &style = ImGui::GetStyle();
+				auto widthBeside = [&](const char *button)
+				{
+					return ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(button).x
+						- style.FramePadding.x * 2 - style.ItemSpacing.x;
+				};
+				const float halfWidth = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) / 2;
+
+				ImGui::Separator();
+				ImGui::TextDisabled("World (server)");
+
+				// /time set
+				static float newDayTime = 0.25f;
+				ImGui::SetNextItemWidth(widthBeside("Set"));
+				ImGui::SliderFloat("##newDayTime", &newDayTime, 0, 1, "time %.3f");
+				ImGui::SameLine();
+				if (ImGui::Button("Set##time")) { sendServerCommand("time set " + std::to_string(newDayTime)); }
+				const char *namedTimes[] = {"sunrise", "noon", "sunset", "midnight"};
+				for (int i = 0; i < 4; i++)
+				{
+					if (i % 2) { ImGui::SameLine(); }
+					if (ImGui::Button(namedTimes[i], {halfWidth, 0})) { sendServerCommand(std::string("time set ") + namedTimes[i]); }
+				}
+
+				// /time stop, /time start
+				bool dayCycle = clock.dayCycle != 0;
+				if (ImGui::Checkbox("Day cycle running", &dayCycle))
+				{
+					sendServerCommand(dayCycle ? "time start" : "time stop");
+				}
+
+				// /time length
+				static float newDayMinutes = 20;
+				ImGui::SetNextItemWidth(widthBeside("Set"));
+				ImGui::SliderFloat("##newDayMinutes", &newDayMinutes, 0.5f, 60, "%.1f min a day");
+				ImGui::SameLine();
+				if (ImGui::Button("Set##length")) { sendServerCommand("time length " + std::to_string(newDayMinutes)); }
+				ImGui::TextDisabled("Now %.1f min a day", clock.dayLengthSeconds / 60.f);
+
+				// /weather
+				static int newWeather = weatherRain;
+				static float newWeatherSeconds = 10;
+				ImGui::SetNextItemWidth(halfWidth);
+				ImGui::Combo("##newWeather", &newWeather, "clear\0cloudy\0rain\0storm\0");
+				ImGui::SameLine();
+				ImGui::SetNextItemWidth(halfWidth);
+				ImGui::SliderFloat("##newWeatherSeconds", &newWeatherSeconds, 0, 120, "over %.0f s");
+				if (ImGui::Button("Change weather", {-1, 0}))
+				{
+					sendServerCommand(std::string("weather ") + getWeatherName(newWeather) + " "
+						+ std::to_string((int)newWeatherSeconds));
+				}
+
+				ImGui::Separator();
+				ImGui::TextDisabled("Preview (this screen)");
+				ImGui::PushItemWidth(halfWidth);
 
 				ImGui::Checkbox("Override day time", &overrideDayTime);
 				if (overrideDayTime) { ImGui::SliderFloat("Day time", &overriddenDayTime, 0, 1); }
@@ -2111,6 +2218,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 					ImGui::Combo("Next weather", &overriddenNextWeather, "clear\0cloudy\0rain\0storm\0");
 					ImGui::SliderFloat("Transition", &overriddenTransition, 0, 1);
 				}
+				ImGui::PopItemWidth();
 			}
 
 			if (centerChunk)
@@ -2480,7 +2588,9 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		ImGui::End();
 
 
-		if (ImGui::Begin("Profiler"))
+		const bool profilerOpen = ImGui::Begin("Profiler", nullptr, debugWindowFlags);
+		keepDebugWindowOffClientControl(0);
+		if (profilerOpen)
 		{
 			ImGui::Text("profiler");
 			ImGui::Text("fps: %d", programData.currentFps);
