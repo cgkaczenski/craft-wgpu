@@ -29,6 +29,7 @@
 #include <gameplay/food.h>
 #include <profiler.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <algorithm>
 #include <magic_enum.hpp>
@@ -1370,6 +1371,21 @@ std::string executeServerCommand(std::uint64_t cid, const char *command)
 			}
 
 			return "Usage: /time [set <time>, stop, start, length <minutes>]";
+		}
+
+		// Milestone G1b: /lightning [distance in blocks], a strike that far from
+		// the player who asked (40 by default), in a random direction.
+		if (consumeStringToken("lightning"))
+		{
+			if (!client) { return "No client was given for the command"; }
+			double distance = 40;
+			consumeNumber(&distance);
+			distance = std::clamp(distance, 0.0, 2000.0);
+			const double angle = (std::rand() % 6283) / 1000.0;
+			const glm::dvec3 at = client->playerData.entity.position;
+			broadcastLightningStrike({(int)std::floor(at.x + std::cos(angle) * distance),
+				(int)std::floor(at.z + std::sin(angle) * distance)});
+			return "Lightning " + std::to_string((int)distance) + " blocks away";
 		}
 
 		// /weather, /weather <clear, cloudy, rain or storm> [seconds to change].

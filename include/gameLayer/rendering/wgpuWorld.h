@@ -9,6 +9,7 @@
 // Names no WebGPU types, so renderer.cpp, chunk.cpp and glfwMain.cpp can call
 // it without including webgpu.hpp.
 
+#include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
 #include <glm/mat4x4.hpp>
@@ -103,6 +104,22 @@ namespace wgpuWorld
 	// another attachment instead). Call once after renderEntities; the
 	// decal and the gizmo lines draw after it, on the screen.
 	void renderTransparent();
+
+	// Milestone G1b: this frame's rain and snow, drawn by renderTransparent
+	// after the transparent faces (precipitation.wgsl). Call before it, each
+	// frame; intensity 0 (or no columns) draws nothing.
+	struct Precipitation
+	{
+		float intensity = 0;           // the weather's rain, 0..1
+		float brightness = 1;          // the light the drops catch (sky light and time of day)
+		float wind = 0;                // the rain's lean, blocks sideways per block down
+		glm::ivec2 corner = {};        // world block x, z of column (0, 0)
+		int size = 0;                  // columns per side
+		// Per column, x fastest: x the world y the rain stops at (the top of
+		// the highest block that stops it), y 0 none, 1 rain, 2 snow.
+		std::vector<glm::vec2> columns;
+	};
+	void setPrecipitation(const Precipitation &precipitation);
 
 	// The corner table (4 corners x 3 floats per face orientation) and the UV
 	// table (4 corners x 2 floats) that Renderer::recreateBlockGeometryData

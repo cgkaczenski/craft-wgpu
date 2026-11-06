@@ -91,9 +91,46 @@ commented out.
   Not checked in the game: the commands themselves (the input script cannot
   type chat).
 
-**G1b, left:** rain and snow particles (with a top-block height map so they
-stop at roofs), precipitation by biome (snow when cold, none in deserts),
-per-biome weather weights, rain and thunder sounds, lightning.
+**G1b, done (branch `gameplay-g1-weather`):**
+
+- Rain and snow ([`precipitation.wgsl`](../resources/shaders/webgpu/precipitation.wgsl)):
+  one sheet per block column within 16 blocks, turned toward the camera,
+  from the top of the column's highest blocking block (solid blocks, water,
+  leaves; [`precipitation.h`](../include/gameLayer/gameplay/precipitation.h))
+  to 14 blocks above the camera. The drops are procedural lanes on the sheet
+  (rain streaks, swaying snow flakes), blended onto the HDR color after the
+  transparent faces, depth tested. Storms lean the rain with the wind.
+- What falls comes from the biome: `ChunkData::biome` is set by
+  `generateChunk`, and by `computeChunkBiome` for chunks loaded from disk
+  (which also fixes their vegetation and region values, which were 0 before).
+  It travels with the chunk packet. None in the desert, snow in the snow
+  biome or above y 160, rain elsewhere. The debug panel shows the biome under
+  the player and can force rain or snow (`OURCRAFT_PRECIPITATION=rain|snow`
+  for scripted runs).
+- Lightning: in a storm the server strikes every 4-18 s, 32-412 blocks from
+  a random player (`headerLightningStrike`), so every player sees the same
+  strike. Clients flash the sky and the light (two flickers, then a fade) and
+  play thunder after the sound's delay (343 blocks a second), close strikes
+  with a crack. `/lightning [distance]` and the panel's Strike button make one.
+- Sounds ([`weatherSounds.cpp`](../src/gameLayer/weatherSounds.cpp)) are made
+  in code: there are no recordings in the game. A 9 s seamless rain loop
+  streamed while it rains on the player's column (muffled under a roof or
+  water), four distant rumbles and three close cracks.
+  `OURCRAFT_EXPORT_WEATHER_SOUNDS=<folder>` writes them as WAV files.
+  Recordings can replace them there.
+- Checked: rain and forced snow in a copy of `test` (screenshots), biomes
+  arriving for loaded chunks (desert, plains, snow and hay land across 1500
+  chunks), a server strike in a storm (sky 1.76x brighter for about a
+  second), the sounds' envelopes and loop seam from the exported WAVs, and
+  the weather logic in a standalone test. Not checked: hearing it in the
+  game, rain stopping under a roof in a scene, the Strike button and
+  `/lightning`.
+
+Not done, and why:
+
+- Per-biome weather weights: the weather is one state for the world, so a
+  biome can only change what falls (above), not which weather comes.
+- A drawn lightning bolt: only the flash for now.
 
 ### G2. Imagespace modifiers
 

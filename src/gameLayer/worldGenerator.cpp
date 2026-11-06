@@ -383,6 +383,60 @@ bool generateFeature(int x, int y, int seedHash, glm::vec2 startingTavernPositio
 	return true; // Passed checks
 }
 
+// A chunk's biome from its region (generateChunk's choice; computeChunkBiome
+// makes it again for a chunk loaded from disk, which saves only its blocks).
+static int pickChunkBiome(WorldGenerator &wg, BiomesManager &biomesManager, int regionHeight,
+	float xCellValue, float zCellValue, float biomeType)
+{
+	int currentBiomeIndex = biomesManager.pickBiomeIndex(biomeType);
+	if (regionHeight == PLAINS_HEIGHT_INDEX)
+	{
+
+		auto rng = rngFromPosition(xCellValue, zCellValue, wg.regionsHeightNoise->GetSeed());
+
+		float chance = 0.2;
+
+		float distanceFromCenter = glm::length(glm::vec2{xCellValue, zCellValue});
+
+		if (distanceFromCenter < 20)
+		{
+			chance = 0.5;
+		}
+		else if (distanceFromCenter < 40)
+		{
+			chance = 0.3;
+		}
+
+		if (getRandomChance(rng, chance))
+		{
+			currentBiomeIndex = BiomesManager::hayLand;
+		}
+
+	}
+	return currentBiomeIndex;
+}
+
+void computeChunkBiome(ChunkData &c, WorldGenerator &wg, BiomesManager &biomesManager)
+{
+	if (wg.isSuperFlat) { c.biome = BiomesManager::plains; return; }
+
+	float interpolateValues[16 * 16] = {};
+	float borderingFactor[16 * 16] = {};
+	float tightBorders[16 * 16] = {};
+	float vegetationMaster = 0;
+	float xCellValue = 0;
+	float zCellValue = 0;
+	float biomeType = 0;
+	int regionHeight = wg.getRegionHeightAndBlendingsForChunk(c.x, c.z,
+		interpolateValues, borderingFactor, vegetationMaster, tightBorders, xCellValue, zCellValue,
+		biomeType);
+
+	c.biome = (unsigned char)pickChunkBiome(wg, biomesManager, regionHeight, xCellValue, zCellValue, biomeType);
+	c.vegetation = vegetationMaster;
+	c.regionCenterX = xCellValue;
+	c.regionCenterZ = zCellValue;
+}
+
 void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structuresManager, BiomesManager &biomesManager,
 	std::vector<StructureToGenerate> &generateStructures)
 {
@@ -437,31 +491,9 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 #pragma region determine biome
 
 
-	int currentBiomeIndex = biomesManager.pickBiomeIndex(biomeType);
-	if (currentBiomeHeight == PLAINS_HEIGHT_INDEX)
-	{
-
-		auto rng = rngFromPosition(xCellValue, zCellValue, wg.regionsHeightNoise->GetSeed());
-
-		float chance = 0.2;
-
-		float distanceFromCenter = glm::length(glm::vec2{xCellValue, zCellValue});
-
-		if (distanceFromCenter < 20)
-		{
-			chance = 0.5;
-		}
-		else if (distanceFromCenter < 40)
-		{
-			chance = 0.3;
-		}
-
-		if (getRandomChance(rng, chance))
-		{
-			currentBiomeIndex = BiomesManager::hayLand;
-		}
-
-	}
+	int currentBiomeIndex = pickChunkBiome(wg, biomesManager, currentBiomeHeight,
+		xCellValue, zCellValue, biomeType);
+	c.biome = (unsigned char)currentBiomeIndex;
 
 	auto &biome = biomesManager.biomes[currentBiomeIndex];
 	//auto &biome = biomesManager.biomes[BiomesManager::snow];

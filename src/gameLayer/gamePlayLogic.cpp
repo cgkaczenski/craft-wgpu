@@ -38,6 +38,9 @@
 #include <climits>
 #include "rendering/wgpuWorld.h"
 #include <gameplay/weather.h>
+#include <biome.h>
+#include <gameplay/precipitation.h>
+#include <metrics.h>
 
 struct GameData
 {
@@ -1813,6 +1816,76 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 			getWeatherLook(overriddenNextWeather), overriddenTransition);
 	}
 
+	// Milestone G1b: the rain's sound, from what falls on the player's column:
+	// none in the desert or under snow, muffled under a roof, faint under water.
+	{
+		float rainSound = 0;
+		const int preview = programData.renderer.precipitationPreview;
+		if (Chunk *chunk = gameData.chunkSystem.getChunkSafeFromBlockPos(blockPositionPlayer.x, blockPositionPlayer.z))
+		{
+			const int lx = modBlockToChunk(blockPositionPlayer.x);
+			const int lz = modBlockToChunk(blockPositionPlayer.z);
+			int top = 0;
+			for (int y = CHUNK_HEIGHT - 1; y >= 0; y--)
+			{
+				if (blockStopsRain(chunk->data.unsafeGet(lx, y, lz).getType())) { top = y + 1; break; }
+			}
+			const int kind = preview ? preview : precipitationForColumn(chunk->data.biome, top);
+			if (kind == precipitationRain)
+			{
+				const bool covered = top > blockPositionPlayer.y + 1;
+				rainSound = programData.renderer.weather.rain * (covered ? 0.35f : 1.f) * (underWater ? 0.15f : 1.f);
+			}
+		}
+		AudioEngine::setRainSound(rainSound * 0.8f);
+	}
+
+	// Milestone G1b: lightning. The server's strikes flash the sky (by the
+	// weather's look: more ambient and sky light, the grey sky bright) and
+	// their thunder comes after the sound's delay, a block a meter.
+	{
+		static float flashTime = -1; // since the last flash began; below 0, none
+		static float flashStrength = 0;
+		struct PendingThunder { float delay, level; bool close; };
+		static std::vector<PendingThunder> pendingThunder;
+
+		for (glm::ivec2 strike : getClientLightningStrikes())
+		{
+			const float distance = glm::length(glm::vec2(strike) - glm::vec2(gameData.c.position.x, gameData.c.position.z));
+			if (distance > 800) { continue; }
+			const float strength = glm::clamp(1.2f - distance / 450.f, 0.25f, 1.f);
+			flashStrength = flashTime >= 0 ? std::max(flashStrength, strength) : strength;
+			flashTime = 0;
+			if (pendingThunder.size() < 8)
+			{
+				pendingThunder.push_back({distance / 343.f, glm::clamp(1.15f - distance / 520.f, 0.15f, 1.f), distance < 90});
+			}
+		}
+		getClientLightningStrikes().clear();
+
+		for (auto it = pendingThunder.begin(); it != pendingThunder.end();)
+		{
+			it->delay -= deltaTime;
+			if (it->delay <= 0) { AudioEngine::playThunder(it->level, it->close); it = pendingThunder.erase(it); }
+			else { ++it; }
+		}
+
+		if (flashTime >= 0)
+		{
+			flashTime += deltaTime;
+			// Two quick flickers, then a fade.
+			const float t = flashTime;
+			float flash = t < 0.06f ? 1.f : t < 0.12f ? 0.25f : t < 0.2f ? 0.85f : 0.85f * std::exp(-(t - 0.2f) / 0.25f);
+			flash *= flashStrength;
+			if (t > 1.5f) { flashTime = -1; flash = 0; }
+
+			auto &look = programData.renderer.weather;
+			look.ambientStrength += flash * 1.5f;
+			look.skyLightDrop -= flash * 6.f;
+			look.skyDarken += (-1.5f - look.skyDarken) * flash;
+		}
+	}
+
 #pragma endregion
 
 
@@ -2159,6 +2232,17 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				};
 				const float halfWidth = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) / 2;
 
+				// The biome under the player (its chunk's, G1b), which picks
+				// rain, snow or none. BiomesManager's order (shared/biome.cpp).
+				if (centerChunk)
+				{
+					const char *biomeNames[] = {"desert", "plains", "snow", "waste land", "hay land"};
+					const int biome = centerChunk->data.biome;
+					const char *precipitation = biome == BiomesManager::desert ? "no rain"
+						: biome == BiomesManager::snow ? "snow" : "rain";
+					ImGui::Text("Biome: %s (%s)", biome < 5 ? biomeNames[biome] : "?", precipitation);
+				}
+
 				ImGui::Separator();
 				ImGui::TextDisabled("World (server)");
 
@@ -2203,6 +2287,11 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 					sendServerCommand(std::string("weather ") + getWeatherName(newWeather) + " "
 						+ std::to_string((int)newWeatherSeconds));
 				}
+				static float lightningDistance = 60;
+				ImGui::SetNextItemWidth(widthBeside("Strike"));
+				ImGui::SliderFloat("##lightningDistance", &lightningDistance, 0, 500, "lightning %.0f away");
+				ImGui::SameLine();
+				if (ImGui::Button("Strike")) { sendServerCommand("lightning " + std::to_string((int)lightningDistance)); }
 
 				ImGui::Separator();
 				ImGui::TextDisabled("Preview (this screen)");
@@ -2218,6 +2307,8 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 					ImGui::Combo("Next weather", &overriddenNextWeather, "clear\0cloudy\0rain\0storm\0");
 					ImGui::SliderFloat("Transition", &overriddenTransition, 0, 1);
 				}
+				ImGui::Combo("Rain or snow", &programData.renderer.precipitationPreview,
+					"by biome\0rain\0snow\0");
 				ImGui::PopItemWidth();
 			}
 

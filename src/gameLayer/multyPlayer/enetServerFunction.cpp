@@ -76,6 +76,41 @@ void broadCast(Packet p, void *data, size_t size, ENetPeer *peerToIgnore, bool r
 	broadCastNotLocked(p, data, size, peerToIgnore, reliable, channel);
 }
 
+// Milestone G1b: a lightning strike for everyone, at a world block column.
+void broadcastLightningStrike(glm::ivec2 position)
+{
+	Packet packet;
+	packet.header = headerLightningStrike;
+	Packet_LightningStrike packetData;
+	packetData.position = position;
+	broadCast(packet, &packetData, sizeof(packetData), nullptr, true, channelOtherVisualThings);
+}
+
+// In a storm, a strike every few seconds, somewhere around a random player:
+// rarely close, mostly a few hundred blocks off.
+static void serverUpdateLightning(float deltaTime, std::minstd_rand &rng)
+{
+	static float untilStrike = 3;
+	if (getStormAmount(getServerWorldClock()) <= 0.5f || connections.empty())
+	{
+		untilStrike = std::max(untilStrike, 3.f);
+		return;
+	}
+
+	untilStrike -= deltaTime;
+	if (untilStrike > 0) { return; }
+	untilStrike = std::uniform_real_distribution<float>(4, 18)(rng);
+
+	auto player = connections.begin();
+	std::advance(player, std::uniform_int_distribution<size_t>(0, connections.size() - 1)(rng));
+	const glm::dvec3 at = player->second.playerData.entity.position;
+
+	const float angle = std::uniform_real_distribution<float>(0, 6.2831853f)(rng);
+	const float distance = 32 + std::pow(std::uniform_real_distribution<float>(0, 1)(rng), 0.7f) * 380;
+	broadcastLightningStrike({(int)std::floor(at.x + std::cos(angle) * distance),
+		(int)std::floor(at.z + std::sin(angle) * distance)});
+}
+
 // Milestone G1: the world clock and the weather, to one player (peer) or to
 // all of them (nullptr).
 static void sendWorldClock(ENetPeer *peer, bool reliable)
@@ -1177,6 +1212,7 @@ void enetServerFunction(std::string path)
 	#pragma region world clock and weather (G1)
 		{
 			serverUpdateWorldClock(getServerWorldClock(), deltaTime, weatherRng);
+			serverUpdateLightning(deltaTime, weatherRng);
 
 			// A new weather, or a command: everyone hears at once, reliably.
 			if (serverWorldClockChanged())

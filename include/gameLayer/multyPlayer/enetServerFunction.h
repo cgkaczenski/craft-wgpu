@@ -65,4 +65,6 @@ std::uint64_t getEntityIdAndIncrement(WorldSaver &worldSaver, int entityType);
 
 std::uint64_t getCurrentEntityId(int entityType);
 
-
+// Milestone G1b: tell every player of a lightning strike (the server's storms,
+// the /lightning command). Server thread only.
+void broadcastLightningStrike(glm::ivec2 position);

@@ -197,3 +197,17 @@ WorldClock &getClientWorldClock()
 	static WorldClock clock = makeNewWorldClock();
 	return clock;
 }
+
+float getStormAmount(const WorldClock &clock)
+{
+	const float t = std::clamp(clock.transition, 0.f, 1.f);
+	if (clock.weather == weatherStorm) { return clock.nextWeather == weatherStorm ? 1.f : 1.f - t; }
+	if (clock.nextWeather == weatherStorm) { return t; }
+	return 0;
+}
+
+std::vector<glm::ivec2> &getClientLightningStrikes()
+{
+	static std::vector<glm::ivec2> strikes;
+	return strikes;
+}

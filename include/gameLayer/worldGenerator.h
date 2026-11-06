@@ -66,6 +66,10 @@ struct StructureToGenerate
 void generateChunk(Chunk &c, WorldGenerator &wg, StructuresManager &structuresManager, BiomesManager &biomesManager
 	,std::vector<StructureToGenerate> &generateStructures);
 
+// Milestone G1b: a chunk's biome (and region values) without generating it,
+// for a chunk loaded from disk.
+void computeChunkBiome(ChunkData &c, WorldGenerator &wg, BiomesManager &biomesManager);
+
 void generateChunk(ChunkData &c, WorldGenerator &wg, StructuresManager &structuresManager, BiomesManager &biomesManager
 	,std::vector<StructureToGenerate> &generateStructures);
 

@@ -2,6 +2,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <random>
+#include <vector>
+#include <glm/vec2.hpp>
 
 // Milestone G1 (docs/gameplay-roadmap.md): the world clock and the weather.
 //
@@ -90,3 +92,13 @@ bool &serverWorldClockChanged();
 
 // Only touched from the client's game thread.
 WorldClock &getClientWorldClock();
+
+// Milestone G1b: lightning. How much of a storm is under way, 0..1 (1 in a
+// storm, ramping while one starts or ends); the server strikes while this is
+// above a half.
+float getStormAmount(const WorldClock &clock);
+
+// The server picks the strikes (headerLightningStrike), so every player sees
+// the same one; clients queue them here for the game loop, which flashes the
+// sky and plays the thunder after the sound's delay.
+std::vector<glm::ivec2> &getClientLightningStrikes();

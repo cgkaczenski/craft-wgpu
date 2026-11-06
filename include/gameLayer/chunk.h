@@ -56,6 +56,11 @@ struct ChunkData
 	float vegetation = 0;
 	int regionCenterX = 0;
 	int regionCenterZ = 0;
+	// Milestone G1b: the chunk's biome (BiomesManager's index: desert,
+	// plains, snow...), set when the chunk is generated or loaded (not saved:
+	// computeChunkBiome works it out again), and sent to clients with the
+	// chunk, for the weather's rain or snow.
+	unsigned char biome = 1;
 
 	void setBorderFlag(int x, int z)
 	{

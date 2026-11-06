@@ -212,6 +212,7 @@ SavedChunk *ServerChunkStorer::getOrCreateChunk(int posX, int posZ,
 		//std::cout << "Loaded!\n";
 
 		worldSaver.loadBlockData(*rez);
+		computeChunkBiome(rez->chunk, wg, biomesManager);
 		if (rez->normalize())
 		{
 			rez->otherData.dirty = true;

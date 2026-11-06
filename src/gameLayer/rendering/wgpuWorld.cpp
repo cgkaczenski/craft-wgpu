@@ -112,6 +112,16 @@ namespace
 	};
 	static_assert(sizeof(SkyUniforms) == 288, "must match sky.wgsl's SkyUniforms");
 
+	// Milestone G1b: precipitation.wgsl's PrecipitationUniforms.
+	struct PrecipitationUniforms
+	{
+		glm::mat4 viewProjection; // rotation only, as the world's
+		glm::vec4 origin;         // xz column (0, 0) from the camera, y camera height, w reach
+		glm::ivec4 corner;        // xy column (0, 0)'s world block, z columns per side
+		glm::vec4 params;         // x intensity, y seconds, z brightness, w wind
+	};
+	static_assert(sizeof(PrecipitationUniforms) == 112, "must match precipitation.wgsl");
+
 	// Milestone 18: godRays.wgsl's RayUniforms and underwater.wgsl's WarpUniforms.
 	struct RayUniforms
 	{
@@ -511,6 +521,20 @@ namespace
 
 		Buffer lineBuffer = nullptr;
 		uint64_t lineCapacity = 0;          // in points
+
+		// Milestone G1b: rain and snow (precipitation.wgsl), from
+		// setPrecipitation, drawn by renderTransparent with render's camera.
+		BindGroupLayout precipitationBindGroupLayout = nullptr;
+		PipelineLayout precipitationPipelineLayout = nullptr;
+		RenderPipeline precipitationPipeline = nullptr;
+		Buffer precipitationUniformBuffer = nullptr;
+		Buffer precipitationColumnBuffer = nullptr;
+		uint64_t precipitationColumnCapacity = 0; // in columns
+		BindGroup precipitationBindGroup = nullptr;
+		bool precipitationPending = false;
+		uint32_t precipitationColumns = 0;
+		glm::mat4 frameViewProjection = glm::mat4(1.f); // render's
+		glm::dvec3 frameCameraPosition = {};
 
 		// render's transparent passes, waiting for renderTransparent.
 		bool pendingTransparent = false;
@@ -3757,6 +3781,104 @@ namespace
 		return !scope.failed();
 	}
 
+	// ---- Milestone G1b: rain and snow (precipitation.wgsl) ---------------
+
+	bool createPrecipitationResources()
+	{
+		ErrorScope scope("world precipitation resources");
+		w.precipitationUniformBuffer = makeUniformBuffer("world precipitation uniforms", sizeof(PrecipitationUniforms));
+		BindGroupLayoutEntry entries[2] = { uniformEntry(0, sizeof(PrecipitationUniforms)), emptyEntry(1) };
+		entries[0].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+		entries[1].visibility = ShaderStage::Vertex;
+		entries[1].buffer.type = BufferBindingType::ReadOnlyStorage;
+		entries[1].buffer.hasDynamicOffset = false;
+		entries[1].buffer.minBindingSize = sizeof(glm::vec2);
+		w.precipitationBindGroupLayout = makeLayout("world precipitation bind group layout", entries, 2);
+		if (!w.precipitationUniformBuffer || !w.precipitationBindGroupLayout) { return false; }
+		return !scope.failed();
+	}
+
+	// Onto the G-buffer's color, blended by alpha; positions, normals and
+	// bloom untouched; depth tested (Less) and not written; both faces.
+	bool createPrecipitation()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/precipitation.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world precipitation");
+
+		w.precipitationPipelineLayout = createPipelineLayout("world precipitation pipeline layout",
+			&w.precipitationBindGroupLayout, 1);
+
+		BlendState blend = Default;
+		blend.color.operation = BlendOperation::Add;
+		blend.color.srcFactor = BlendFactor::SrcAlpha;
+		blend.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
+		blend.alpha.operation = BlendOperation::Add;
+		blend.alpha.srcFactor = BlendFactor::Zero;
+		blend.alpha.dstFactor = BlendFactor::One;
+		ColorTargetState targets[GBufferSlots];
+		colorTargets(ColorTargets::GBuffer, nullptr, targets);
+		targets[GColor].blend = &blend;
+		targets[GPosition].writeMask = ColorWriteMask::None;
+		targets[GNormal].writeMask = ColorWriteMask::None;
+		targets[GBloom].writeMask = ColorWriteMask::None;
+
+		DepthStencilState depth = Default;
+		depth.format = depthFormat;
+		depth.depthWriteEnabled = OptionalBool::False;
+		depth.depthCompare = CompareFunction::Less;
+		depth.stencilFront.compare = CompareFunction::Always;
+		depth.stencilFront.failOp = StencilOperation::Keep;
+		depth.stencilFront.depthFailOp = StencilOperation::Keep;
+		depth.stencilFront.passOp = StencilOperation::Keep;
+		depth.stencilBack = depth.stencilFront;
+		depth.stencilReadMask = 0;
+		depth.stencilWriteMask = 0;
+
+		RenderPipelineDescriptor desc = Default;
+		desc.label = StringView("world precipitation");
+		desc.layout = w.precipitationPipelineLayout;
+		desc.vertex.module = module;
+		desc.vertex.entryPoint = StringView("vs_precipitation");
+		desc.vertex.bufferCount = 0;
+		desc.vertex.buffers = nullptr;
+		desc.primitive.topology = PrimitiveTopology::TriangleStrip;
+		desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+		desc.primitive.frontFace = FrontFace::CCW;
+		desc.primitive.cullMode = CullMode::None;
+		desc.depthStencil = &depth;
+		desc.multisample.count = 1;
+		desc.multisample.mask = 0xFFFFFFFFu;
+		desc.multisample.alphaToCoverageEnabled = false;
+		FragmentState fragment = Default;
+		fragment.module = module;
+		fragment.entryPoint = StringView("fs_precipitation");
+		fragment.targetCount = GBufferSlots;
+		fragment.targets = targets;
+		desc.fragment = &fragment;
+		w.precipitationPipeline = wgpuDevice().createRenderPipeline(desc);
+
+		const bool invalid = scope.failed();
+		module.release();
+		return w.precipitationPipeline && !invalid;
+	}
+
+	// Into this frame's encoder, after the transparent faces: the columns
+	// setPrecipitation left, seen from render's camera.
+	void recordPrecipitation(CommandEncoder encoder)
+	{
+		if (!w.precipitationPending) { return; }
+		w.precipitationPending = false;
+		if (!w.precipitationPipeline || !w.precipitationBindGroup || !w.precipitationColumns || !encoder) { return; }
+
+		RenderPassEncoder pass = beginGBufferPass(encoder, false, "world precipitation pass");
+		pass.setPipeline(w.precipitationPipeline);
+		pass.setBindGroup(0, w.precipitationBindGroup, 0, nullptr);
+		pass.draw(4, w.precipitationColumns, 0, 0);
+		pass.end();
+		pass.release();
+	}
+
 	bool createSky()
 	{
 		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/sky.wgsl");
@@ -4043,7 +4165,7 @@ namespace
 	bool createPipelineSet()
 	{
 		return createPipelines() && createEntityPipelines() && createViewPipelines() && createSky()
-			&& createPost() && createBloom() && createHbao() && createRaysAndWarp();
+			&& createPost() && createBloom() && createHbao() && createRaysAndWarp() && createPrecipitation();
 	}
 
 	// Every handle createPipelineSet assigns, for a reload to move aside,
@@ -4061,7 +4183,7 @@ namespace
 			&w.bloomFilterPipeline, &w.bloomDownPipeline, &w.bloomTentPipeline, &w.bloomUpPipeline,
 			&w.bloomBlurPipelines[0], &w.bloomBlurPipelines[1], &w.bloomApplyPipeline, &w.exposurePipeline,
 			&w.lastColorPipeline, &w.hbaoPipeline, &w.hbaoApplyPipeline,
-			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline };
+			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline };
 		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
 		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
 		for (RenderPipeline &pipeline : w.viewPipelines) { onPipeline(pipeline); }
@@ -4071,7 +4193,7 @@ namespace
 			&w.entityPipelineLayout, &w.viewPipelineLayout, &w.skyBakePipelineLayout, &w.skyPipelineLayout,
 			&w.sunRaysPipelineLayout, &w.postPipelineLayout, &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout,
 			&w.hbaoPipelineLayout, &w.hbaoApplyPipelineLayout, &w.rayMaskPipelineLayout, &w.rayBlurPipelineLayout,
-			&w.warpPipelineLayout };
+			&w.warpPipelineLayout, &w.precipitationPipelineLayout };
 		for (PipelineLayout *layout : layouts) { onLayout(*layout); }
 	}
 
@@ -4090,7 +4212,8 @@ namespace
 		}
 
 		if (!createLayoutAndUniforms() || !createSkyResources() || !createPostResources() || !createBloomResources()
-			|| !createHbaoResources() || !createRaysAndWarpResources() || !createPipelineSet())
+			|| !createHbaoResources() || !createRaysAndWarpResources() || !createPrecipitationResources()
+			|| !createPipelineSet())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
 			w.failed = true;
@@ -4329,6 +4452,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 
 	Uniforms uniforms;
 	uniforms.viewProjection = projection * camera.getViewMatrix();
+	w.frameViewProjection = uniforms.viewProjection;
+	w.frameCameraPosition = camera.position;
 	uniforms.positionInt = glm::ivec4(positionInt, 0);
 	uniforms.positionFloat = glm::vec4(positionFloat, 0.f);
 	uniforms.waterColor = glm::vec4(waterColor, 1.f); // linear, as GL's
@@ -4378,7 +4503,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	// renderSun's second drawing, for the god rays.
 	sky.raySunParams = glm::vec4(std::max(lighting.sunTwilight, 0.5f), clearSky, 0.f, 0.f);
 	sky.rayMoonParams = glm::vec4(0.f, 0.35f * clearSky, 0.f, 0.f);
-	sky.weather = glm::vec4(overcast, glm::clamp(lighting.skyDarken, 0.f, 1.f), 0.f, 0.f);
+	// skyDarken below 0 brightens the grey: lightning (G1b).
+	sky.weather = glm::vec4(overcast, glm::clamp(lighting.skyDarken, -3.f, 1.f), 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.skyUniformBuffer, 0, &sky, sizeof(sky));
 
 	// Milestone 15: the post chain's settings, for the composite.
@@ -4823,7 +4949,7 @@ void renderTransparent()
 	// The sun and moon first: GL draws them after the entities and before
 	// the transparent geometry, so glass and water show them.
 	drawSunAndMoon();
-	if (!w.pendingTransparent) { compositeFrame(); return; }
+	if (!w.pendingTransparent) { recordPrecipitation(wgpuFrameEncoder()); compositeFrame(); return; }
 	w.pendingTransparent = false;
 
 	const DrawMode mode = w.pending.mode;
@@ -4893,9 +5019,64 @@ void renderTransparent()
 			pass.end();
 			pass.release();
 		}
+
+		// Milestone G1b: the rain and snow, in front of glass and water.
+		recordPrecipitation(encoder);
 	}
 
 	compositeFrame();
+}
+
+void setPrecipitation(const Precipitation &precipitation)
+{
+	w.precipitationPending = false;
+	w.precipitationColumns = 0;
+	if (!w.initialized || precipitation.intensity <= 0 || precipitation.size <= 0) { return; }
+	const uint32_t count = (uint32_t)(precipitation.size * precipitation.size);
+	if (precipitation.columns.size() < count) { return; }
+
+	bool grown = false;
+	if (!ensureBuffer(w.precipitationColumnBuffer, w.precipitationColumnCapacity, count, sizeof(glm::vec2),
+		BufferUsage::Storage, "world precipitation columns", grown)) { return; }
+	wgpuQueue().writeBuffer(w.precipitationColumnBuffer, 0, precipitation.columns.data(), count * sizeof(glm::vec2));
+
+	if (grown || !w.precipitationBindGroup)
+	{
+		if (w.precipitationBindGroup) { w.precipitationBindGroup.release(); w.precipitationBindGroup = nullptr; }
+		BindGroupEntry entries[2] = { Default, Default };
+		entries[0].binding = 0;
+		entries[0].buffer = w.precipitationUniformBuffer;
+		entries[0].offset = 0;
+		entries[0].size = sizeof(PrecipitationUniforms);
+		entries[1].binding = 1;
+		entries[1].buffer = w.precipitationColumnBuffer;
+		entries[1].offset = 0;
+		entries[1].size = w.precipitationColumnCapacity * sizeof(glm::vec2);
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world precipitation bind group");
+		groupDesc.layout = w.precipitationBindGroupLayout;
+		groupDesc.entryCount = 2;
+		groupDesc.entries = entries;
+		w.precipitationBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		if (!w.precipitationBindGroup) { return; }
+	}
+
+	// Seconds of animation; wrapped so the floats keep their precision.
+	static const auto start = std::chrono::steady_clock::now();
+	const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+	PrecipitationUniforms uniforms;
+	uniforms.viewProjection = w.frameViewProjection;
+	const glm::dvec3 camera = w.frameCameraPosition;
+	uniforms.origin = glm::vec4((float)(precipitation.corner.x - camera.x), (float)camera.y,
+		(float)(precipitation.corner.y - camera.z), 14.f);
+	uniforms.corner = glm::ivec4(precipitation.corner, precipitation.size, 0);
+	uniforms.params = glm::vec4(glm::clamp(precipitation.intensity, 0.f, 1.f), (float)std::fmod(seconds, 3600.0),
+		precipitation.brightness, precipitation.wind);
+	wgpuQueue().writeBuffer(w.precipitationUniformBuffer, 0, &uniforms, sizeof(uniforms));
+
+	w.precipitationColumns = count;
+	w.precipitationPending = true;
 }
 
 int sunVisibleSamples()
@@ -5189,6 +5370,17 @@ void shutdown()
 	{
 		if (*buffer) { buffer->release(); *buffer = nullptr; }
 	}
+	// Milestone G1b.
+	if (w.precipitationBindGroup) { w.precipitationBindGroup.release(); w.precipitationBindGroup = nullptr; }
+	if (w.precipitationPipeline) { w.precipitationPipeline.release(); w.precipitationPipeline = nullptr; }
+	if (w.precipitationPipelineLayout) { w.precipitationPipelineLayout.release(); w.precipitationPipelineLayout = nullptr; }
+	if (w.precipitationBindGroupLayout) { w.precipitationBindGroupLayout.release(); w.precipitationBindGroupLayout = nullptr; }
+	for (Buffer *buffer : { &w.precipitationUniformBuffer, &w.precipitationColumnBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
+	w.precipitationColumnCapacity = 0;
+	w.precipitationPending = false;
 	if (w.blackView) { w.blackView.release(); w.blackView = nullptr; }
 	if (w.blackTexture) { w.blackTexture.destroy(); w.blackTexture.release(); w.blackTexture = nullptr; }
 	for (RenderPipeline *pipeline : { &w.toneMapToTexturePipeline, &w.toneMapToSurfacePipeline, &w.fxaaPipeline })

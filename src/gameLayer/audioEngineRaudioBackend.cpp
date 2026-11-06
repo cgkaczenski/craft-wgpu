@@ -206,6 +206,7 @@ namespace AudioEngine
 		}
 
 		UpdateMusicStream(allMusic[currentMusicPlaying]);
+		updateWeatherSounds();
 
 
 		lastMusicVolume = musicVolume;

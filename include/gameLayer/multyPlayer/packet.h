@@ -96,6 +96,7 @@ enum : std::uint32_t
 	headerChangeBlockData,
 	headerTrainingDummyGotAttacked, //from server to players!
 	headerUpdateWorldClock, //from server to players: the time of day and the weather (G1)
+	headerLightningStrike, //from server to players: a lightning strike's place (G1b)
 
 };
 
@@ -138,6 +139,11 @@ struct Packet_ClientUpdateTimer
 struct Packet_UpdateWorldClock
 {
 	WorldClock clock = {};
+};
+
+struct Packet_LightningStrike
+{
+	glm::ivec2 position = {}; // world block x, z
 };
 
 //also used for Packet_ClientDamageLocallyAndDied

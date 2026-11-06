@@ -109,6 +109,9 @@ struct Renderer
 	// Milestone G1: how the weather changes this frame's look (set each frame
 	// from the world clock, before renderFromBakedData).
 	WeatherLook weather;
+	// Milestone G1b: 0 the biome picks rain or snow, 1 rain everywhere, 2
+	// snow everywhere (the debug panel; OURCRAFT_PRECIPITATION=rain|snow).
+	int precipitationPreview = 0;
 };
 
 // Debug cubes and lines, drawn by wgpuWorld as line segments.

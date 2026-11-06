@@ -24,6 +24,15 @@ namespace AudioEngine
 
 	void playHurtSound();
 
+	// Milestone G1b, the weather's sounds (weatherSounds.cpp, made in code).
+	// The rain loop's level, 0..1, eased over about a second: call every
+	// frame while in a world; a level not refreshed for 30 frames fades to 0.
+	void setRainSound(float level);
+	// A thunderclap at `level` (0..1); `close` picks the ones with a crack.
+	void playThunder(float level, bool close);
+	// From update().
+	void updateWeatherSounds();
+
 	float &getMasterVolume();
 	float &getMusicVolume();
 	float &getUIVolume();

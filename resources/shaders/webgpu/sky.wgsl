@@ -124,7 +124,8 @@ struct SkyUniforms {
     raySunParams: vec4f,
     rayMoonParams: vec4f,
     // Milestone G1, the weather: x how far the sky goes to grey (overcast,
-    // 0..1), y how much darker that grey is (0..1).
+    // 0..1), y how much darker that grey is (0..1; below 0 brighter, for
+    // lightning, G1b).
     weather: vec4f,
 };
 @group(0) @binding(0) var<uniform> sky: SkyUniforms;

@@ -653,6 +653,15 @@ void recieveDataClient(ENetEvent &event,
 			break;
 		}
 
+		case headerLightningStrike:
+		{
+			if (sizeof(Packet_LightningStrike) != size) { break; }
+
+			Packet_LightningStrike *p = (Packet_LightningStrike *)data;
+			if (getClientLightningStrikes().size() < 16) { getClientLightningStrikes().push_back(p->position); }
+			break;
+		}
+
 		case headerUpdateWorldClock:
 		{
 			if (sizeof(Packet_UpdateWorldClock) != size) { break; }

@@ -23,6 +23,9 @@
 #include <rendering/renderSettings.h>
 #include <vector>
 #include <algorithm>
+#include <biome.h>
+#include <gameplay/precipitation.h>
+#include <metrics.h>
 
 #include <imgui-docking/imgui/imgui.h>
 
@@ -2087,6 +2090,56 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		shadingSettings.exposure, chunkSystem, skyLightIntensity,
 		currentSkinTextureId, playerClicked, playerRunning, playerHand, currentHeldItemIndex,
 		showHand, playersConnectionData);
+	// Milestone G1b: the rain and snow around the camera, one sheet per block
+	// column, from where the column's highest blocking block stops it. The
+	// chunk's biome picks the kind: nothing in the desert, snow in the snow
+	// biome and high up, rain elsewhere. Not under water.
+	{
+		wgpuWorld::Precipitation precipitation;
+		precipitation.intensity = underWater ? 0.f : weather.rain;
+		if (precipitation.intensity > 0)
+		{
+			constexpr int radius = 16;
+			precipitation.size = radius * 2 + 1;
+			precipitation.corner = {blockPosition.x - radius, blockPosition.z - radius};
+			precipitation.brightness = std::max(skyLightIntensity / 15.f, 0.08f) * 0.9f;
+			precipitation.wind = 0.2f * weather.rain * weather.rain;
+			precipitation.columns.assign(precipitation.size * precipitation.size, glm::vec2(0));
+
+			static const int environmentPreview = []()
+			{
+				const char *env = std::getenv("OURCRAFT_PRECIPITATION");
+				if (!env) { return 0; }
+				if (std::string(env) == "rain") { return 1; }
+				if (std::string(env) == "snow") { return 2; }
+				return 0;
+			}();
+			const int preview = precipitationPreview ? precipitationPreview : environmentPreview;
+
+			for (int j = 0; j < precipitation.size; j++)
+				for (int i = 0; i < precipitation.size; i++)
+				{
+					const int x = precipitation.corner.x + i;
+					const int z = precipitation.corner.y + j;
+					Chunk *chunk = chunkSystem.getChunkSafeFromBlockPos(x, z);
+					if (!chunk) { continue; } // not loaded: none
+
+					const int lx = modBlockToChunk(x);
+					const int lz = modBlockToChunk(z);
+					int top = 0;
+					for (int y = CHUNK_HEIGHT - 1; y >= 0; y--)
+					{
+						if (blockStopsRain(chunk->data.unsafeGet(lx, y, lz).getType())) { top = y + 1; break; }
+					}
+
+					float kind = (float)precipitationForColumn(chunk->data.biome, top);
+					if (preview) { kind = (float)preview; }
+					precipitation.columns[i + j * precipitation.size] = glm::vec2((float)top, kind);
+				}
+		}
+		wgpuWorld::setPrecipitation(precipitation);
+	}
+
 	// The world's transparent passes come after the entities.
 	wgpuWorld::renderTransparent();
 
