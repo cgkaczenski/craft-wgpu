@@ -20,6 +20,9 @@ bool shouldReloadTexturePacks();
 
 std::vector<std::filesystem::path> getUsedTexturePacksAndResetFlag();
 
+// Reads which texture packs were in use last time (playerSettings/texturePacks.txt).
+void loadTexturePackChoice();
+
 void displayTexturePacksSettingsMenuButton(ProgramData &programData);
 
 void displayTexturePacksSettingsMenu(ProgramData &programData);

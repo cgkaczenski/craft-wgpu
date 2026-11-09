@@ -2,6 +2,7 @@
 #include <rendering/crt.h>
 #include <gamePlayLogic.h>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <platform/platformInput.h>
 #include "multyPlayer/createConnection.h"
@@ -265,7 +266,37 @@ int rightAdvance = 0;
 std::vector<std::filesystem::path> loadedTexturePacks;
 std::unordered_map<std::string, gl2d::Texture> logoTextures;
 
+// The packs in use, first to last. The first pack with a texture wins it, so
+// a pack added in the menu goes to the front: it is on top of the list and
+// replaces what the packs already in use have. Saved in
+// playerSettings/texturePacks.txt, a name a line.
 std::vector<std::filesystem::path> usedTexturePacks{"ourcraft"};
+
+static const char *texturePackChoiceFile = RESOURCES_PATH "../playerSettings/texturePacks.txt";
+
+static void saveTexturePackChoice()
+{
+	std::ofstream file(texturePackChoiceFile);
+	for (auto &t : usedTexturePacks) { file << t.string() << "\n"; }
+}
+
+void loadTexturePackChoice()
+{
+	std::ifstream file(texturePackChoiceFile);
+	if (!file.is_open()) { return; } // the first run: the default pack
+
+	usedTexturePacks.clear();
+	std::string name;
+	while (std::getline(file, name))
+	{
+		// A pack deleted since is dropped, rather than kept as an empty entry.
+		if (!name.empty() && std::filesystem::is_directory(std::filesystem::path(RESOURCES_PATH "texturePacks") / name))
+		{
+			usedTexturePacks.push_back(name);
+		}
+	}
+	texturePackDirty = true;
+}
 
 void displaySettingsMenuButton(ProgramData &programData)
 {
@@ -310,8 +341,9 @@ void useTexturePack(std::string t)
 {
 	if (!isTexturePackUsed(t))
 	{
-		usedTexturePacks.push_back(t);
+		usedTexturePacks.insert(usedTexturePacks.begin(), t);
 		texturePackDirty = true;
+		saveTexturePackChoice();
 	}
 }
 
@@ -323,6 +355,7 @@ void unuseTexturePack(std::string t)
 	{
 		usedTexturePacks.erase(f);
 		texturePackDirty = true;
+		saveTexturePackChoice();
 	}
 }
 

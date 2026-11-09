@@ -310,6 +310,7 @@ bool initGame() //main server and title screen stuff
 	AudioEngine::loadSettingsOrSetToDefaultIfFail();
 
 	loadShadingSettings();
+	loadTexturePackChoice();
 	crt::init();
 	{
 		auto &s = programData.renderer.shadingSettings;
