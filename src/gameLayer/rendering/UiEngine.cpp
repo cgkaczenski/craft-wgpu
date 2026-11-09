@@ -1,4 +1,5 @@
 #include "rendering/UiEngine.h"
+#include <rendering/crt.h>
 #include <platform/platformInput.h>
 #include <gameplay/items.h>
 #include <blocksLoader.h>
@@ -357,7 +358,7 @@ void UiENgine::renderGameUI(float deltaTime, int w, int h
 	cursorItemIndex = -1;
 	glm::vec4 cursorItemIndexBox = {};
 	std::optional<Item> currentItemHovered = {};
-	auto mousePos = platform::getRelMousePosition();
+	auto mousePos = crt::mouseOnPicture();
 
 	auto renderOneItem = [&](glm::vec4 itemBox, const Item &item, float in = 0, float color = 1, gl2d::Texture icon = {})
 	{
@@ -653,14 +654,14 @@ void UiENgine::renderGameUI(float deltaTime, int w, int h
 						int slider = 0;
 
 						if (glui::drawButton(renderer2d, topBox, Colors_White, "",
-							font, buttonTexture, platform::getRelMousePosition(),
+							font, buttonTexture, crt::mouseOnPicture(),
 							platform::isLMouseHeld(), platform::isLMouseReleased()))
 						{
 							slider--;
 						}
 
 						if (glui::drawButton(renderer2d, bottomBox, Colors_White, "",
-							font, buttonTexture, platform::getRelMousePosition(),
+							font, buttonTexture, crt::mouseOnPicture(),
 							platform::isLMouseHeld(), platform::isLMouseReleased()))
 						{
 							slider++;
@@ -1236,7 +1237,7 @@ void UiENgine::renderGameUI(float deltaTime, int w, int h
 
 							glm::vec4 color = {0.8,0.8,0.8,1};
 
-							if ((i + skipped) != currentInventoryTab && glui::aabb(tabBox, platform::getRelMousePosition()))
+							if ((i + skipped) != currentInventoryTab && glui::aabb(tabBox, crt::mouseOnPicture()))
 							{
 								color = {1.2,1.2,1.2,1};
 							}
@@ -1251,7 +1252,7 @@ void UiENgine::renderGameUI(float deltaTime, int w, int h
 								{0,1,1,0.5}, {0.2,0.8,0.8,0.5});
 
 
-							if (glui::aabb(tabBox, platform::getRelMousePosition()) &&
+							if (glui::aabb(tabBox, crt::mouseOnPicture()) &&
 								platform::isLMousePressed()
 								)
 							{

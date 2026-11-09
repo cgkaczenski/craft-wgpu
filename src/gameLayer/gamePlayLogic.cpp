@@ -41,6 +41,7 @@
 #include <biome.h>
 #include <gameplay/precipitation.h>
 #include <metrics.h>
+#include <rendering/crt.h>
 
 struct GameData
 {
@@ -2193,6 +2194,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		clientControlWindowSize = ImGui::GetWindowSize();
 		if (clientControlOpen)
 		{
+			crt::debugUi();
 
 			// Milestone G1: the world clock and the weather. The world's own
 			// controls send the same commands as typing them in chat (/time,

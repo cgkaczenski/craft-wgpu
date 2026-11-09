@@ -1,4 +1,5 @@
 #include <rendering/renderSettings.h>
+#include <rendering/crt.h>
 #include <gamePlayLogic.h>
 #include <filesystem>
 #include <iostream>
@@ -112,6 +113,21 @@ good performance.\n-Fancy: significant performance cost but looks very nice.");
 	{
 		programData.ui.menuRenderer.sliderFloat("Bloom Multiplier", &getShadingSettings().bloomMultiplier, 0, 1, DEFAULT_SLIDER);
 		programData.ui.menuRenderer.sliderFloat("Bloom Tresshold", &getShadingSettings().bloomTresshold, 0.1, 1, DEFAULT_SLIDER);
+	};
+
+	programData.ui.menuRenderer.EndMenu();
+#pragma endregion
+
+#pragma region crt
+	programData.ui.menuRenderer.BeginMenu("CRT effect", Colors_Gray, programData.ui.buttonTexture);
+	programData.ui.menuRenderer.Text("CRT effect settings...", Colors_White);
+
+	programData.ui.menuRenderer.toggleOptions("CRT: ", "OFF|ON", &getShadingSettings().crt, true, Colors_White, 0, programData.ui.buttonTexture,
+		Colors_Gray);
+
+	if (getShadingSettings().crt)
+	{
+		programData.ui.menuRenderer.sliderInt("Intensity", &getShadingSettings().crtIntensity, 1, 100, DEFAULT_SLIDER);
 	};
 
 	programData.ui.menuRenderer.EndMenu();
@@ -353,7 +369,7 @@ bool renderButton(gl2d::Renderer2D &renderer,
 	bool hovered = 0;
 	bool held = 0;
 	bool released = 0;
-	auto cursorPos = platform::getRelMousePosition();
+	auto cursorPos = crt::mouseOnPicture();
 
 	if (glui::aabb(box, cursorPos))
 	{
@@ -754,6 +770,8 @@ void saveShadingSettings()
 	SET_FLOAT(toneMapShadowBoost);
 	SET_FLOAT(toneMapHighlightBoost);
 	SET_FLOAT(vignette);
+	SET_INT(crt);
+	SET_INT(crtIntensity);
 	SET_VEC3(toneMapLift);
 	SET_VEC3(toneMapGain);
 
@@ -802,6 +820,8 @@ void loadShadingSettings()
 		GET_FLOAT(toneMapShadowBoost);
 		GET_FLOAT(toneMapHighlightBoost);
 		GET_FLOAT(vignette);
+		GET_INT(crt);
+		GET_INT(crtIntensity);
 
 
 		void *rawData = 0;
@@ -1058,7 +1078,7 @@ void displayWorldSelectorMenu(ProgramData &programData)
 		const std::string &s)
 	{
 		return glui::drawButton(renderer, transform, color, s, programData.ui.font, programData.ui.buttonTexture,
-			platform::getRelMousePosition(), platform::isLMouseHeld(), platform::isLMouseReleased());
+			crt::mouseOnPicture(), platform::isLMouseHeld(), platform::isLMouseReleased());
 	};
 
 	auto drawBackground = [&]()
@@ -1449,7 +1469,7 @@ void displayWorldSelectorMenu(ProgramData &programData)
 					auto buttonBox = glui::Box().xLeft().yBottom().xDimensionPercentage(1.f).yDimensionPixels(150.f)();
 					glui::toggleOptions(renderer, buttonBox, "World type: ", Colors_White,
 						"Normal|Super Flat", &currentIndex, true, programData.ui.font,
-						programData.ui.buttonTexture, Colors_Gray, platform::getRelMousePosition(),
+						programData.ui.buttonTexture, Colors_Gray, crt::mouseOnPicture(),
 						platform::isLMouseHeld(), platform::isLMouseReleased());
 
 					auto mapBox = glui::Box().xLeft().yTop().xDimensionPercentage(1.f).yDimensionPercentage(1.f)();
@@ -1534,6 +1554,8 @@ void ShadingSettings::normalize()
 	toneMapShadowBoost = glm::clamp(toneMapShadowBoost, -1.f, 1.f);
 	toneMapHighlightBoost = glm::clamp(toneMapHighlightBoost, -1.f, 1.f);
 	vignette = glm::clamp(vignette, 0.f, 1.f);
+	crt = glm::clamp(crt, 0, 1);
+	crtIntensity = glm::clamp(crtIntensity, 1, 100);
 	glm::vec3 toneMapLift = glm::clamp(toneMapLift ,glm::vec3(0.f), glm::vec3(1));
 	glm::vec3 toneMapGain = glm::clamp(toneMapGain, glm::vec3(0.f), glm::vec3(1));
 

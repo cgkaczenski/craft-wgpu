@@ -1850,7 +1850,7 @@ namespace
 			toneMapPass.release();
 		}
 
-		RenderPassEncoder pass = wgpuCurrentRenderPass();
+		RenderPassEncoder pass = wgpuCurrentGamePass();
 		if (!pass) { return; }
 		if (!chain)
 		{

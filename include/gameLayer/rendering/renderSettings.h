@@ -72,6 +72,11 @@ struct ShadingSettings
 	float toneMapShadowBoost = 0;
 	float toneMapHighlightBoost = 0;
 	float vignette = 0.15;
+
+	// The CRT filter (rendering/crt.h): on/off, and how strong, 1..100.
+	int crt = 1;
+	int crtIntensity = 50;
+
 	glm::vec3 toneMapLift = glm::vec3(0.5);
 	glm::vec3 toneMapGain = glm::vec3(0.5);
 

@@ -53,6 +53,12 @@ namespace render
 	// recorded into it after the game's flush draws on top.
 	wgpu::RenderPassEncoder wgpuCurrentRenderPass();
 
+	// ourCraft: the same, for what belongs to the game's picture: the frame
+	// target while a final effect is set (so it goes through the effect, and
+	// wgpuCurrentRenderPass stays the place for what must not), else the
+	// surface.
+	wgpu::RenderPassEncoder wgpuCurrentGamePass();
+
 	// ourCraft: a pass of the caller's own on the surface, with a depth
 	// attachment, for the 3D world. Ends the open 2D pass (the 2D pipelines
 	// have no depth state, so they cannot share a pass that has depth),

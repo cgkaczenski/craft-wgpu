@@ -28,6 +28,7 @@
 
 #if REMOVE_IMGUI == 0
 #include "imgui.h"
+#include <rendering/crt.h>
 #endif
 
 
@@ -309,6 +310,7 @@ bool initGame() //main server and title screen stuff
 	AudioEngine::loadSettingsOrSetToDefaultIfFail();
 
 	loadShadingSettings();
+	crt::init();
 	{
 		auto &s = programData.renderer.shadingSettings;
 		auto &loadedS = getShadingSettings();
@@ -455,6 +457,7 @@ bool hostServer(const std::string &path)
 
 bool gameLogic(float deltaTime)
 {
+	crt::apply();
 
 #pragma region init stuff
 	int w = 0; int h = 0;
@@ -692,7 +695,7 @@ bool gameLogic(float deltaTime)
 	bool anyToggleDetoggeled = 0;
 	bool andSliderDragged = 0;
 
-	programData.ui.menuRenderer.renderFrame(programData.ui.renderer2d, programData.ui.font, platform::getRelMousePosition(),
+	programData.ui.menuRenderer.renderFrame(programData.ui.renderer2d, programData.ui.font, crt::mouseOnPicture(),
 		platform::isLMousePressed(), platform::isLMouseHeld(), platform::isLMouseReleased(),
 		platform::isKeyReleased(platform::Button::Escape), platform::getTypedInput(), deltaTime, &anyButtonPressed, &backPressed,
 		&anyCustomWidgetPressed, &anyToggleToggeled, &anyToggleDetoggeled, &andSliderDragged);
@@ -738,6 +741,7 @@ bool gameLogic(float deltaTime)
 
 void closeGame()
 {
+	crt::cleanup();
 	closeGameLogic();
 	closeConnection();
 	closeServer();

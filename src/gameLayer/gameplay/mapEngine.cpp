@@ -2,6 +2,7 @@
 #include "gamePlayLogic.h"
 #include "chunkSystem.h"
 #include <platform/platformInput.h>
+#include <rendering/crt.h>
 
 void MapEngine::close()
 {
@@ -103,7 +104,7 @@ void MapEngine::update(ProgramData &programData, float deltaTime,
 		
 		auto cameraBox = renderer.getViewRect();
 		glm::vec2 mousePosInViewRect = glm::vec2(cameraBox);
-		mousePosInViewRect += glm::vec2(cameraBox.z, cameraBox.w) * glm::vec2(platform::getRelMousePosition()) /
+		mousePosInViewRect += glm::vec2(cameraBox.z, cameraBox.w) * glm::vec2(crt::mouseOnPicture()) /
 			glm::vec2(renderer.windowW, renderer.windowH);
 
 		mouseHoveredId = UINT64_MAX;

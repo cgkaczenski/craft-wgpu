@@ -3644,9 +3644,10 @@ ShaderModule wgpuCreateShaderModuleFromFile(const char *path)
 RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, bool clearDepth,
 	float depthClearValue, const char *label)
 {
-	// The low-res final-effect target is not supported here: ourCraft sets no
-	// final effect, so the world always goes straight to the surface.
+	// ourCraft's CRT: with a final effect set, the world goes into the frame
+	// target with everything else, so it comes back through the effect.
 	if (!g.frameOpen || !depthView) { return nullptr; }
+	const bool toFrameTarget = g.scaledTargetId != 0 && g.scaledTargetId <= textures.size();
 
 	if (g.framePass)
 	{
@@ -3655,11 +3656,13 @@ RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, bool clea
 		g.framePass = nullptr;
 	}
 
-	const bool clear = !g.surfaceCleared;
-	g.surfaceCleared = true;
+	bool &cleared = toFrameTarget ? g.scaledCleared : g.surfaceCleared;
+	const bool clear = !cleared;
+	cleared = true;
+	if (toFrameTarget) { g.scaledTargetDrawn = true; }
 
 	RenderPassColorAttachment colorAttachment = Default;
-	colorAttachment.view = g.frameView;
+	colorAttachment.view = toFrameTarget ? textures[g.scaledTargetId - 1].view : g.frameView;
 	colorAttachment.depthSlice = WGPU_DEPTH_SLICE_UNDEFINED;
 	colorAttachment.resolveTarget = nullptr;
 	colorAttachment.loadOp = clear ? LoadOp::Clear : LoadOp::Load;
@@ -3691,6 +3694,14 @@ RenderPassEncoder wgpuBeginSurfacePassWithDepth(TextureView depthView, bool clea
 	passDesc.occlusionQuerySet = nullptr;
 	passDesc.timestampWrites = nullptr;
 	return g.frameEncoder.beginRenderPass(passDesc);
+}
+
+RenderPassEncoder wgpuCurrentGamePass()
+{
+	const uint32_t target = g.scaledTargetId;
+	if (!ensurePassBegun(target)) { return nullptr; }
+	if (target != 0) { g.scaledTargetDrawn = true; }
+	return g.framePass;
 }
 
 CommandEncoder wgpuFrameEncoder()
