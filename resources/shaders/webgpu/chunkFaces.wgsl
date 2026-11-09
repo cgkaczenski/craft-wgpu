@@ -181,6 +181,39 @@ fn cornerShape(row: i32, corner: u32) -> vec3f {
     return vec3f(vertexData[base], vertexData[base + 1u], vertexData[base + 2u]);
 }
 
+// A textureLayers entry: the layer, and in the top byte how many blocks the
+// texture spans (BlocksLoader::spannedTextures; 0 or 1 for one block).
+const layerMask = 0x00FFFFFFu;
+
+fn wrapCell(a: i32, n: i32) -> i32 { return ((a % n) + n) % n; }
+
+// A texture across span x span blocks: which of its slices this block's face
+// shows. The slices go up the texture array from the bottom row, left to
+// right. Which world axes the face's u and v run along (and which way) comes
+// from its corners and their UVs, so the next block along shows the next
+// slice whichever way the UV table lays the face out. Cube faces only.
+fn spannedLayer(entry: u32, orientation: i32, block: vec3i) -> u32 {
+    let base = entry & layerMask;
+    let span = i32(entry >> 24u);
+    if (span < 2 || orientation < 0 || orientation >= 6) { return base; }
+
+    let o = u32(orientation);
+    let p0 = cornerShape(orientation, 0u);
+    let e1 = cornerShape(orientation, 1u) - p0;
+    let e2 = cornerShape(orientation, 2u) - p0;
+    let t0 = vec2f(vertexUV[o * 8u], vertexUV[o * 8u + 1u]);
+    let d1 = vec2f(vertexUV[o * 8u + 2u], vertexUV[o * 8u + 3u]) - t0;
+    let d2 = vec2f(vertexUV[o * 8u + 4u], vertexUV[o * 8u + 5u]) - t0;
+    let det = d1.x * d2.y - d2.x * d1.y;
+    if (abs(det) < 1e-4) { return base; }
+    let alongU = vec3i(round((e1 * d2.y - e2 * d1.y) / det));
+    let alongV = vec3i(round((e2 * d1.x - e1 * d2.x) / det));
+
+    let column = wrapCell(dot(block, alongU), span);
+    let row = wrapCell(dot(block, alongV), span);
+    return base + u32(column + row * span);
+}
+
 fn biasUp(a: f32) -> f32 { return (a + 0.75) / 1.75; }
 fn biasUp2(a: f32) -> f32 { return ((a + 1.0) / 2.0) / 2.0 + 0.5; }
 
@@ -282,9 +315,9 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     out.position.z += zBias * 0.5;
     out.uv = vec2f(vertexUV[uvBase], vertexUV[uvBase + 1u]);
     // A block's four slots: albedo, normal map, material map, parallax.
-    out.layer = textureLayers[textureIndex];
-    out.normalLayer = textureLayers[textureIndex + 1u];
-    out.materialLayer = textureLayers[textureIndex + 2u];
+    out.layer = spannedLayer(textureLayers[textureIndex], orientation, blockPosition);
+    out.normalLayer = textureLayers[textureIndex + 1u] & layerMask;
+    out.materialLayer = textureLayers[textureIndex + 2u] & layerMask;
     out.ambientMultiplier = ambientMultiplier;
     out.relative = relative;
     out.normal = normal;

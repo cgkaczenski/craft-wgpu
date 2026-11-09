@@ -580,6 +580,7 @@ namespace
 		// The loader's texture slots (BlocksLoader::gpuIds) and what is built
 		// from them: the texture array, its view, the slot -> layer table.
 		std::vector<uint64_t> textureSlots;
+		std::unordered_map<unsigned int, std::vector<unsigned int>> spannedTextures;
 		bool texturesDirty = false;
 		Texture textureArray = nullptr;
 		TextureView textureArrayView = nullptr;
@@ -2039,6 +2040,10 @@ namespace
 			return false;
 		}
 
+		// A slot's entry is its layer, with the block span of a texture that
+		// covers several blocks in the top byte (spannedLayer in
+		// chunkFaces.wgsl). Such a texture's slices take consecutive layers,
+		// bottom row first, in place of the whole picture.
 		std::vector<uint32_t> layerOfSlot(w.textureSlots.size());
 		std::vector<uint32_t> textureOfLayer;
 		std::unordered_map<uint32_t, uint32_t> layerOfTexture;
@@ -2046,13 +2051,25 @@ namespace
 		{
 			uint32_t id = textureOf(w.textureSlots[slot]);
 			if (!id) { id = fallback; }
+
+			uint32_t span = 1;
+			const std::vector<unsigned int> *slices = nullptr;
+			auto spanned = w.spannedTextures.find(id);
+			if (spanned != w.spannedTextures.end())
+			{
+				span = (uint32_t)std::lround(std::sqrt((double)spanned->second.size()));
+				slices = &spanned->second;
+				for (unsigned int s : *slices) { if (!textureOf(s)) { slices = nullptr; span = 1; break; } }
+			}
+
 			auto found = layerOfTexture.find(id);
 			if (found == layerOfTexture.end())
 			{
 				found = layerOfTexture.emplace(id, (uint32_t)textureOfLayer.size()).first;
-				textureOfLayer.push_back(id);
+				if (slices) { textureOfLayer.insert(textureOfLayer.end(), slices->begin(), slices->end()); }
+				else { textureOfLayer.push_back(id); }
 			}
-			layerOfSlot[slot] = found->second;
+			layerOfSlot[slot] = found->second | (span << 24);
 		}
 
 		Limits limits = Default;
@@ -4234,9 +4251,11 @@ void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<fl
 	w.blockGeometryDirty = true;
 }
 
-void setBlockTextures(const std::vector<uint64_t> &slots)
+void setBlockTextures(const std::vector<uint64_t> &slots,
+	const std::unordered_map<unsigned int, std::vector<unsigned int>> &spanned)
 {
 	w.textureSlots = slots;
+	w.spannedTextures = spanned;
 	w.texturesDirty = true;
 }
 

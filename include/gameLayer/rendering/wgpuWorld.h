@@ -1,4 +1,5 @@
 #pragma once
+#include <unordered_map>
 
 // The WebGPU side of the 3D renderer, beside the OpenGL Renderer. Milestone 5
 // started it (depth buffer, camera); milestone 6 draws the chunks' opaque
@@ -129,7 +130,10 @@ namespace wgpuWorld
 	// BlocksLoader::gpuIds, the texture slots a face's texture index picks
 	// (4 per block), each a wgpu2d texture id. The world copies those
 	// textures into one texture array.
-	void setBlockTextures(const std::vector<uint64_t> &slots);
+	// `spanned`: BlocksLoader::spannedTextures, the slices of the textures
+	// that cover several blocks.
+	void setBlockTextures(const std::vector<uint64_t> &slots,
+		const std::unordered_map<unsigned int, std::vector<unsigned int>> &spanned);
 
 	// A chunk's opaque faces, 4 ints each, exactly as Chunk::bake made them
 	// for OpenGL. Replaces what the chunk had; an empty vector frees it.

@@ -107,7 +107,7 @@ fn vs_cube(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) ins
     var out: CubeOutput;
     out.position = u.viewProjection * vec4f(relative, 1.0);
     out.uv = uv;
-    out.layer = textureLayers[slot];
+    out.layer = textureLayers[slot] & 0x00FFFFFFu; // the top byte is a block span
     out.brightness = cube.positionFloat.w;
     out.relative = relative;
     // Scaled evenly, so the normal is the cube's own.

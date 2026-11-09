@@ -54,7 +54,7 @@ fn vs_icon(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) ins
     var out: IconOutput;
     out.position = icon.viewProjection * vec4f(shape, 1.0);
     out.uv = vec2f(vertices[base + 6u], vertices[base + 7u]);
-    out.layer = textureLayers[slot];
+    out.layer = textureLayers[slot] & 0x00FFFFFFu; // the top byte is a block span
     out.normal = normal;
     return out;
 }

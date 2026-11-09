@@ -1308,7 +1308,7 @@ void Renderer::recreateBlocksTexturesBuffer(BlocksLoader &blocksLoader)
 {
 	// The slot table; the WebGPU world turns it into a texture array and a
 	// slot -> layer table (milestone 7).
-	wgpuWorld::setBlockTextures(blocksLoader.gpuIds);
+	wgpuWorld::setBlockTextures(blocksLoader.gpuIds, blocksLoader.spannedTextures);
 }
 
 void Renderer::renderAllBlocksUiTextures(BlocksLoader &blocksLoader, ModelsManager &modelsManager)

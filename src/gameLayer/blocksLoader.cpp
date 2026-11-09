@@ -1015,6 +1015,52 @@ void noErrorFunc(const char *msg, void *userDefinedData)
 {
 }
 
+// A texture that spans N x N blocks (spannedTextures): cut into its slices.
+// No span file, or one the picture cannot be cut by, leaves it one block.
+void BlocksLoader::loadTextureSpan(unsigned int albedo, const std::string &spanPath)
+{
+	std::ifstream file(spanPath);
+	int span = 0;
+	if (!file.is_open() || !(file >> span)) { return; }
+	if (span < 2 || span > 16)
+	{
+		std::cout << spanPath << ": a span of 2 to 16 blocks, not " << span << "\n";
+		return;
+	}
+
+	gl2d::Texture whole; whole.id = albedo;
+	glm::ivec2 size = {};
+	std::vector<unsigned char> pixels = whole.readTextureData(0, &size);
+	if (size.x != size.y || size.x % span != 0 || pixels.size() != (size_t)size.x * size.y * 4)
+	{
+		std::cout << spanPath << ": the picture is " << size.x << "x" << size.y
+			<< ", which does not cut into " << span << "x" << span << " squares\n";
+		return;
+	}
+
+	// readTextureData and createFromBuffer both take rows bottom first (gl2d's
+	// order), so the first rows are the bottom row of slices, and each slice
+	// keeps its rows in the same order.
+	const int cell = size.x / span;
+	std::vector<unsigned int> slices;
+	std::vector<unsigned char> slice((size_t)cell * cell * 4);
+	for (int row = 0; row < span; row++)
+	{
+		const int bottom = row * cell;
+		for (int column = 0; column < span; column++)
+		{
+			for (int y = 0; y < cell; y++)
+			{
+				memcpy(&slice[(size_t)y * cell * 4], &pixels[((size_t)(bottom + y) * size.x + column * cell) * 4], (size_t)cell * 4);
+			}
+			gl2d::Texture t;
+			t.createFromBuffer((const char *)slice.data(), cell, cell, true, false);
+			slices.push_back(t.id);
+		}
+	}
+	spannedTextures[albedo] = std::move(slices);
+}
+
 //textureloader texture loader
 void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 {
@@ -1210,6 +1256,10 @@ void BlocksLoader::loadAllTextures(std::string filePath, bool reportErrors)
 				texturesIds.push_back(texturesIds[0]);
 				gpuIds.push_back(gpuIds[0]);
 			};
+		}
+		else
+		{
+			loadTextureSpan(texturesIds[(i + 1) * 4], path + "_span.txt");
 		}
 		
 		if (0) //no normals
@@ -1715,6 +1765,12 @@ void BlocksLoader::setupAllColors()
 void BlocksLoader::clearAllTextures()
 {
 	blocksColors.clear();
+
+	for (auto &spanned : spannedTextures)
+	{
+		for (unsigned int slice : spanned.second) { wgpu2d::cleanupTextureId(slice); }
+	}
+	spannedTextures.clear();
 
 	spawnEgg.cleanup();
 	

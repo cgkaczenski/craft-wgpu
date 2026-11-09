@@ -1,5 +1,7 @@
 #pragma once
 #include <gl2d/gl2d.h>
+#include <unordered_map>
+#include <vector>
 
 struct BlocksLoader
 {
@@ -10,8 +12,17 @@ struct BlocksLoader
 	std::vector<std::uint64_t> gpuIds;
 	std::vector<unsigned int> texturesIds;
 
+	// Textures that span several blocks, so a wall or floor does not repeat
+	// every block: <name>_span.txt beside <name>.png holds N, and the picture
+	// covers N x N blocks. Keyed by the albedo's id: its N*N slices, each a
+	// texture of its own, bottom row first and left to right. wgpuWorld puts
+	// them in consecutive layers and each block face picks its slice by the
+	// block's position.
+	std::unordered_map<unsigned int, std::vector<unsigned int>> spannedTextures;
+
 	//load all blocks loadallblocks
 	void loadAllTextures(std::string path, bool reportErrors);
+	void loadTextureSpan(unsigned int albedo, const std::string &spanPath);
 	void setupAllColors();
 	void clearAllTextures();
 
