@@ -1303,7 +1303,6 @@ float vertexUV[] = {
 
 };
 
-float &getHitLensDirt();
 
 void Renderer::recreateBlocksTexturesBuffer(BlocksLoader &blocksLoader)
 {
@@ -1762,7 +1761,7 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	bool showLightLevels, glm::dvec3 pointPos, bool underWater, int screenX, int screenY,
 	float deltaTime, float dayTime, 
 	std::uint64_t currentSkinTextureId, bool &playerClicked, float playerRunning,
-	BoneTransform &playerHand, int currentHeldItemIndex, float waterDropsStrength,
+	BoneTransform &playerHand, int currentHeldItemIndex,
 	bool showHand, std::unordered_map<std::uint64_t, PlayerConnectionData> &playersConnectionData
 	)
 {
@@ -2041,7 +2040,8 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	// Milestone 16: bloom's uniforms, by the expressions of the bloom
 	// filter and apply passes below (GL's run after this frame's exposure
 	// update; these use the last frame's luminosity, a frame apart), and the
-	// lens dirt.
+	// dirt textures (the lens's for bloom, the hit's and water's for G3's
+	// splats).
 	lighting.bloom = getShadingSettings().bloom && getShadingSettings().bloomMultiplier > 0;
 	{
 		float threshold = getShadingSettings().bloomTresshold / 100.f;
@@ -2053,10 +2053,9 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		lighting.bloomMultiplier = multiplier / 10000.f;
 	}
 	lighting.lensDirtTexture = programData.lensDirtTexture.id;
+	lighting.lensDirtGlare = sunGlare;
 	lighting.hitDirtTexture = programData.hitDirtTexture.id;
 	lighting.waterDirtTexture = programData.waterDirtTexture.id;
-	lighting.hitLensDirt = getHitLensDirt();
-	lighting.waterDrops = waterDropsStrength;
 	// Milestone 17: the AO and the reflections.
 	lighting.ssao = programData.renderer.ssao;
 	lighting.aoViewDistance = (chunkSystem.squareSize / 2.f) * 16.f;
@@ -2172,6 +2171,7 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		glm::vec4 sun3Dpos = glm::vec4(sunPos, 1);
 		glm::vec4 sunProjectedCoords = c.getProjectionMatrix() * c.getViewMatrix() * sun3Dpos;
 
+		sunGlare = 0;
 		if (sunProjectedCoords.w > 0)
 		{
 			sunProjectedCoords.x /= sunProjectedCoords.w;
@@ -2219,6 +2219,9 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 
 			float globalBrightness = (1 - (glm::length(center - sunPos) / 0.6f)) * sunOcclusionFactor;
 			globalBrightness *= 1.f - weather.overcast; // G1: no flare through clouds
+			// The lens dirt reaches a little wider than the flare.
+			sunGlare = glm::clamp(1.f - glm::length(center - sunPos) / 0.9f, 0.f, 1.f) * sunOcclusionFactor
+				* (1.f - weather.overcast);
 
 			if (globalBrightness > 0)
 			{

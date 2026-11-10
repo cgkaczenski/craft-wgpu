@@ -161,7 +161,7 @@ god rays) already reads its settings from uniforms.
 - [`post.wgsl`](../resources/shaders/webgpu/post.wgsl)'s tone map pass does
   it: blur, radial blur and the ghost on the HDR read (16 taps on a disc,
   only when one runs), the colours after the tone mapper.
-- Five presets: `hit` (joins the hurt sound, camera shake and lens dirt in
+- Five presets: `hit` (joins the hurt sound and camera shake in
   `playSoundAndShakeForPlayerTakingDamage`, so local and server damage both
   flash), `low health` (held below a third of the life in survival, a
   heartbeat in red edges, less colour), `poisoned` (held while
@@ -186,6 +186,46 @@ splats drawn over the camera that fade out: blood, dirt, water.
 
 **Here:** one fullscreen overlay pass after tone mapping. Rain drops from G1,
 blood on heavy hits, water when surfacing. Triggered like G2 instances.
+
+**G3, done (branch `fnv-roadmap`):**
+
+- There were two already: GL's hit lens dirt (`hitLensDirt.png` on damage,
+  kept faintly on at low health) and the water drops coming out of the water
+  (`waterLensDirt.png`, full for a second, gone over three). Both were added
+  in the bloom pass as lens dirt, times the scene's colour, so they only
+  showed over bright pixels and not at all with bloom off. They leave
+  `bloom.wgsl` (which keeps its always-on `lensDirt.png`), and the timers in
+  `gamePlayLogic.cpp` (`hitLensDirt`, `dropsStrength`, `getHitLensDirt`)
+  go with them.
+- The splats are G2 channels now (`blood`, `waterDrops`, `rainDrops`, the
+  largest instance wins), drawn in
+  [`post.wgsl`](../resources/shaders/webgpu/post.wgsl)'s tone map from a
+  second bind group with the two textures. The drops are lenses: the water
+  drops' slopes bend the picture, with darker rims; the rain's are
+  procedural: resting drops (mostly tiny, some larger, not quite round,
+  landing and then shrinking as they dry) and a few running ones (one per
+  column, down the screen in fits and starts, wandering, leaving droplets
+  behind). Each is an out-of-focus ball lens: a third-size flipped, blurred
+  view of what is behind it, bending harder at the edge, with a ring dark at
+  the top and the light gathered at the bottom. The blood is painted over
+  the finished picture, so it shows in the dark.
+- Presets: `hit` carries GL's dirt (0.6, gone in 0.83 s) and `low health`
+  its 0.3; new `heavy hit` (a quarter of the life in one hit: blood that
+  stays 4 s; damage from the server is measured from the life before the
+  packet), `surfacing` (GL's timing; diving back in clears it) and
+  `rain on lens` (held in rain under open sky, from the same column check
+  as the rain sound, a third as much looking down; easing in over 3 s and
+  drying over 4).
+- All of it follows Settings > Rendering > Screen effects, which the old
+  dirt did not.
+- Bloom's always-on lens dirt (`lensDirt.png`) was lit by any bright pixel,
+  so its specks showed over all the sky. It is lit by the sun now
+  (`Renderer::sunGlare`: on screen, toward the middle, not behind blocks or
+  clouds, measured by the lens flare and used the next frame), so the dirt
+  shows looking toward the sun and the plain sky is clean.
+- Checked: each frozen in a copy of `test` (screenshots: the drops and the
+  blood frame), and the timings in a standalone test. Not checked in the
+  game: real damage, surfacing, rain, and with bloom off.
 
 ### G4. Impact data
 

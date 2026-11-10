@@ -35,10 +35,18 @@ struct PostUniforms {
     scene: vec4f,
     // x contrast around mid grey.
     look: vec4f,
+    // Milestone G3, the splats: x blood, y water drops, z rain drops (0..1
+    // each), w the animation clock in seconds.
+    splat: vec4f,
 };
 @group(0) @binding(0) var<uniform> post: PostUniforms;
 @group(0) @binding(1) var source: texture_2d<f32>;
 @group(0) @binding(2) var sourceSampler: sampler; // linear, clamped (GL's FBO textures)
+// Milestone G3: the splats' textures, only bound for the tone mapper (FXAA's
+// pipeline layout has group 0 alone). Both straight over the screen, v down.
+@group(1) @binding(0) var waterDropsTexture: texture_2d<f32>; // waterLensDirt.png: soft round drops
+@group(1) @binding(1) var bloodTexture: texture_2d<f32>;      // hitLensDirt.png: red grunge at the edges
+@group(1) @binding(2) var splatSampler: sampler;               // linear, clamped
 
 struct PostOutput {
     @builtin(position) position: vec4f,
@@ -295,14 +303,15 @@ fn ghostedTap(uv: vec2f, ghost: vec2f) -> vec3f {
     return mix(color, textureSampleLevel(source, sourceSampler, uv + ghost, 0.0).rgb, 0.5);
 }
 
-// The HDR color at uv, blurred, smeared toward the centre and doubled as the
-// effects ask: 16 taps on a golden-angle disc, each also pulled toward the
+// The HDR color at uv, blurred (by `extraBlur` more pixels too, at 1080
+// lines), smeared toward the centre and doubled as the effects ask: 16 taps on a golden-angle disc, each also pulled toward the
 // centre by its share of the radial blur.
-fn sceneColor(uv: vec2f) -> vec3f {
+fn sceneColor(uv: vec2f, extraBlur: f32) -> vec3f {
     let size = vec2f(textureDimensions(source));
     let scale = size.y / 1080.0;
     let ghost = post.scene.zw * scale / size;
-    let radius = post.scene.x * scale;
+    // The effects' blur, and more where a drop on the screen is (G3).
+    let radius = (post.scene.x + extraBlur) * scale;
     let radial = post.scene.y;
     if (radius <= 0.0 && radial <= 0.0) { return ghostedTap(uv, ghost); }
 
@@ -328,13 +337,211 @@ fn screenEffects(colorIn: vec3f, uv: vec2f) -> vec3f {
     return mix(color, post.edges.rgb, edge * post.edges.a);
 }
 
+// ---- Splats (milestone G3) --------------------------------------------------
+
+// What the drops on the screen do to a pixel: where it reads the picture
+// from (a drop is a small lens), how much brighter or darker it is, and a
+// glint of light added on top.
+struct Lens {
+    offset: vec2f,
+    shade: f32,
+    glint: f32,
+    blur: f32, // pixels at 1080 lines: a drop is out of focus
+};
+
+fn hash3(p: vec2f) -> vec3f {
+    var q = fract(vec3f(p.xyx) * vec3f(0.1031, 0.1030, 0.0973));
+    q += dot(q, q.yxz + 33.33);
+    return fract((q.xxy + q.yxx) * q.zyx);
+}
+
+fn dropMask(uv: vec2f) -> f32 {
+    let texel = textureSampleLevel(waterDropsTexture, splatSampler, uv, 0.0);
+    // The texture's drops are dim (most about 0.3): up to full inside them.
+    return clamp(max(texel.r, max(texel.g, texel.b)) * texel.a * 2.5, 0.0, 1.0);
+}
+
+// Coming out of the water: the texture's drops, sliding a little down the
+// screen as they dry. The slope of each soft drop bends the picture.
+fn waterDropsLens(uv: vec2f) -> Lens {
+    var lens = Lens(vec2f(0.0), 1.0, 0.0, 0.0);
+    let amount = post.splat.y;
+    if (amount <= 0.0) { return lens; }
+    let at = uv - vec2f(0.0, (1.0 - amount) * 0.06);
+    let step = 4.0 / vec2f(textureDimensions(waterDropsTexture));
+    let slope = vec2f(dropMask(at + vec2f(step.x, 0.0)) - dropMask(at - vec2f(step.x, 0.0)),
+        dropMask(at + vec2f(0.0, step.y)) - dropMask(at - vec2f(0.0, step.y)));
+    let m = dropMask(at);
+    lens.offset = -slope * 0.05 * amount;
+    // Brighter inside, darker on the rims (where the slope is steep), and a
+    // little milky.
+    lens.shade = max(1.0 + (0.25 * m - 0.5 * length(slope)) * amount, 0.3);
+    lens.glint = 0.06 * m * amount;
+    return lens;
+}
+
+// The rain on the screen, procedural: drops of water on a lens, so out of
+// focus, each a tiny ball lens showing a smaller, flipped and blurred view of
+// what is behind it, with a soft dark edge and the light pooled at its
+// bottom.
+//
+//   resting  small drops on a grid of cells, most tiny, a few larger. Each
+//            lands (pops to full size), then shrinks as it dries, on its
+//            own clock. Not quite round: wobbled by angle, a little heavy
+//            at the bottom.
+//   running  a few big drops, one per column, that run down the screen in
+//            fits and starts (catching, then letting go), wandering
+//            sideways, with a trail of droplets behind them.
+//
+// The harder it rains, the more cells and columns have one. A pixel takes
+// the drop that covers it most.
+
+struct Drop {
+    cover: f32,     // 0 outside, 1 well inside
+    centre: vec2f,  // screen uv
+    d: vec2f,       // from the centre, in radii (y down)
+    radius: f32,    // in screen heights
+};
+
+// A drop at `centre` (screen heights, y down) of `radius`, seen from p.
+fn dropAt(p: vec2f, centre: vec2f, radius: f32, wobble: f32, seed: f32) -> Drop {
+    var drop: Drop;
+    drop.cover = 0.0;
+    if (radius <= 0.0) { return drop; }
+    var d = (p - centre) / radius;
+    // Heavier at the bottom: the lower half reaches a little further.
+    d.y *= select(1.0, 0.85, d.y > 0.0);
+    let angle = atan2(d.y, d.x);
+    let edge = 1.0 + wobble * (0.6 * sin(angle * 2.0 + seed * 6.28) + 0.4 * sin(angle * 3.0 + seed * 17.0));
+    let r = length(d) / edge;
+    drop.cover = 1.0 - smoothstep(0.5, 1.0, r);
+    drop.d = d / edge;
+    drop.radius = radius;
+    drop.centre = centre;
+    return drop;
+}
+
+fn better(a: Drop, b: Drop) -> Drop {
+    if (b.cover > a.cover) { return b; }
+    return a;
+}
+
+fn restingDrops(p: vec2f, amount: f32, time: f32) -> Drop {
+    var best: Drop;
+    best.cover = 0.0;
+    for (var layer = 0; layer < 2; layer++) {
+        // 26 cells a screen height for the tiny ones, 9 for the larger.
+        let cells = select(26.0, 9.0, layer == 1);
+        let cell = floor(p * cells);
+        let h = hash3(cell + f32(layer) * 57.3);
+        let g = hash3(cell * 1.31 + 7.7 + f32(layer) * 3.1);
+        let share = select(0.55, 0.18, layer == 1);
+        if (g.x > amount * share) { continue; }
+        let period = 4.0 + 6.0 * h.z;
+        let phase = fract(time / period + h.x);
+        // Lands in a twentieth of a second, dries over the rest.
+        let size = smoothstep(0.0, 0.01, phase) * sqrt(max(1.0 - phase, 0.0));
+        let base = select(0.1 + 0.25 * g.y * g.y, 0.15 + 0.2 * g.y, layer == 1);
+        let centre = (cell + vec2f(0.3) + 0.4 * h.xy) / cells;
+        best = better(best, dropAt(p, centre, base * size / cells, 0.12, g.z));
+    }
+    return best;
+}
+
+fn runningDrops(p: vec2f, amount: f32, time: f32) -> Drop {
+    var best: Drop;
+    best.cover = 0.0;
+    // Columns a fifth of a screen height wide.
+    let columns = 5.0;
+    let column = floor(p.x * columns);
+    let width = 1.0 / columns;
+    let h = hash3(vec2f(column, 3.7));
+    let speed = 0.12 + 0.18 * h.y; // screen heights a second, on average
+    // Each run is one trip down the screen and a little beyond, and a new
+    // run of the column is its own drop (rehashed), so drops come and go.
+    let t = time * speed + h.x * 7.0;
+    let run = floor(t / 1.4);
+    let r = hash3(vec2f(column, run) * 0.37 + 11.0);
+    if (r.x > amount * 0.5) { return best; }
+    let along = fract(t / 1.4) * 1.4; // 0 above the top, 1.4 below the bottom
+    // Catching and letting go: progress that pauses, then hurries.
+    let jerk = along - 0.035 * sin(along * 28.0 + r.y * 6.28);
+    let y = jerk - 0.2;
+    let x = (column + 0.5 + 0.18 * sin(y * 7.0 + r.z * 6.28) + 0.08 * sin(y * 23.0 + r.y * 3.0)) * width;
+    let radius = width * (0.13 + 0.09 * r.y);
+    best = dropAt(p, vec2f(x, y), radius, 0.08, r.z);
+
+    // The trail: droplets left where it has been, smaller and drier the
+    // further back.
+    let behind = y - p.y;
+    let trailLength = 0.22;
+    if (behind > radius && behind < trailLength) {
+        let spacing = radius * 1.1;
+        let k = floor((behind - radius) / spacing);
+        let dy = y - radius - (k + 0.5) * spacing;
+        let dx = (column + 0.5 + 0.18 * sin(dy * 7.0 + r.z * 6.28) + 0.08 * sin(dy * 23.0 + r.y * 3.0)) * width;
+        let q = hash3(vec2f(k, run) + column * 3.3);
+        let fade = 1.0 - (behind / trailLength);
+        let size = radius * (0.25 + 0.2 * q.x) * fade * step(0.35, q.y);
+        best = better(best, dropAt(p, vec2f(dx + (q.z - 0.5) * radius * 0.6, dy), size, 0.1, q.z));
+    }
+    return best;
+}
+
+fn rainLens(uv: vec2f) -> Lens {
+    var lens = Lens(vec2f(0.0), 1.0, 0.0, 0.0);
+    let amount = post.splat.z;
+    if (amount <= 0.0) { return lens; }
+    let size = vec2f(textureDimensions(source));
+    let aspect = size.x / size.y;
+    let time = post.splat.w;
+    // Screen heights, so the drops stay round on any screen.
+    let p = vec2f(uv.x * aspect, uv.y);
+    let drop = better(restingDrops(p, amount, time), runningDrops(p, amount, time));
+    if (drop.cover <= 0.0) { return lens; }
+
+    // The view through it: around its centre, flipped, at a third the size,
+    // bending harder toward the edge, where it reaches well outside the drop.
+    let r = length(drop.d);
+    let centreUv = vec2f(drop.centre.x / aspect, drop.centre.y);
+    let reach = 0.35 + 1.6 * r * r * r * r;
+    let through = centreUv - drop.d * vec2f(drop.radius / aspect, drop.radius) * reach;
+    lens.offset = (through - uv) * drop.cover;
+    // A darker ring just inside the edge (light bent away), darkest at the
+    // top and fading toward the bottom, where the light gathers instead.
+    let ring = smoothstep(0.55, 0.85, r) * (1.0 - smoothstep(0.85, 1.05, r));
+    let topDark = clamp(0.6 - 0.55 * drop.d.y, 0.0, 1.0);
+    lens.shade = 1.0 - 0.38 * ring * topDark + 0.18 * smoothstep(0.1, 0.75, drop.d.y) * drop.cover;
+    lens.blur = 3.0 * drop.cover;
+    return lens;
+}
+
+fn splatLens(uv: vec2f) -> Lens {
+    let water = waterDropsLens(uv);
+    let rain = rainLens(uv);
+    return Lens(water.offset + rain.offset, water.shade * rain.shade, water.glint + rain.glint,
+        water.blur + rain.blur);
+}
+
+// Blood from the texture's red, painted over the finished picture, so it
+// shows in the dark too. Thicker where the texture is brighter.
+fn bloodOver(color: vec3f, uv: vec2f) -> vec3f {
+    let amount = post.splat.x;
+    if (amount <= 0.0) { return color; }
+    let m = textureSampleLevel(bloodTexture, splatSampler, uv, 0.0).r;
+    let blood = vec3f(0.32, 0.015, 0.01) * (0.55 + 0.7 * m);
+    return mix(color, blood, clamp(m * 1.8, 0.0, 1.0) * amount * 0.9);
+}
+
 @fragment
 fn fs_toneMap(in: PostOutput) -> @location(0) vec4f {
-    var color = sceneColor(in.uv) * post.grade.x;
+    let lens = splatLens(in.uv);
+    var color = sceneColor(clamp(in.uv + lens.offset, vec2f(0.0), vec2f(1.0)), lens.blur) * post.grade.x * lens.shade;
     color = adjustColor(color);
     color = tonemap(color);
     color = toDisplay(color);
     color = screenEffects(color, in.uv);
+    color = bloodOver(color, in.uv) + vec3f(lens.glint);
     color += (1.0 / 255.0) * gradientNoise(in.position.xy) - (0.5 / 255.0);
     color = clamp(color, vec3f(0.0), vec3f(1.0));
     color = applyVignette(color, in.position.xy, post.boost.z);

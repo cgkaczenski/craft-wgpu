@@ -85,7 +85,7 @@ struct Renderer
 		bool showLightLevels, glm::dvec3 pointPos,
 		bool underWater, int screenX, int screenY, float deltaTime, float dayTime,
 		std::uint64_t currentSkinTextureId, bool &playerClicked, float playerRunning,
-		BoneTransform &playerHand, int currentHeldItemIndex, float waterDropsStrength,
+		BoneTransform &playerHand, int currentHeldItemIndex,
 		bool showHand, std::unordered_map<std::uint64_t, PlayerConnectionData> &playersConnectionData);
 	
 	void renderDecal(glm::ivec3 position, Camera &c, Block b, ProgramData &programData, 
@@ -112,6 +112,12 @@ struct Renderer
 	// Milestone G1b: 0 the biome picks rain or snow, 1 rain everywhere, 2
 	// snow everywhere (the debug panel; OURCRAFT_PRECIPITATION=rain|snow).
 	int precipitationPreview = 0;
+
+	// How much the sun shines into the lens, 0..1: on screen, toward the
+	// middle, not behind blocks or clouds. The lens flare measures it each
+	// frame and the next frame's bloom lights the lens dirt by it, so the
+	// dirt shows looking toward the sun and not over all bright sky.
+	float sunGlare = 0;
 };
 
 // Debug cubes and lines, drawn by wgpuWorld as line segments.

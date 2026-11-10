@@ -223,16 +223,16 @@ namespace wgpuWorld
 		// uniforms as the renderer computes them: the exposure (the
 		// adaptive one plus the setting), the threshold (already halved
 		// under water) and the multiplier (already / 10000); the lens dirt
-		// textures (wgpu2d ids: lens, hit, water) and their strengths.
+		// textures (wgpu2d ids: lens for bloom; hit and water for the tone
+		// map's splats, milestone G3, whose strengths are in screenEffects).
 		bool bloom = false;
 		float bloomExposure = 1;
 		float bloomThreshold = 0.005f;
 		float bloomMultiplier = 0;
 		uint32_t lensDirtTexture = 0;
+		float lensDirtGlare = 0;  // how much the lens dirt shows: Renderer::sunGlare
 		uint32_t hitDirtTexture = 0;
 		uint32_t waterDirtTexture = 0;
-		float hitLensDirt = 0;    // getHitLensDirt()
-		float waterDrops = 0;     // waterDropsStrength
 
 		// Milestone 17: the renderer's ssao switch (GL's HBAO pass) and the
 		// view distance its AO fades out at ((squareSize / 2) * 16); the

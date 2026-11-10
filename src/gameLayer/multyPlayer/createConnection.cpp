@@ -14,7 +14,7 @@
 
 static ConnectionData clientData;
 
-void playSoundAndShakeForPlayerTakingDamage();
+void playSoundAndShakeForPlayerTakingDamage(float lifeLost);
 
 //todo this will get removed, for some things at least
 void submitTaskClient(Task &t)
@@ -802,6 +802,9 @@ void recieveDataClient(ENetEvent &event,
 				entityManager.localPlayer.lastLife = entityManager.localPlayer.life;
 			}
 
+			// Milestone G3: how much of the life this hit took, for the blood.
+			const float lifeBefore = entityManager.localPlayer.life.life;
+
 			entityManager.localPlayer.life = p->life;
 
 			entityManager.localPlayer.justHealedTimer = 0;
@@ -809,7 +812,9 @@ void recieveDataClient(ENetEvent &event,
 
 			entityManager.localPlayer.life.sanitize();
 
-			playSoundAndShakeForPlayerTakingDamage();
+			const float maxLife = (float)entityManager.localPlayer.life.maxLife;
+			playSoundAndShakeForPlayerTakingDamage(maxLife > 0
+				? (lifeBefore - entityManager.localPlayer.life.life) / maxLife : 0.f);
 		}
 		break;
 

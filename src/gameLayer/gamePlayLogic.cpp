@@ -94,7 +94,6 @@ struct GameData
 	bool insideInventoryMenu = 0;
 	int currentInventoryTab = 0;
 	bool justDamaged = 0;
-	float hitLensDirt = 0;
 
 	struct
 	{
@@ -119,7 +118,6 @@ struct GameData
 	bool killed = 0;
 
 	//water drops blur
-	float dropsStrength = 0;
 	bool lastFrameInWater = 0;
 
 	int craftingSlider = 0;
@@ -141,10 +139,6 @@ struct GameData
 
 ThreadPool threadPoolForChunkBaking;
 
-float &getHitLensDirt()
-{
-	return gameData.hitLensDirt;
-}
 
 void loadCurrentSkin()
 {
@@ -289,12 +283,14 @@ void keepDebugWindowOffClientControl(float yOffset)
 void keepDebugWindowOffClientControl(float yOffset) {}
 #endif
 
-void playSoundAndShakeForPlayerTakingDamage()
+void playSoundAndShakeForPlayerTakingDamage(float lifeLost)
 {
 	AudioEngine::playHurtSound();
 	gameData.justDamaged = true;
-	gameData.hitLensDirt = 1;
+	// Milestones G2 and G3: the hit's flash and blood, and more blood that
+	// stays a while when a quarter of the life went at once.
 	postModifiers::trigger(postModifiers::hit);
+	if (lifeLost >= 0.25f) { postModifiers::trigger(postModifiers::heavyHit); }
 }
 
 void dealDamageToLocalPlayer(int damage)
@@ -324,7 +320,7 @@ void dealDamageToLocalPlayer(int damage)
 			(char *)&packetData, sizeof(Packet_ClientDamageLocally),
 			true, channelChunksAndBlocks);
 
-		playSoundAndShakeForPlayerTakingDamage();
+		playSoundAndShakeForPlayerTakingDamage(p.life.maxLife > 0 ? damage / (float)p.life.maxLife : 0.f);
 	}
 
 }
@@ -369,6 +365,10 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	}
 
 	auto &player = gameData.entityManager.localPlayer;
+
+	// Milestone G2: the screen effects advance first, so anything this frame
+	// can hold or trigger one.
+	postModifiers::update(deltaTime);
 
 #pragma region server stuff
 	{
@@ -621,27 +621,6 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 #pragma region input
 
-
-	if (player.otherPlayerSettings.gameMode != OtherPlayerSettings::SURVIVAL)
-	{
-		gameData.hitLensDirt = 0;
-	}
-	else
-	{
-		gameData.hitLensDirt -= deltaTime * 1.2;
-
-		gameData.hitLensDirt = std::max(gameData.hitLensDirt, 0.f);
-
-		if (player.life.life / (float)player.life.maxLife < 0.25)
-		{
-			gameData.hitLensDirt = std::max(gameData.hitLensDirt, 0.2f);
-		}
-
-		if (player.life.life / (float)player.life.maxLife < 0.15)
-		{
-			gameData.hitLensDirt = std::max(gameData.hitLensDirt, 0.3f);
-		}
-	}
 
 
 	bool stopMainInput = gameData.escapePressed || gameData.killed || gameData.insideInventoryMenu ||
@@ -1838,6 +1817,13 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 			{
 				const bool covered = top > blockPositionPlayer.y + 1;
 				rainSound = programData.renderer.weather.rain * (covered ? 0.35f : 1.f) * (underWater ? 0.15f : 1.f);
+				// Milestone G3: drops on the screen in the open, more looking up.
+				if (!covered && !underWater)
+				{
+					const float up = glm::clamp(gameData.c.viewDirection.y * 0.5f + 0.5f, 0.f, 1.f);
+					postModifiers::hold(postModifiers::rainOnLens,
+						programData.renderer.weather.rain * glm::mix(0.35f, 1.f, up));
+				}
 			}
 		}
 		AudioEngine::setRainSound(rainSound * 0.8f);
@@ -1907,8 +1893,6 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	// splash going under water (lastFrameInWater is last frame's, until the
 	// water drops below set it).
 	{
-		postModifiers::update(deltaTime);
-
 		const bool survival = player.otherPlayerSettings.gameMode == OtherPlayerSettings::SURVIVAL;
 		const float lifeLeft = player.life.maxLife > 0 ? player.life.life / (float)player.life.maxLife : 1.f;
 		if (survival && !gameData.killed && lifeLeft < 0.35f)
@@ -1932,26 +1916,17 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	}
 #pragma endregion
 
-#pragma region underwater water drops
-	if (gameData.lastFrameInWater)
+	// Milestone G3: water drops on the screen coming out of the water (they
+	// were lens dirt in the bloom pass), gone at once going back under.
+	if (gameData.lastFrameInWater && !underWater)
 	{
-		if (!underWater)
-		{
-			gameData.dropsStrength = 4;
-		}
+		postModifiers::trigger(postModifiers::surfacing);
 	}
-	
 	if (underWater)
 	{
-		gameData.dropsStrength = 0;
+		postModifiers::stop(postModifiers::surfacing);
 	}
 	gameData.lastFrameInWater = underWater;
-
-	gameData.dropsStrength -= deltaTime;
-	if (gameData.dropsStrength < 0) { gameData.dropsStrength = 0; }
-
-	float finalDropStrength = std::min(1.f, gameData.dropsStrength/3.f);
-#pragma endregion
 
 
 	if(w != 0 && h != 0 && !gameData.isInsideMapView)
@@ -1966,7 +1941,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 			gameData.adaptiveExposure, gameData.showLightLevels,
 			gameData.point, underWater, w, h, deltaTime, dayTime, gameData.currentSkinTextureId,
 			gameData.handHit, isPlayerMovingSpeed, gameData.playerFOVHandTransform,
-			gameData.currentItemSelected, finalDropStrength, 
+			gameData.currentItemSelected,
 			gameData.showUI, gameData.playersConnectionData
 			);
 

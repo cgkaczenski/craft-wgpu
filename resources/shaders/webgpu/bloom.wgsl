@@ -23,10 +23,9 @@
 
 struct BloomUniforms {
     // x u_exposure (the adaptive exposure plus the setting), y u_tresshold,
-    // z u_multiplier (already / 10000), w unused.
+    // z u_multiplier (already / 10000), w how much the sun shines into the
+    // lens (Renderer::sunGlare), which lights the lens dirt.
     params: vec4f,
-    // x u_hitIntensity (getHitLensDirt), y u_waterDropsPower, zw unused.
-    dirt: vec4f,
 };
 @group(0) @binding(0) var<uniform> bloom: BloomUniforms;
 @group(0) @binding(1) var source: texture_2d<f32>;
@@ -144,12 +143,13 @@ fn fs_blur(in: BloomOutput) -> @location(0) vec4f {
 
 // applyBloomData.frag, with milestone 18's god rays (godRays.wgsl's
 // half-size result, GL's u_SSGR) and the depth they are weighed by.
+// GL's hit and water dirt were added here too, so they only showed over
+// bright pixels and only with bloom on; milestone G3 draws them in
+// post.wgsl's tone map instead.
 @group(0) @binding(3) var lensDirt: texture_2d<f32>;
-@group(0) @binding(4) var hitDirt: texture_2d<f32>;
-@group(0) @binding(5) var waterDirt: texture_2d<f32>;
-@group(0) @binding(6) var dirtSampler: sampler; // nearest (gl2d's pixelated)
-@group(0) @binding(7) var godRays: texture_2d<f32>;
-@group(0) @binding(8) var sceneDepth: texture_depth_2d;
+@group(0) @binding(4) var dirtSampler: sampler; // nearest (gl2d's pixelated)
+@group(0) @binding(5) var godRays: texture_2d<f32>;
+@group(0) @binding(6) var sceneDepth: texture_depth_2d;
 
 fn addLensBlur(c: vec3f, presence: f32, strength: f32) -> vec3f {
     return reinhard(c * presence) * strength;
@@ -163,16 +163,14 @@ fn fs_apply(in: BloomOutput) -> @location(0) vec4f {
     let dirtUv = in.uv;
     var c = textureSample(source, sourceSampler, in.uv).rgb;
     let dirtIntensity = textureSample(lensDirt, dirtSampler, dirtUv).rgb;
-    let hitIntensity = textureSample(hitDirt, dirtSampler, dirtUv).rgb;
-    let waterIntensity = textureSample(waterDirt, dirtSampler, dirtUv).rgb;
     let ssgr = textureSample(godRays, sourceSampler, in.uv).rgb;
     let depthSize = textureDimensions(sceneDepth);
     let depth = textureLoad(sceneDepth, min(vec2u(in.uv * vec2f(depthSize)), depthSize - 1u), 0);
 
     c = min(c, vec3f(2.0));
-    c += addLensBlur(dirtIntensity * c, 1.5, 2.1);
-    c += addLensBlur(hitIntensity * c, bloom.dirt.x * 8.0, 5.0);
-    c += addLensBlur(waterIntensity * c, 6.0 * bloom.dirt.y, 4.0);
+    // GL lit the dirt by any bright pixel, so it showed over all the sky;
+    // only the sun shining into the lens lights it now.
+    c += addLensBlur(dirtIntensity * c, 1.5, 2.1) * bloom.params.w;
     // The rays: squared (fainter) over the sky, as they are over geometry
     // linearly.
     if (depth == 1.0) {

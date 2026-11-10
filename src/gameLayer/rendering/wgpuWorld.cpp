@@ -157,16 +157,17 @@ namespace
 		glm::vec4 edges;  // rgb, amount
 		glm::vec4 scene;  // blur px, radial blur, double vision offset px (xy)
 		glm::vec4 look;   // x contrast
+		// Milestone G3, the splats: blood, water drops, rain drops, time.
+		glm::vec4 splat;
 	};
-	static_assert(sizeof(PostUniforms) == 160, "must match post.wgsl's PostUniforms");
+	static_assert(sizeof(PostUniforms) == 176, "must match post.wgsl's PostUniforms");
 
 	// Milestone 16: bloom.wgsl's BloomUniforms.
 	struct BloomUniforms
 	{
-		glm::vec4 params; // exposure, threshold, multiplier
-		glm::vec4 dirt;   // hit intensity, water drops
+		glm::vec4 params; // exposure, threshold, multiplier, lens dirt glare
 	};
-	static_assert(sizeof(BloomUniforms) == 32, "must match bloom.wgsl's BloomUniforms");
+	static_assert(sizeof(BloomUniforms) == 16, "must match bloom.wgsl's BloomUniforms");
 
 	// GL's three skies, each a cubemap of 128x128 faces.
 	enum SkyKind { DaySky, TwilightSky, NightSky, SkyKinds };
@@ -404,6 +405,13 @@ namespace
 		// surface, else it writes the surface itself.
 		BindGroupLayout postBindGroupLayout = nullptr;
 		PipelineLayout postPipelineLayout = nullptr;
+		// Milestone G3: the tone mapper's second group, the splats' textures
+		// (the water drops and the hit's blood: dirtTextures[2] and [1]) and
+		// their sampler, remade when a texture changes.
+		BindGroupLayout splatBindGroupLayout = nullptr;
+		PipelineLayout toneMapPipelineLayout = nullptr;
+		BindGroup splatGroup = nullptr;
+		TextureView boundSplatViews[2] = {}; // what splatGroup names (not owned)
 		RenderPipeline toneMapToTexturePipeline = nullptr;
 		RenderPipeline toneMapToSurfacePipeline = nullptr;
 		RenderPipeline fxaaPipeline = nullptr;
@@ -434,7 +442,7 @@ namespace
 		Texture blackTexture = nullptr;                // a missing dirt texture adds nothing
 		TextureView blackView = nullptr;
 		bool bloom = false;                            // this frame's setting
-		uint32_t dirtTextures[3] = {};                 // lens, hit, water: wgpu2d ids
+		uint32_t dirtTextures[3] = {};                 // lens (bloom's), hit, water (G3's splats): wgpu2d ids
 		// Sized with the targets: GL's bluredColorBuffer[2], mip 0 half the
 		// surface, bloomMips + 1 levels (GL's currentMips), a view and a
 		// group per level; the groups reading the HDR color and the
@@ -447,7 +455,7 @@ namespace
 		BindGroup colorSourceGroup = nullptr;
 		BindGroup bloomSourceGroup = nullptr;
 		BindGroup bloomApplyGroup = nullptr;
-		TextureView boundApplyViews[6] = {};           // what bloomApplyGroup names (not owned)
+		TextureView boundApplyViews[4] = {};           // what bloomApplyGroup names (not owned)
 		// The exposure's average: rgba16float, level 0 half the surface,
 		// down to 1x1 (GL's glGenerateMipmap of fboMain.color), then that
 		// texel copied into a mappable buffer and read a few frames later.
@@ -1632,39 +1640,69 @@ namespace
 		});
 	}
 
+	// Milestone G3: the tone mapper's splat textures, the water drops and
+	// the hit's blood, black where one is missing.
+	BindGroup splatGroup()
+	{
+		TextureView views[2] = {};
+		for (int i = 0; i < 2; i++)
+		{
+			const uint32_t id = w.dirtTextures[2 - i];
+			views[i] = id ? wgpuTextureView(id) : nullptr;
+			if (!views[i]) { views[i] = w.blackView; }
+			if (!views[i]) { return nullptr; }
+		}
+		if (w.splatGroup && std::equal(std::begin(views), std::end(views), std::begin(w.boundSplatViews)))
+		{
+			return w.splatGroup;
+		}
+		if (w.splatGroup) { w.splatGroup.release(); w.splatGroup = nullptr; }
+
+		BindGroupEntry entries[3];
+		for (uint32_t i = 0; i < 3; i++) { entries[i] = Default; entries[i].binding = i; }
+		entries[0].textureView = views[0];
+		entries[1].textureView = views[1];
+		entries[2].sampler = w.postSampler;
+		BindGroupDescriptor desc = Default;
+		desc.label = StringView("world splat bind group");
+		desc.layout = w.splatBindGroupLayout;
+		desc.entryCount = 3;
+		desc.entries = entries;
+		w.splatGroup = wgpuDevice().createBindGroup(desc);
+		std::copy(std::begin(views), std::end(views), std::begin(w.boundSplatViews));
+		return w.splatGroup;
+	}
+
 	// The apply's group: the blurred bloom (whichever buffer the sequence
-	// ends in) and the three dirt textures, black where one is missing.
+	// ends in) and the lens dirt, black when it is missing. (The hit and
+	// water dirt were here too; milestone G3 moved them to the tone map's
+	// splats.)
 	BindGroup bloomApplyGroup(TextureView bloomView)
 	{
-		TextureView views[6] = { bloomView, nullptr, nullptr, nullptr, w.sunRaysBlurView, w.depthSampleView };
-		for (int i = 0; i < 3; i++)
-		{
-			views[i + 1] = w.dirtTextures[i] ? wgpuTextureView(w.dirtTextures[i]) : nullptr;
-			if (!views[i + 1]) { views[i + 1] = w.blackView; }
-		}
-		if (!views[4] || !views[5]) { return nullptr; }
+		TextureView views[4] = { bloomView, nullptr, w.sunRaysBlurView, w.depthSampleView };
+		views[1] = w.dirtTextures[0] ? wgpuTextureView(w.dirtTextures[0]) : nullptr;
+		if (!views[1]) { views[1] = w.blackView; }
+		if (!views[2] || !views[3]) { return nullptr; }
 		if (w.bloomApplyGroup && std::equal(std::begin(views), std::end(views), std::begin(w.boundApplyViews)))
 		{
 			return w.bloomApplyGroup;
 		}
 		if (w.bloomApplyGroup) { w.bloomApplyGroup.release(); w.bloomApplyGroup = nullptr; }
 
-		BindGroupEntry entries[9];
-		for (uint32_t i = 0; i < 9; i++) { entries[i] = Default; entries[i].binding = i; }
+		BindGroupEntry entries[7];
+		for (uint32_t i = 0; i < 7; i++) { entries[i] = Default; entries[i].binding = i; }
 		entries[0].buffer = w.bloomUniformBuffer;
 		entries[0].size = sizeof(BloomUniforms);
 		entries[1].textureView = views[0];
 		entries[2].sampler = w.postSampler;
 		entries[3].textureView = views[1];
-		entries[4].textureView = views[2];
-		entries[5].textureView = views[3];
-		entries[6].sampler = w.dirtSampler;
-		entries[7].textureView = views[4]; // milestone 18: the god rays
-		entries[8].textureView = views[5]; // and the depth
+		entries[4].sampler = w.dirtSampler;
+		entries[5].textureView = views[2]; // milestone 18: the god rays
+		entries[6].textureView = views[3]; // and the depth
 		BindGroupDescriptor desc = Default;
 		desc.label = StringView("world bloom apply bind group");
 		desc.layout = w.bloomApplyBindGroupLayout;
-		desc.entryCount = 9;
+		desc.entryCount = 7;
 		desc.entries = entries;
 		w.bloomApplyGroup = wgpuDevice().createBindGroup(desc);
 		std::copy(std::begin(views), std::end(views), std::begin(w.boundApplyViews));
@@ -1831,6 +1869,9 @@ namespace
 		const bool chain = w.compositeView == 0;
 		// Under water the tone mapper reads the warp's output (milestone 18).
 		BindGroup toneMapGroup = w.underWater && w.toneMapWarpBindGroup ? w.toneMapWarpBindGroup : w.toneMapBindGroup;
+		// Milestone G3: the splats' textures, for the tone mapper.
+		BindGroup splats = splatGroup();
+		if (chain && !splats) { return; }
 		if (chain && w.fxaa)
 		{
 			CommandEncoder encoder = wgpuFrameEncoder();
@@ -1852,6 +1893,7 @@ namespace
 			RenderPassEncoder toneMapPass = encoder.beginRenderPass(passDesc);
 			toneMapPass.setPipeline(w.toneMapToTexturePipeline);
 			toneMapPass.setBindGroup(0, toneMapGroup, 0, nullptr);
+			toneMapPass.setBindGroup(1, splats, 0, nullptr);
 			toneMapPass.draw(3, 1, 0, 0);
 			toneMapPass.end();
 			toneMapPass.release();
@@ -1873,6 +1915,7 @@ namespace
 		{
 			pass.setPipeline(w.toneMapToSurfacePipeline);
 			pass.setBindGroup(0, toneMapGroup, 0, nullptr);
+			pass.setBindGroup(1, splats, 0, nullptr);
 		}
 		pass.draw(3, 1, 0, 0);
 		// The 2D pass is wgpu2d's: it ends it, and its own draws rebind.
@@ -2960,6 +3003,21 @@ namespace
 		layoutDesc.entries = entries;
 		w.postBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		if (!w.postBindGroupLayout) { return false; }
+
+		// Milestone G3: the splats' group, the same shape (two textures and
+		// a sampler where the post group has the uniforms first).
+		BindGroupLayoutEntry splatEntries[3];
+		for (uint32_t i = 0; i < 3; i++)
+		{
+			splatEntries[i] = entries[1];
+			splatEntries[i].binding = i;
+		}
+		splatEntries[2] = entries[2];
+		splatEntries[2].binding = 2;
+		layoutDesc.label = StringView("world splat bind group layout");
+		layoutDesc.entries = splatEntries;
+		w.splatBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
+		if (!w.splatBindGroupLayout) { return false; }
 		return !scope.failed();
 	}
 
@@ -2970,9 +3028,11 @@ namespace
 		ErrorScope scope("world post chain");
 
 		w.postPipelineLayout = createPipelineLayout("world post pipeline layout", &w.postBindGroupLayout, 1);
+		BindGroupLayout toneMapGroups[2] = { w.postBindGroupLayout, w.splatBindGroupLayout };
+		w.toneMapPipelineLayout = createPipelineLayout("world tone map pipeline layout", toneMapGroups, 2);
 
 		// Each pass a fullscreen triangle into one target, no blending.
-		auto pass = [&](const char *label, const char *fragmentEntry, TextureFormat format)
+		auto pass = [&](const char *label, const char *fragmentEntry, TextureFormat format, PipelineLayout layout)
 		{
 			ColorTargetState target = Default;
 			target.format = format;
@@ -2985,7 +3045,7 @@ namespace
 			fragment.targets = &target;
 			RenderPipelineDescriptor desc = Default;
 			desc.label = StringView(label);
-			desc.layout = w.postPipelineLayout;
+			desc.layout = layout;
 			desc.vertex.module = module;
 			desc.vertex.entryPoint = StringView("vs_fullscreen");
 			desc.vertex.bufferCount = 0;
@@ -3001,9 +3061,11 @@ namespace
 			desc.multisample.alphaToCoverageEnabled = false;
 			return wgpuDevice().createRenderPipeline(desc);
 		};
-		w.toneMapToTexturePipeline = pass("world tone map, to the FXAA input", "fs_toneMap", w.hdrFormat);
-		w.toneMapToSurfacePipeline = pass("world tone map, to the surface", "fs_toneMap", wgpuSurfaceFormat());
-		w.fxaaPipeline = pass("world FXAA", "fs_fxaa", wgpuSurfaceFormat());
+		w.toneMapToTexturePipeline = pass("world tone map, to the FXAA input", "fs_toneMap", w.hdrFormat,
+			w.toneMapPipelineLayout);
+		w.toneMapToSurfacePipeline = pass("world tone map, to the surface", "fs_toneMap", wgpuSurfaceFormat(),
+			w.toneMapPipelineLayout);
+		w.fxaaPipeline = pass("world FXAA", "fs_fxaa", wgpuSurfaceFormat(), w.postPipelineLayout);
 
 		const bool invalid = scope.failed();
 		module.release();
@@ -3056,8 +3118,8 @@ namespace
 
 		// Uniforms, one source, its sampler; the apply adds three dirt
 		// textures and their sampler.
-		BindGroupLayoutEntry entries[9];
-		for (uint32_t i = 0; i < 9; i++)
+		BindGroupLayoutEntry entries[7];
+		for (uint32_t i = 0; i < 7; i++)
 		{
 			entries[i] = Default;
 			entries[i].binding = i;
@@ -3072,14 +3134,14 @@ namespace
 				entries[i].buffer.hasDynamicOffset = false;
 				entries[i].buffer.minBindingSize = sizeof(BloomUniforms);
 			}
-			else if (i == 2 || i == 6)
+			else if (i == 2 || i == 4)
 			{
 				entries[i].sampler.type = SamplerBindingType::Filtering;
 			}
 			else
 			{
-				// 8: milestone 18's depth, the rest color textures.
-				entries[i].texture.sampleType = i == 8 ? TextureSampleType(TextureSampleType::Depth)
+				// 6: milestone 18's depth, the rest color textures.
+				entries[i].texture.sampleType = i == 6 ? TextureSampleType(TextureSampleType::Depth)
 					: TextureSampleType(TextureSampleType::Float);
 				entries[i].texture.viewDimension = TextureViewDimension::_2D;
 				entries[i].texture.multisampled = false;
@@ -3091,7 +3153,7 @@ namespace
 		layoutDesc.entries = entries;
 		w.bloomBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		layoutDesc.label = StringView("world bloom apply bind group layout");
-		layoutDesc.entryCount = 9;
+		layoutDesc.entryCount = 7;
 		w.bloomApplyBindGroupLayout = wgpuDevice().createBindGroupLayout(layoutDesc);
 		if (!w.bloomBindGroupLayout || !w.bloomApplyBindGroupLayout) { return false; }
 		return !scope.failed();
@@ -4214,7 +4276,7 @@ namespace
 		PipelineLayout *const layouts[] = {
 			&w.pipelineLayout, &w.transparentPipelineLayout, &w.decalPipelineLayout, &w.cubePipelineLayout,
 			&w.entityPipelineLayout, &w.viewPipelineLayout, &w.skyBakePipelineLayout, &w.skyPipelineLayout,
-			&w.sunRaysPipelineLayout, &w.postPipelineLayout, &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout,
+			&w.sunRaysPipelineLayout, &w.postPipelineLayout, &w.toneMapPipelineLayout, &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout,
 			&w.hbaoPipelineLayout, &w.hbaoApplyPipelineLayout, &w.rayMaskPipelineLayout, &w.rayBlurPipelineLayout,
 			&w.warpPipelineLayout, &w.precipitationPipelineLayout };
 		for (PipelineLayout *layout : layouts) { onLayout(*layout); }
@@ -4546,14 +4608,14 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	post.edges = effects.edges;
 	post.scene = glm::vec4(effects.blur, effects.radialBlur, effects.doubleVision.x, effects.doubleVision.y);
 	post.look = glm::vec4(effects.contrast, 0.f, 0.f, 0.f);
+	post.splat = glm::vec4(effects.blood, effects.waterDrops, effects.rainDrops, lighting.animationTime);
 	wgpuQueue().writeBuffer(w.postUniformBuffer, 0, &post, sizeof(post));
 	w.fxaa = lighting.fxaa;
 
 	// Milestone 16: bloom's settings and lens dirt, for the composite.
 	BloomUniforms bloom;
 	bloom.params = glm::vec4(lighting.bloomExposure, std::max(lighting.bloomThreshold, 1e-6f),
-		lighting.bloomMultiplier, 0.f);
-	bloom.dirt = glm::vec4(lighting.hitLensDirt, lighting.waterDrops, 0.f, 0.f);
+		lighting.bloomMultiplier, glm::clamp(lighting.lensDirtGlare, 0.f, 1.f));
 	wgpuQueue().writeBuffer(w.bloomUniformBuffer, 0, &bloom, sizeof(bloom));
 	w.bloom = lighting.bloom;
 	w.dirtTextures[0] = lighting.lensDirtTexture;
@@ -5420,7 +5482,11 @@ void shutdown()
 		if (*pipeline) { pipeline->release(); *pipeline = nullptr; }
 	}
 	if (w.postPipelineLayout) { w.postPipelineLayout.release(); w.postPipelineLayout = nullptr; }
+	if (w.toneMapPipelineLayout) { w.toneMapPipelineLayout.release(); w.toneMapPipelineLayout = nullptr; }
 	if (w.postBindGroupLayout) { w.postBindGroupLayout.release(); w.postBindGroupLayout = nullptr; }
+	if (w.splatGroup) { w.splatGroup.release(); w.splatGroup = nullptr; }
+	std::fill(std::begin(w.boundSplatViews), std::end(w.boundSplatViews), nullptr);
+	if (w.splatBindGroupLayout) { w.splatBindGroupLayout.release(); w.splatBindGroupLayout = nullptr; }
 	if (w.postUniformBuffer) { w.postUniformBuffer.release(); w.postUniformBuffer = nullptr; }
 	if (w.postSampler) { w.postSampler.release(); w.postSampler = nullptr; }
 	w.boundSunView = nullptr;

@@ -47,6 +47,10 @@ namespace
 		Curve radialBlur;   // 0..1
 		Curve doubleVision; // the ghost's distance, pixels at 1080 lines
 		float doubleVisionSpin = 0; // radians a second the ghost turns around the picture
+		// Milestone G3, the splats, 0..1.
+		Curve blood;
+		Curve waterDrops;
+		Curve rainDrops;
 	};
 
 	// The colours are display values, since they are mixed in after the
@@ -65,6 +69,8 @@ namespace
 				{0.6f, {0.45f, 0.f, 0.f, 0.f}} };
 			p.blur = { {0.f, 2.5f}, {0.25f, 0.f} };
 			p.saturation = { {0.f, 0.7f}, {0.45f, 1.f} };
+			// GL's hit lens dirt: full, gone in 0.83 s.
+			p.blood = { {0.f, 0.6f}, {0.83f, 0.f} };
 		}
 
 		{
@@ -80,6 +86,8 @@ namespace
 				{0.3f, {red, 0.62f}}, {0.55f, {red, 0.35f}}, {1.0f, {red, 0.35f}} };
 			p.saturation = { {0.f, 0.55f} };
 			p.contrast = { {0.f, 1.06f} };
+			// GL kept 0.2-0.3 of the hit dirt on at low health.
+			p.blood = { {0.f, 0.3f} };
 		}
 
 		{
@@ -120,6 +128,33 @@ namespace
 			p.easeOut = 1.f;
 			p.saturation = { {0.f, 0.8f} };
 			p.contrast = { {0.f, 0.94f} };
+		}
+
+		{
+			PresetData &p = presets[heavyHit];
+			p.name = "heavy hit";
+			p.duration = 4.f;
+			p.blood = { {0.f, 1.f}, {1.5f, 0.85f}, {4.f, 0.f} };
+		}
+
+		{
+			// GL's water drops: full for a second, then gone over three.
+			PresetData &p = presets[surfacing];
+			p.name = "surfacing";
+			p.duration = 4.f;
+			p.stacks = false;
+			p.waterDrops = { {0.f, 1.f}, {1.f, 1.f}, {4.f, 0.f} };
+		}
+
+		{
+			// The strength is how hard it rains, less looking down; drops
+			// keep landing while it lasts and dry off after.
+			PresetData &p = presets[rainOnLens];
+			p.name = "rain on lens";
+			p.held = true;
+			p.easeIn = 3.f;
+			p.easeOut = 4.f;
+			p.rainDrops = { {0.f, 1.f} };
 		}
 
 		return presets;
@@ -353,6 +388,12 @@ void hold(int preset, float strength)
 	instance->renewed = true;
 }
 
+void stop(int preset)
+{
+	stack.erase(std::remove_if(stack.begin(), stack.end(), [preset](const Instance &i)
+		{ return i.preset == preset && !i.frozen && !presets[i.preset].held; }), stack.end());
+}
+
 void clear()
 {
 	stack.erase(std::remove_if(stack.begin(), stack.end(), [](const Instance &i) { return !i.frozen; }),
@@ -392,6 +433,9 @@ PostLook current()
 
 		look.blur = std::max(look.blur, evaluate(p.blur, t, 0.f) * s);
 		look.radialBlur = std::max(look.radialBlur, evaluate(p.radialBlur, t, 0.f) * s);
+		look.blood = std::max(look.blood, evaluate(p.blood, t, 0.f) * s);
+		look.waterDrops = std::max(look.waterDrops, evaluate(p.waterDrops, t, 0.f) * s);
+		look.rainDrops = std::max(look.rainDrops, evaluate(p.rainDrops, t, 0.f) * s);
 		const float ghost = evaluate(p.doubleVision, t, 0.f) * s;
 		if (ghost > 0)
 		{
@@ -409,6 +453,9 @@ PostLook current()
 	look.contrast = glm::clamp(look.contrast, 0.5f, 1.5f);
 	look.blur = std::min(look.blur, 16.f);
 	look.radialBlur = std::min(look.radialBlur, 1.f);
+	look.blood = std::min(look.blood, 1.f);
+	look.waterDrops = std::min(look.waterDrops, 1.f);
+	look.rainDrops = std::min(look.rainDrops, 1.f);
 	if (glm::length(look.doubleVision) > 24.f) { look.doubleVision = glm::normalize(look.doubleVision) * 24.f; }
 	return look;
 }
@@ -456,6 +503,7 @@ void debugUi()
 	ImGui::TextDisabled("tint %.2f  fade %.2f  edges %.2f", look.tint.a, look.fade.a, look.edges.a);
 	ImGui::TextDisabled("blur %.1f px  radial %.2f  ghost %.1f px", look.blur, look.radialBlur,
 		glm::length(look.doubleVision));
+	ImGui::TextDisabled("blood %.2f  water drops %.2f  rain %.2f", look.blood, look.waterDrops, look.rainDrops);
 }
 
 }
