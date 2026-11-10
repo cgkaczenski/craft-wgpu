@@ -14,8 +14,9 @@
 //
 // Entity and item textures are wgpu2d textures, stored top row first, where
 // GL's gl2d stored them bottom row first: v is flipped when sampling.
-// Brightness is GL's linear light factor taken to output (sRGB) space, as
-// this world is unlit and writes texture colors as they are.
+// Cubes, models and items are lit as block faces are (lightEntity, below):
+// each carries the light where it stands, as baked, and the shader takes off
+// what the time of day does.
 //
 // Group 0 is the world's bind group (wgpuWorld.cpp); only the bindings used
 // here are declared, and they must match chunkFaces.wgsl's.
@@ -27,6 +28,7 @@
 // Gizmo lines draw on the screen after the composite, as GL draws them.
 
 #include "world.wgsl"
+#include "lighting.wgsl"
 
 @group(0) @binding(3) var<storage, read> textureLayers: array<u32>;
 @group(0) @binding(4) var blockTextures: texture_2d_array<f32>;
@@ -66,8 +68,8 @@ fn gBuffer(color: vec3f, relative: vec3f, normal: vec3f) -> GBuffer {
 
 struct Cube {
     positionInt: vec4i,
-    // xyz the fraction of the position; w the brightness from the light
-    // level (GL's v_ambient, in output space).
+    // xyz the fraction of the position; w the light where it lies, as baked
+    // (sky light << 4 | block light).
     positionFloat: vec4f,
     // Texture slots (BlocksLoader::gpuIds indices) of the six faces.
     slotsA: vec4u,
@@ -83,7 +85,7 @@ struct CubeOutput {
     @builtin(position) position: vec4f,
     @location(0) uv: vec2f,
     @location(1) @interpolate(flat) layer: u32,
-    @location(2) @interpolate(flat) brightness: f32,
+    @location(2) @interpolate(flat) light: u32,
     @location(3) relative: vec3f,
     @location(4) normal: vec3f,
 };
@@ -108,7 +110,7 @@ fn vs_cube(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) ins
     out.position = u.viewProjection * vec4f(relative, 1.0);
     out.uv = uv;
     out.layer = textureLayers[slot] & 0x00FFFFFFu; // the top byte is a block span
-    out.brightness = cube.positionFloat.w;
+    out.light = u32(cube.positionFloat.w);
     out.relative = relative;
     // Scaled evenly, so the normal is the cube's own.
     out.normal = vec3f(cubeVertices[base + 3u], cubeVertices[base + 4u], cubeVertices[base + 5u]);
@@ -119,7 +121,8 @@ fn vs_cube(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) ins
 fn fs_cube(in: CubeOutput) -> GBuffer {
     let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
     if (albedo.a <= 0.0) { discard; }
-    return gBuffer(toLinear(albedo.rgb * in.brightness), in.relative, normalize(in.normal));
+    let N = normalize(in.normal);
+    return gBuffer(lightEntity(toLinear(albedo.rgb), in.light, in.relative, N, in.position.xy), in.relative, N);
 }
 
 // ---- Gizmo lines --------------------------------------------------------
@@ -143,15 +146,16 @@ struct Model {
     // xyz the integer part of the position; w the first bone in `bones`.
     positionInt: vec4i,
     positionFloat: vec4f,
-    // rgb: GL's v_color (color * max(light/15, 0.1)), in output space.
-    brightness: vec4f,
+    // rgb: a linear tint; w: the light where it stands, as baked (sky light
+    // << 4 | block light), which lightLevels reads as it does a face's.
+    colorAndLight: vec4f,
 };
 
 // One per item (wgpuWorld::ItemInstance).
 struct Item {
     model: mat4x4f,       // GL's u_modelMatrix
     positionInt: vec4i,
-    positionFloat: vec4f, // w: GL's v_ambient, in output space
+    positionFloat: vec4f, // w: the light where it is, as baked (sky light << 4 | block light)
 };
 
 @group(1) @binding(0) var<storage, read> bones: array<mat4x4f>;
@@ -172,6 +176,7 @@ struct EntityOutput {
     @location(2) @interpolate(flat) brightness: vec3f,
     @location(3) relative: vec3f,
     @location(4) normal: vec3f,
+    @location(5) @interpolate(flat) light: u32,
 };
 
 struct ModelVertex {
@@ -194,7 +199,8 @@ fn vs_model(v: ModelVertex, @builtin(instance_index) instance: u32) -> EntityOut
     out.position = u.viewProjection * vec4f(relative, 1.0);
     out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
     out.textureIndex = u32(clamp(v.boneAndTexture.y, 0, 3));
-    out.brightness = m.brightness.rgb;
+    out.brightness = m.colorAndLight.rgb;
+    out.light = u32(m.colorAndLight.w);
     out.relative = relative;
     out.normal = transformNormal(skin, v.normal);
     return out;
@@ -214,11 +220,37 @@ fn entityAlbedo(in: EntityOutput) -> vec4f {
     return c;
 }
 
+// A model in the world's light, as chunkFaces.wgsl's shade lights a block
+// face: the sun or moon (its color and direction from the time of day and the
+// weather) with its shadow, the ambient light, and the light blocks. Rough and
+// not metal; no ambient occlusion.
+fn lightEntity(albedo: vec3f, packedLight: u32, relative: vec3f, N: vec3f, fragCoord: vec2f) -> vec3f {
+    let levels = lightLevels(packedLight);
+    let viewDepth = -(u.view * vec4f(relative, 1.0)).z;
+    let shadow = sunShadow(relative, viewDepth, dot(u.sunDirection.xyz, N), fragCoord);
+    let ambient = computeAmbient(levels, N, 1.0, false, 1.0, shadow);
+
+    let roughness = 0.9;
+    let F0 = vec3f(0.04);
+    let V = -normalize(relative);
+    // The block this point is in and where in it (blocks are centered on
+    // their integer position), for the point lights.
+    let world = u.positionFloat.xyz + relative;
+    let cell = floor(world + vec3f(0.5));
+    let blockPos = u.positionInt.xyz + vec3i(cell);
+
+    var color = pointLights(levels, blockPos, world - cell, 0.0, roughness, V, albedo, N, F0, vec3f(1.0));
+    color += sunLight(levels, 0.0, roughness, V, albedo, N, F0, 1.0, shadow, vec3f(1.0));
+    return color + albedo * ambient;
+}
+
 @fragment
 fn fs_model(in: EntityOutput) -> GBuffer {
     let c = entityAlbedo(in);
     if (c.a < 0.5) { discard; }
-    return gBuffer(toLinear(c.rgb * in.brightness), in.relative, normalize(in.normal));
+    let N = normalize(in.normal);
+    let albedo = toLinear(c.rgb) * in.brightness;
+    return gBuffer(lightEntity(albedo, in.light, in.relative, N, in.position.xy), in.relative, N);
 }
 
 struct ItemVertex {
@@ -237,7 +269,8 @@ fn vs_item(v: ItemVertex, @builtin(instance_index) instance: u32) -> EntityOutpu
     out.position = u.viewProjection * vec4f(relative, 1.0);
     out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
     out.textureIndex = 0u;
-    out.brightness = vec3f(item.positionFloat.w);
+    out.brightness = vec3f(1.0);
+    out.light = u32(item.positionFloat.w);
     out.relative = relative;
     out.normal = transformNormal(item.model, v.normal);
     return out;
@@ -247,5 +280,6 @@ fn vs_item(v: ItemVertex, @builtin(instance_index) instance: u32) -> EntityOutpu
 fn fs_item(in: EntityOutput) -> GBuffer {
     let c = textureSample(entityTexture0, blockSampler, in.uv);
     if (c.a <= 0.0) { discard; }
-    return gBuffer(toLinear(c.rgb * in.brightness), in.relative, normalize(in.normal));
+    let N = normalize(in.normal);
+    return gBuffer(lightEntity(toLinear(c.rgb), in.light, in.relative, N, in.position.xy), in.relative, N);
 }

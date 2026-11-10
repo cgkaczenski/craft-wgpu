@@ -29,7 +29,7 @@ namespace wgpuWorld
 	struct BlockCube
 	{
 		glm::ivec4 positionInt = {};   // xyz; w unused
-		glm::vec4 positionFloat = {};  // xyz the fraction; w brightness (0..1)
+		glm::vec4 positionFloat = {};  // xyz the fraction; w the light as baked (sky << 4 | block)
 		glm::uvec4 slotsA = {};        // BlocksLoader::gpuIds slots of faces 0-3
 		glm::uvec4 slotsB = {};        // faces 4-5 in xy
 	};
@@ -78,7 +78,11 @@ namespace wgpuWorld
 		uint32_t boneBase = 0;         // its first matrix in the frame's bones
 		glm::ivec3 positionInt = {};
 		glm::vec3 positionFloat = {};
-		glm::vec3 brightness = {1, 1, 1}; // output-space color factor
+		glm::vec3 color = {1, 1, 1};   // linear tint (a killed creature's red)
+		// The light where it stands, as baked: sky light << 4 | block light.
+		// entities.wgsl lights it as chunkFaces.wgsl lights a block face, so
+		// the time of day and the weather reach it.
+		uint32_t light = 0xF0;
 		uint32_t textures[4] = {};     // wgpu2d texture ids; 0 draws white
 	};
 
@@ -90,7 +94,7 @@ namespace wgpuWorld
 		glm::mat4 model = glm::mat4(1.f);
 		glm::ivec3 positionInt = {};
 		glm::vec3 positionFloat = {};
-		float brightness = 1.f;        // output-space factor
+		uint32_t light = 0xF0;         // the light as baked: sky light << 4 | block light
 	};
 
 	// The entity pass (Renderer::renderEntities): skinned models (their

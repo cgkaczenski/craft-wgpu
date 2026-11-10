@@ -250,7 +250,7 @@ namespace
 	{
 		glm::ivec4 positionInt;  // w: first bone
 		glm::vec4 positionFloat;
-		glm::vec4 brightness;
+		glm::vec4 colorAndLight; // rgb: linear tint; w: the packed light
 	};
 	static_assert(sizeof(ModelGpu) == 48, "must match entities.wgsl's Model");
 
@@ -258,7 +258,7 @@ namespace
 	{
 		glm::mat4 model;
 		glm::ivec4 positionInt;
-		glm::vec4 positionFloat; // w: brightness
+		glm::vec4 positionFloat; // w: the light as baked (sky << 4 | block)
 	};
 	static_assert(sizeof(ItemGpu) == 96, "must match entities.wgsl's Item");
 
@@ -4868,12 +4868,12 @@ void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<Model
 	for (const ModelInstance &m : models)
 	{
 		modelData.push_back(ModelGpu{ glm::ivec4(m.positionInt, (int)m.boneBase),
-			glm::vec4(m.positionFloat, 0.f), glm::vec4(m.brightness, 1.f) });
+			glm::vec4(m.positionFloat, 0.f), glm::vec4(m.color, (float)m.light) });
 	}
 	for (const ItemInstance &item : items)
 	{
 		itemData.push_back(ItemGpu{ item.model, glm::ivec4(item.positionInt, 0),
-			glm::vec4(item.positionFloat, item.brightness) });
+			glm::vec4(item.positionFloat, (float)item.light) });
 	}
 
 	// Storage buffers can't be empty: at least one element each.

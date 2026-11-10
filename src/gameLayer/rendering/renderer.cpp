@@ -1965,20 +1965,17 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		decomposePosition(e.second.getRubberBandPosition(), entityFloat, entityInt);
 		entityFloat += glm::vec3(0, 0.2, 0);
 
-		int light = skyLightIntensity;
-		if (auto b = chunkSystem.getBlockSafe(e.second.getRubberBandPosition() + glm::dvec3(0, 0.2, 0)))
+		// The light where it lies, as baked; entities.wgsl lights the cube as
+		// a block face is lit, time of day and weather included.
+		uint32_t light = 0xF0;
+		if (auto b = chunkSystem.getBlockSafe(e.second.getRubberBandPosition() + glm::dvec3(0, 0.2, 0));
+			b && !dontUpdateLightSystem)
 		{
-			light = std::max((char)b->getLight(), (char)(b->getSkyLight() - ((char)15 - (char)skyLightIntensity)));
-			light = std::max(light, 0);
+			light = (uint32_t(b->getSkyLight() & 0xF) << 4) | uint32_t(b->getLight() & 0xF);
 		}
-		if (dontUpdateLightSystem) { light = 15; }
-
-		// blockEntity.vert's v_ambient is pow(x, 2.2) of this, applied to a
-		// linear color; this world writes sRGB, so x itself is the factor.
-		const float brightness = (light / 15.f) * 0.6f * (1.f - 0.25f) + 0.25f;
 
 		cube.positionInt = glm::ivec4(entityInt, 0);
-		cube.positionFloat = glm::vec4(entityFloat, brightness);
+		cube.positionFloat = glm::vec4(entityFloat, (float)light);
 		cube.slotsA = glm::uvec4(getGpuIdIndexForBlock(type, 0), getGpuIdIndexForBlock(type, 1),
 			getGpuIdIndexForBlock(type, 2), getGpuIdIndexForBlock(type, 3));
 		cube.slotsB = glm::uvec4(getGpuIdIndexForBlock(type, 4), getGpuIdIndexForBlock(type, 5), 0, 0);
@@ -2334,7 +2331,10 @@ void Renderer::renderEntities(
 	{
 		glm::ivec3 entityPositionInt = {};
 		glm::vec3 entityPositionFloat = {};
-		glm::vec3 color = {1,1,1}; float lightLevels = 15;
+		glm::vec3 color = {1,1,1};
+		// The light where it stands, as baked (the shader takes off what the
+		// time of day does): sky light << 4 | block light.
+		uint32_t light = 0xF0;
 		std::uint64_t textureId0;
 		std::uint64_t textureId1;
 		std::uint64_t textureId2;
@@ -2367,14 +2367,23 @@ void Renderer::renderEntities(
 		wgpuBones.insert(wgpuBones.end(), matrices, matrices + count);
 		instance.positionInt = data.entityPositionInt;
 		instance.positionFloat = data.entityPositionFloat;
-		// basicEntity's v_color, linear, to output space.
-		const glm::vec3 linear = data.color * std::max(data.lightLevels / 15.f, 0.1f);
-		instance.brightness = glm::pow(glm::max(linear, glm::vec3(0.f)), glm::vec3(1.f / 2.2f));
+		instance.color = data.color;
+		instance.light = data.light;
 		instance.textures[0] = textureIdOf(data.textureId0);
 		instance.textures[1] = textureIdOf(data.textureId1);
 		instance.textures[2] = textureIdOf(data.textureId2);
 		instance.textures[3] = textureIdOf(data.textureId3);
 		wgpuModels.push_back(instance);
+	};
+
+	// The light of the block at `blockPos`, for a model or item in it. Open
+	// sky where the chunk is not loaded.
+	auto lightAt = [&](glm::ivec3 blockPos) -> uint32_t
+	{
+		if (dontUpdateLightSystem) { return 0xF0; }
+		auto block = chunkSystem.getBlockSafe(blockPos.x, blockPos.y, blockPos.z);
+		if (!block) { return 0xF0; }
+		return (uint32_t(block->getSkyLight() & 0xF) << 4) | uint32_t(block->getLight() & 0xF);
 	};
 
 	glm::mat4 handItemMatrix = glm::mat4{1.f};
@@ -2482,6 +2491,7 @@ void Renderer::renderEntities(
 			glm::dvec3 position = glm::dvec3(posInt) + glm::dvec3(posFloat);
 
 			decomposePosition(position, data.entityPositionFloat, data.entityPositionInt);
+			data.light = lightAt(from3DPointToBlock(position));
 			entityData.push_back(data);
 		}
 
@@ -2620,19 +2630,7 @@ void Renderer::renderEntities(
 				blockPos = {from3DPointToBlock(e.second.getRubberBandPosition())};
 			}
 
-			//light
-			auto block = chunkSystem.getBlockSafe(blockPos.x, blockPos.y, blockPos.z);
-			
-			if (block)
-				{ 
-					data.lightLevels = std::max(block->getSkyLight(), block->getLight()); 
-					data.lightLevels = std::max((char)block->getLight(), (char)(block->getSkyLight() - ((char)15 - (char)skyLightIntensity)));
-					data.lightLevels = std::max(data.lightLevels, 0.f);
-				} 
-				else { data.lightLevels = 0; }
-
-			if (dontUpdateLightSystem)
-				{ data.lightLevels = 15; }
+			data.light = lightAt(blockPos);
 
 			entityData.push_back(data);
 
@@ -2660,7 +2658,7 @@ void Renderer::renderEntities(
 	{
 
 		//not for blocks
-		auto renderOneItem = [&](auto type, glm::dvec3 pos, int light, glm::mat4 *mat = 0)
+		auto renderOneItem = [&](auto type, glm::dvec3 pos, uint32_t light, glm::mat4 *mat = 0)
 		{
 			std::uint64_t texture;
 
@@ -2719,9 +2717,7 @@ void Renderer::renderEntities(
 					item.positionFloat += glm::vec3(0, 0.4, 0);
 					item.model = glm::scale(glm::vec3{isA3DModel ? 1.f : 0.4f});
 				}
-				// blockEntity.vert's v_ambient is pow(x, 2.2) of this, on a
-				// linear color: x itself in output space.
-				item.brightness = (light / 15.f) * 0.6f * (1.f - 0.25f) + 0.25f;
+				item.light = light;
 				wgpuItems.push_back(item);
 			}
 
@@ -2735,21 +2731,8 @@ void Renderer::renderEntities(
 			if (isBlock(e.second.entityBuffered.type)) { continue; }
 			if (!e.second.entityBuffered.type) { continue; }
 
-			auto b = chunkSystem.getBlockSafe(e.second.getRubberBandPosition() + glm::dvec3(0, 0.2, 0));
-			int rez = skyLightIntensity;
-
-			if (b)
-			{
-				rez = std::max((char)b->getLight(), (char)(b->getSkyLight() - ((char)15 - (char)skyLightIntensity)));
-				rez = std::max(rez, 0);
-			}
-
-			if (dontUpdateLightSystem)
-			{
-				rez = 15;
-			}
-
-			renderOneItem(e.second.entityBuffered.type, e.second.getRubberBandPosition(), rez);
+			renderOneItem(e.second.entityBuffered.type, e.second.getRubberBandPosition(),
+				lightAt(from3DPointToBlock(e.second.getRubberBandPosition() + glm::dvec3(0, 0.2, 0))));
 
 		}
 
@@ -2761,7 +2744,8 @@ void Renderer::renderEntities(
 			// Items only: a held block draws nothing, as in GL.
 			if (!handItem->isBlock() && handItem->type)
 			{
-				renderOneItem(handItem->type, {}, 15, &handItemMatrix);
+				renderOneItem(handItem->type, {}, lightAt(from3DPointToBlock(glm::dvec3(posInt) + glm::dvec3(posFloat))),
+					&handItemMatrix);
 			}
 
 
