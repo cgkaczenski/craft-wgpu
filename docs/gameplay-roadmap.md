@@ -148,6 +148,37 @@ god rays) already reads its settings from uniforms.
 - First uses: damage flash (replace or join `playSoundAndShakeForPlayerTakingDamage`),
   low health vignette, poison tint from `Effects::Poisoned`, entering water.
 
+**G2, done (branch `fnv-roadmap`):**
+
+- [`postModifiers.h`](../include/gameLayer/rendering/postModifiers.h): a
+  preset is curves over time (linear keys, like FNV's `TimedFloatKey`) for
+  saturation, brightness, contrast, a tint (keeps the brightness), a fade to
+  a colour (a flash), coloured screen edges, blur, radial blur and double
+  vision. `trigger()` runs one once; `hold()` keeps one on while it is called
+  every frame, easing in and out, its curves looping (a pulse). Instances
+  combine as FNV's `ImageSpaceManager` does: multipliers multiply, colours
+  average by amount, blur takes the largest, double vision adds. At most 24.
+- [`post.wgsl`](../resources/shaders/webgpu/post.wgsl)'s tone map pass does
+  it: blur, radial blur and the ghost on the HDR read (16 taps on a disc,
+  only when one runs), the colours after the tone mapper.
+- Five presets: `hit` (joins the hurt sound, camera shake and lens dirt in
+  `playSoundAndShakeForPlayerTakingDamage`, so local and server damage both
+  flash), `low health` (held below a third of the life in survival, a
+  heartbeat in red edges, less colour), `poisoned` (held while
+  `Effects::Poisoned` runs: green, a turning ghost), `splash` (a dive after
+  a second out of the water: blur and a cold flash; a new one restarts the
+  run rather than stacking) and `overcast` (held at G1's overcast: a little
+  less colour and contrast under a grey sky).
+- Settings > Rendering > Screen effects turns all of it off (saved). The
+  client control panel triggers and holds each preset and shows the stack.
+  `OURCRAFT_POST_MODIFIER=name[@seconds],...` freezes presets on screen for
+  scripted screenshots.
+- Checked: each preset frozen in a copy of `test` (screenshots), and the
+  stack in a standalone test (a hit fading by 0.6 s, two hits stacking, holds
+  easing in and out, the setting, the cap, splashes restarting). Not checked
+  in the game: taking real damage, poison from food, diving, and the menu
+  toggle.
+
 ### G3. Screen splatter
 
 **FNV:** `fallout_shared/screensplatter`, `screencustomsplatter`. Textured

@@ -1,3 +1,4 @@
+#include <rendering/postModifiers.h>
 #include "gamePlayLogic.h"
 #include "rendering/camera.h"
 #include "platformInput.h"
@@ -293,6 +294,7 @@ void playSoundAndShakeForPlayerTakingDamage()
 	AudioEngine::playHurtSound();
 	gameData.justDamaged = true;
 	gameData.hitLensDirt = 1;
+	postModifiers::trigger(postModifiers::hit);
 }
 
 void dealDamageToLocalPlayer(int damage)
@@ -1900,6 +1902,36 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	}
 
 
+#pragma region screen effects
+	// Milestone G2: the screen effects held from the player's state, and the
+	// splash going under water (lastFrameInWater is last frame's, until the
+	// water drops below set it).
+	{
+		postModifiers::update(deltaTime);
+
+		const bool survival = player.otherPlayerSettings.gameMode == OtherPlayerSettings::SURVIVAL;
+		const float lifeLeft = player.life.maxLife > 0 ? player.life.life / (float)player.life.maxLife : 1.f;
+		if (survival && !gameData.killed && lifeLeft < 0.35f)
+		{
+			// From nothing at a third of the life to full at a tenth.
+			postModifiers::hold(postModifiers::lowHealth, glm::clamp((0.35f - lifeLeft) / 0.25f, 0.f, 1.f));
+		}
+		if (player.effects.allEffects[Effects::Poisoned].timerMs > 0)
+		{
+			postModifiers::hold(postModifiers::poisoned);
+		}
+		postModifiers::hold(postModifiers::overcast, programData.renderer.weather.overcast);
+		// Swimming at the surface takes the camera in and out every few
+		// frames: only a dive after a second out of the water splashes.
+		static float secondsOutOfWater = 0;
+		if (underWater && !gameData.lastFrameInWater && secondsOutOfWater > 1.f)
+		{
+			postModifiers::trigger(postModifiers::splash);
+		}
+		secondsOutOfWater = underWater ? 0.f : secondsOutOfWater + deltaTime;
+	}
+#pragma endregion
+
 #pragma region underwater water drops
 	if (gameData.lastFrameInWater)
 	{
@@ -2195,6 +2227,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		if (clientControlOpen)
 		{
 			crt::debugUi();
+			postModifiers::debugUi();
 
 			// Milestone G1: the world clock and the weather. The world's own
 			// controls send the same commands as typing them in chat (/time,
@@ -3467,6 +3500,7 @@ void closeGameLogic()
 	gameData.entityManager.cleanup();
 	
 	gameData.mapEngine.close();
+	postModifiers::clear();
 
 	//free all resources
 	gameData.clearData();

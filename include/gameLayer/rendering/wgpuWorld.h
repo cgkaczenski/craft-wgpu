@@ -1,4 +1,5 @@
 #pragma once
+#include <rendering/postModifiers.h>
 #include <unordered_map>
 
 // The WebGPU side of the 3D renderer, beside the OpenGL Renderer. Milestone 5
@@ -213,6 +214,9 @@ namespace wgpuWorld
 		glm::vec3 lift = {0, 0, 0};
 		glm::vec3 gain = {1, 1, 1};
 		bool fxaa = true;
+		// Milestone G2: the screen effects running this frame
+		// (postModifiers::current()); saturation is already in `saturation`.
+		postModifiers::PostLook screenEffects;
 
 		// Milestone 16: bloom, when the bloom setting is on and its
 		// multiplier above 0, with filterBloomData's and applyBloomData's

@@ -134,6 +134,16 @@ good performance.\n-Fancy: significant performance cost but looks very nice.");
 	programData.ui.menuRenderer.EndMenu();
 #pragma endregion
 
+#pragma region screen effects
+	programData.ui.menuRenderer.BeginMenu("Screen effects", Colors_Gray, programData.ui.buttonTexture);
+	programData.ui.menuRenderer.Text("Flashes and tints from damage, low health, poison and water...", Colors_White);
+
+	programData.ui.menuRenderer.toggleOptions("Screen effects: ", "OFF|ON", &getShadingSettings().screenEffects, true,
+		Colors_White, 0, programData.ui.buttonTexture, Colors_Gray);
+
+	programData.ui.menuRenderer.EndMenu();
+#pragma endregion
+
 #pragma region lights
 	programData.ui.menuRenderer.BeginMenu("Lights", Colors_Gray, programData.ui.buttonTexture);
 	programData.ui.menuRenderer.Text("Lights settings...", Colors_White);
@@ -805,6 +815,7 @@ void saveShadingSettings()
 	SET_FLOAT(vignette);
 	SET_INT(crt);
 	SET_INT(crtIntensity);
+	SET_INT(screenEffects);
 	SET_VEC3(toneMapLift);
 	SET_VEC3(toneMapGain);
 
@@ -855,6 +866,7 @@ void loadShadingSettings()
 		GET_FLOAT(vignette);
 		GET_INT(crt);
 		GET_INT(crtIntensity);
+		GET_INT(screenEffects);
 
 
 		void *rawData = 0;
@@ -1589,6 +1601,7 @@ void ShadingSettings::normalize()
 	vignette = glm::clamp(vignette, 0.f, 1.f);
 	crt = glm::clamp(crt, 0, 1);
 	crtIntensity = glm::clamp(crtIntensity, 1, 100);
+	screenEffects = glm::clamp(screenEffects, 0, 1);
 	glm::vec3 toneMapLift = glm::clamp(toneMapLift ,glm::vec3(0.f), glm::vec3(1));
 	glm::vec3 toneMapGain = glm::clamp(toneMapGain, glm::vec3(0.f), glm::vec3(1));
 

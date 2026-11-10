@@ -23,6 +23,18 @@ struct PostUniforms {
     gain: vec4f,
     // x u_tonemapper: 0 ACES, 1 AgX, 2 ZCAM, 3 Uncharted 2, 4 PBR Neutral.
     mode: vec4i,
+    // Milestone G2, the screen effects (rendering/postModifiers.h), all
+    // identity when none runs. Colours are display values, amounts 0..1:
+    // the tint keeps the brightness, the fade is the colour itself, the
+    // edges colour the screen's edges.
+    tint: vec4f,
+    fade: vec4f,
+    edges: vec4f,
+    // x blur radius, y radial blur 0..1, zw the double vision's ghost
+    // offset; pixels at 1080 lines.
+    scene: vec4f,
+    // x contrast around mid grey.
+    look: vec4f,
 };
 @group(0) @binding(0) var<uniform> post: PostUniforms;
 @group(0) @binding(1) var source: texture_2d<f32>;
@@ -272,12 +284,57 @@ fn applyVignette(color: vec3f, fragCoord: vec2f, intensity: f32) -> vec3f {
     return mix(color, color * vig, intensity);
 }
 
+// ---- Screen effects (milestone G2) -----------------------------------------
+
+const lumaWeights = vec3f(0.2126, 0.7152, 0.0722);
+
+// One read of the HDR color, with the double vision's ghost half over it.
+fn ghostedTap(uv: vec2f, ghost: vec2f) -> vec3f {
+    let color = textureSampleLevel(source, sourceSampler, uv, 0.0).rgb;
+    if (all(ghost == vec2f(0.0))) { return color; }
+    return mix(color, textureSampleLevel(source, sourceSampler, uv + ghost, 0.0).rgb, 0.5);
+}
+
+// The HDR color at uv, blurred, smeared toward the centre and doubled as the
+// effects ask: 16 taps on a golden-angle disc, each also pulled toward the
+// centre by its share of the radial blur.
+fn sceneColor(uv: vec2f) -> vec3f {
+    let size = vec2f(textureDimensions(source));
+    let scale = size.y / 1080.0;
+    let ghost = post.scene.zw * scale / size;
+    let radius = post.scene.x * scale;
+    let radial = post.scene.y;
+    if (radius <= 0.0 && radial <= 0.0) { return ghostedTap(uv, ghost); }
+
+    let toCentre = vec2f(0.5) - uv;
+    var sum = ghostedTap(uv, ghost);
+    for (var i = 0; i < 16; i++) {
+        let f = (f32(i) + 0.5) / 16.0;
+        let angle = f32(i) * 2.39996;
+        let disc = vec2f(cos(angle), sin(angle)) * radius * sqrt(f) / size;
+        sum += ghostedTap(uv + disc + toCentre * radial * 0.15 * f, ghost);
+    }
+    return sum / 17.0;
+}
+
+fn screenEffects(colorIn: vec3f, uv: vec2f) -> vec3f {
+    var color = (colorIn - 0.5) * post.look.x + 0.5;
+    let luma = dot(color, lumaWeights);
+    let tintLuma = max(dot(post.tint.rgb, lumaWeights), 1e-3);
+    color = mix(color, luma * post.tint.rgb / tintLuma, post.tint.a);
+    color = mix(color, post.fade.rgb, post.fade.a);
+    // 0 in the middle, 1 at the sides' middles, more in the corners.
+    let edge = smoothstep(0.45, 1.25, length((uv - 0.5) * 2.0));
+    return mix(color, post.edges.rgb, edge * post.edges.a);
+}
+
 @fragment
 fn fs_toneMap(in: PostOutput) -> @location(0) vec4f {
-    var color = textureSampleLevel(source, sourceSampler, in.uv, 0.0).rgb * post.grade.x;
+    var color = sceneColor(in.uv) * post.grade.x;
     color = adjustColor(color);
     color = tonemap(color);
     color = toDisplay(color);
+    color = screenEffects(color, in.uv);
     color += (1.0 / 255.0) * gradientNoise(in.position.xy) - (0.5 / 255.0);
     color = clamp(color, vec3f(0.0), vec3f(1.0));
     color = applyVignette(color, in.position.xy, post.boost.z);

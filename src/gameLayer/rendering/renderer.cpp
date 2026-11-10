@@ -1,3 +1,4 @@
+#include <rendering/postModifiers.h>
 #include "rendering/renderer.h"
 #include "rendering/wgpuWorld.h"
 #include <ctime>
@@ -2025,7 +2026,10 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	lighting.rain = weather.rain;
 	// Milestone 15: the tone mapper's and FXAA's settings, as GL sets them.
 	lighting.tonemapper = getShadingSettings().tonemapper;
-	lighting.saturation = getShadingSettings().toneMapSaturation;
+	// Milestone G2: the screen effects on top (the weather's overcast holds
+	// one, gamePlayLogic the rest).
+	lighting.screenEffects = postModifiers::current();
+	lighting.saturation = getShadingSettings().toneMapSaturation * lighting.screenEffects.saturation;
 	lighting.vibrance = getShadingSettings().toneMapVibrance;
 	lighting.gamma = getShadingSettings().toneMapGamma;
 	lighting.shadowBoost = getShadingSettings().toneMapShadowBoost;

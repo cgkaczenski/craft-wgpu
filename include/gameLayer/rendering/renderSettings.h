@@ -80,6 +80,11 @@ struct ShadingSettings
 	int crt = 1;
 	int crtIntensity = 50;
 
+	// Milestone G2's screen effects (rendering/postModifiers.h): the flash on
+	// a hit, the low health and poison looks, the splash. Off for anyone who
+	// would rather not have flashes.
+	int screenEffects = 1;
+
 	glm::vec3 toneMapLift = glm::vec3(0.5);
 	glm::vec3 toneMapGain = glm::vec3(0.5);
 

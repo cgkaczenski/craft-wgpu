@@ -151,8 +151,14 @@ namespace
 		glm::vec4 lift;
 		glm::vec4 gain;
 		glm::ivec4 mode; // x tone mapper
+		// Milestone G2, the screen effects (postModifiers::PostLook).
+		glm::vec4 tint;   // rgb, amount
+		glm::vec4 fade;   // rgb, amount
+		glm::vec4 edges;  // rgb, amount
+		glm::vec4 scene;  // blur px, radial blur, double vision offset px (xy)
+		glm::vec4 look;   // x contrast
 	};
-	static_assert(sizeof(PostUniforms) == 80, "must match post.wgsl's PostUniforms");
+	static_assert(sizeof(PostUniforms) == 160, "must match post.wgsl's PostUniforms");
 
 	// Milestone 16: bloom.wgsl's BloomUniforms.
 	struct BloomUniforms
@@ -4528,11 +4534,18 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 
 	// Milestone 15: the post chain's settings, for the composite.
 	PostUniforms post;
-	post.grade = glm::vec4(lighting.exposure, lighting.saturation, lighting.vibrance, lighting.gamma);
+	const postModifiers::PostLook &effects = lighting.screenEffects;
+	post.grade = glm::vec4(lighting.exposure * effects.brightness, lighting.saturation, lighting.vibrance,
+		lighting.gamma);
 	post.boost = glm::vec4(lighting.shadowBoost, lighting.highlightBoost, lighting.vignette, 0.f);
 	post.lift = glm::vec4(lighting.lift, 0.f);
 	post.gain = glm::vec4(lighting.gain, 0.f);
 	post.mode = glm::ivec4(std::clamp(lighting.tonemapper, 0, 4), 0, 0, 0);
+	post.tint = effects.tint;
+	post.fade = effects.fade;
+	post.edges = effects.edges;
+	post.scene = glm::vec4(effects.blur, effects.radialBlur, effects.doubleVision.x, effects.doubleVision.y);
+	post.look = glm::vec4(effects.contrast, 0.f, 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.postUniformBuffer, 0, &post, sizeof(post));
 	w.fxaa = lighting.fxaa;
 
