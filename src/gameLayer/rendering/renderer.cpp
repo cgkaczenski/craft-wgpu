@@ -2480,6 +2480,32 @@ void Renderer::renderEntities(
 
 	glm::mat4 handItemMatrix = glm::mat4{1.f};
 
+	// The held item's type (0 for none or a block). OURCRAFT_HELD_ITEM="name"
+	// (as the item's name, e.g. "silver sword") shows that item instead, for
+	// scripted screenshots; only the drawing, not the inventory.
+	int heldItemType = 0;
+	{
+		static const int environmentHeld = []()
+		{
+			const char *env = std::getenv("OURCRAFT_HELD_ITEM");
+			if (!env) { return 0; }
+			for (int i = ItemsStartPoint; i < lastItem; i++)
+			{
+				if (Item(i).getItemName() == env) { return i; }
+			}
+			std::cout << "OURCRAFT_HELD_ITEM: no item named " << env << "\n";
+			return 0;
+		}();
+		auto handItem = entityManager.localPlayer.inventory.getItemFromIndex(currentHeldItemIndex, nullptr);
+		if (handItem && !handItem->isBlock() && handItem->type) { heldItemType = handItem->type; }
+		if (environmentHeld) { heldItemType = environmentHeld; }
+	}
+	// Pixel items that take the hand's pose: held, the hand isn't drawn and
+	// the item is where the hand would be, through its idle, running and
+	// swing poses. The training sword and the silver sword for now.
+	const bool itemTakesHandPose = heldItemType == ItemTypes::trainingSword
+		|| heldItemType == ItemTypes::silverSword;
+
 	auto renderHand = [&]()
 	{
 		auto &model = modelsManager.rightHand;
@@ -2494,6 +2520,7 @@ void Renderer::renderEntities(
 			BoneTransform handIdle;
 			handIdle.position = glm::vec3{0.2,-2.0,-0.5};
 			handIdle.rotation = glm::vec3{glm::radians(120.f),0.f,0.f};
+			const BoneTransform handRest = handIdle; // before the running bob
 
 			if (playerRunning)
 			{
@@ -2568,6 +2595,83 @@ void Renderer::renderEntities(
 				* glm::scale(glm::vec3(0.45f));
 			//handItemMatrix = glm::translate(glm::vec3{0,0,2});
 
+			// An item that takes the hand's pose: two poses of its own, after
+			// Minecraft's first-person held item. At rest it is at the
+			// screen's right edge, its flat turned sideways so the picture
+			// runs into the screen (seen at an angle from the middle, the
+			// near pixels big), the tip leaning back and off the edge. At
+			// the end of the swing it is in at the bottom middle, tipped
+			// forward toward the crosshair, nearly edge on. The swing goes
+			// from one to the other and back as the hand's does, with the
+			// hand's walking bob on top.
+			if (itemTakesHandPose)
+			{
+				// Each pose: where the grip is on the screen (-1..1 each way,
+				// so it keeps its place whatever the window's shape) and how
+				// far in front of the camera; then the blade's lean (degrees,
+				// toward the left), tip (forward when negative) and twist about
+				// itself (-90: the flat toward the screen's middle).
+				// The numbers are Minecraft's handheld transform at 70 degrees
+				// and 16:9: at rest, and 0.4 of the way through its swing.
+				struct ItemPose { glm::vec2 screen; float depth; float lean, tip, twist; };
+				const ItemPose atRest = {{0.68f, -1.1f}, 0.74f, 0.f, 20.f, -90.f};
+				const ItemPose swung = {{0.25f, -1.06f}, 0.9f, 44.f, -39.f, -64.f};
+
+				// How far through the swing the hand is, 0..1, along the way
+				// from its rest to its hit position.
+				const glm::vec3 swingWay = handHit.position - handRest.position;
+				float swing = glm::dot(playerHand.position - handRest.position, swingWay)
+					/ glm::dot(swingWay, swingWay);
+				swing = glm::smoothstep(0.f, 1.f, glm::clamp(swing, 0.f, 1.f));
+
+				const float tanHalf = std::tan(c.fovRadians / 2.f);
+				auto place = [&](const ItemPose &pose)
+				{
+					return glm::vec3(pose.screen.x * tanHalf * c.aspectRatio * pose.depth,
+						pose.screen.y * tanHalf * pose.depth, -pose.depth);
+				};
+				auto turn = [](const ItemPose &pose)
+				{
+					return glm::quat_cast(glm::mat3(glm::rotate(glm::radians(pose.lean), glm::vec3(0, 0, 1))
+						* glm::rotate(glm::radians(pose.tip), glm::vec3(1, 0, 0))
+						* glm::rotate(glm::radians(pose.twist), glm::vec3(0, 1, 0))));
+				};
+				const glm::vec3 position = glm::mix(place(atRest), place(swung), swing);
+				const glm::quat rotation = glm::slerp(turn(atRest), turn(swung), swing);
+
+				// The pixel item's square is -1..1, but a 16 pixel picture is
+				// padded to 28 when loaded (loadFromFileAndAddPadding), so it
+				// fills only the middle 16/28 of it: a sword's pommel at the
+				// picture's bottom left and its tip at the top right. The
+				// grip, on the handle, goes to the origin, the blade is turned
+				// to point up with its flat toward +z, and the picture is
+				// made 0.68 across, Minecraft's size in the hand.
+				const float picture = 16.f / 28.f;
+				const glm::vec3 grip = {-0.55f * picture, -0.55f * picture, 0.f};
+				const glm::mat4 bladeUp = glm::rotate(glm::radians(45.f), glm::vec3(0, 0, 1))
+					* glm::scale(glm::vec3(0.34f / picture)) * glm::translate(-grip);
+
+				// The walking bob: the hand's change from its rest while it
+				// walks, eased as the hand eases, into the camera's frame.
+				static BoneTransform bob = handRest;
+				bob.goTowards(handIdle, returnSpeed);
+				BoneTransform rest = handRest;
+				const glm::mat4 handFrame = glm::scale(glm::vec3{-1,1,1}) * transform;
+				const glm::mat4 follow = handFrame * bob.getPoseMatrix() * glm::inverse(rest.getPoseMatrix())
+					* glm::inverse(handFrame);
+
+				// The poses are at Minecraft's size, which reaches over a
+				// block out: the item draws against the world's depth, so a
+				// wall beside the player would cut it off. Shrunk toward the
+				// eye it looks the same and stays inside the player's reach.
+				const float towardEye = 0.25f;
+
+				// The camera's frame is rotMatrix with its x turned around
+				// (rotMatrix's runs left; hence the hand's mirror).
+				handItemMatrix = rotMatrix * glm::scale(glm::vec3(towardEye)) * follow * glm::scale(glm::vec3{-1,1,1})
+					* glm::translate(position) * glm::mat4_cast(rotation) * bladeUp;
+			}
+
 			PerEntityData data = {};
 			//data.textureId1 = currentSkinTextureId;
 			//data.textureId0 = currentSkinTextureId;
@@ -2588,7 +2692,7 @@ void Renderer::renderEntities(
 		}
 
 
-		if (showHand)
+		if (showHand && !itemTakesHandPose)
 		{
 			addModel(model, skinningMatrix.data(), skinningMatrix.size(), entityData.back(), true);
 		};
@@ -2831,17 +2935,11 @@ void Renderer::renderEntities(
 
 
 		//hand item
-		auto handItem = entityManager.localPlayer.inventory.getItemFromIndex(currentHeldItemIndex, nullptr);
-		if(handItem)	
+		// Items only: a held block draws nothing, as in GL.
+		if (heldItemType)
 		{
-			// Items only: a held block draws nothing, as in GL.
-			if (!handItem->isBlock() && handItem->type)
-			{
-				renderOneItem(handItem->type, {}, lightAt(from3DPointToBlock(glm::dvec3(posInt) + glm::dvec3(posFloat))),
-					&handItemMatrix);
-			}
-
-
+			renderOneItem(heldItemType, {}, lightAt(from3DPointToBlock(glm::dvec3(posInt) + glm::dvec3(posFloat))),
+				&handItemMatrix);
 		}
 
 
