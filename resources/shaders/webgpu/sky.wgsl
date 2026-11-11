@@ -127,6 +127,10 @@ struct SkyUniforms {
     // 0..1), y how much darker that grey is (0..1; below 0 brighter, for
     // lightning, G1b).
     weather: vec4f,
+    // The snow weather's whiteout (world.wgsl's snowFog): rgb its colour, w
+    // how much. The sky goes to it, so the fogged world meets the sky in
+    // one colour.
+    snowFog: vec4f,
 };
 @group(0) @binding(0) var<uniform> sky: SkyUniforms;
 @group(0) @binding(1) var daySky: texture_cube<f32>;
@@ -152,6 +156,7 @@ fn fs_sky(in: FullscreenOutput) -> SkyTargets {
         + textureSample(twilightSky, skySampler, direction).rgb * sky.weights.y
         + textureSample(nightSky, skySampler, direction).rgb * sky.weights.z) * 1.2;
     color = overcastSky(color);
+    color = mix(color, sky.snowFog.rgb, sky.snowFog.w);
     var out: SkyTargets;
     out.sky = vec4f(color, 1.0);
     out.color = vec4f(color, 1.0);

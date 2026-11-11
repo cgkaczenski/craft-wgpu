@@ -85,6 +85,9 @@ namespace wgpuWorld
 		// the time of day and the weather reach it.
 		uint32_t light = 0xF0;
 		uint32_t textures[4] = {};     // wgpu2d texture ids; 0 draws white
+		// The first-person hand: the PSX look keeps its textures in
+		// perspective (it would warp right in front of the eye).
+		bool firstPerson = false;
 	};
 
 	// One item (itemEntityShader's uniforms for one draw).
@@ -96,6 +99,7 @@ namespace wgpuWorld
 		glm::ivec3 positionInt = {};
 		glm::vec3 positionFloat = {};
 		uint32_t light = 0xF0;         // the light as baked: sky light << 4 | block light
+		bool firstPerson = false;      // the held item: textures kept in perspective in the PSX look
 	};
 
 	// The entity pass (Renderer::renderEntities): skinned models (their
@@ -200,6 +204,21 @@ namespace wgpuWorld
 		float overcast = 0;
 		float skyDarken = 0;
 		float rain = 0;
+		// The snow weather: how much (0..1) of the whiteout fog, which closes
+		// into `snowFogColour` (linear) over a few dozen blocks, the sky too.
+		float snow = 0;
+		glm::vec3 snowFogColour = {0.8f, 0.82f, 0.86f};
+		// The PSX look (the psxLook setting): the vertices snapped to a
+		// 240-line grid, the textures mapped without perspective correction,
+		// the picture drawn on that grid in 15-bit colour with the
+		// PlayStation's dither. FXAA is skipped while it is on.
+		bool psx = false;
+		// How far indoors the camera is, 0..1 (from the sky light where it
+		// stands, eased over time). Indoors the whiteout is only on what the
+		// open sky lights (out of a window or a door), and the PSX look is
+		// lighter: a grid twice as fine (so half the wobble) and the
+		// textures in perspective.
+		float indoors = 0;
 
 		// Milestone 15: the post chain's settings (toneMap.frag's uniforms,
 		// as the renderer computes them). Lift and gain already mapped

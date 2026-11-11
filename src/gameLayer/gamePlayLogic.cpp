@@ -1825,7 +1825,8 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 			{
 				if (blockStopsRain(chunk->data.unsafeGet(lx, y, lz).getType())) { top = y + 1; break; }
 			}
-			const int kind = preview ? preview : precipitationForColumn(chunk->data.biome, top);
+			const int kind = preview ? preview : precipitationForColumn(chunk->data.biome, top,
+				programData.renderer.weather.rain, programData.renderer.weather.snow);
 			if (kind == precipitationRain)
 			{
 				const bool covered = top > blockPositionPlayer.y + 1;
@@ -2302,7 +2303,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				static int newWeather = weatherRain;
 				static float newWeatherSeconds = 10;
 				ImGui::SetNextItemWidth(halfWidth);
-				ImGui::Combo("##newWeather", &newWeather, "clear\0cloudy\0rain\0storm\0");
+				ImGui::Combo("##newWeather", &newWeather, "clear\0cloudy\0rain\0storm\0snow\0");
 				ImGui::SameLine();
 				ImGui::SetNextItemWidth(halfWidth);
 				ImGui::SliderFloat("##newWeatherSeconds", &newWeatherSeconds, 0, 120, "over %.0f s");
@@ -2327,8 +2328,8 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				ImGui::Checkbox("Override weather", &overrideWeather);
 				if (overrideWeather)
 				{
-					ImGui::Combo("Weather", &overriddenWeather, "clear\0cloudy\0rain\0storm\0");
-					ImGui::Combo("Next weather", &overriddenNextWeather, "clear\0cloudy\0rain\0storm\0");
+					ImGui::Combo("Weather", &overriddenWeather, "clear\0cloudy\0rain\0storm\0snow\0");
+					ImGui::Combo("Next weather", &overriddenNextWeather, "clear\0cloudy\0rain\0storm\0snow\0");
 					ImGui::SliderFloat("Transition", &overriddenTransition, 0, 1);
 				}
 				ImGui::Combo("Rain or snow", &programData.renderer.precipitationPreview,

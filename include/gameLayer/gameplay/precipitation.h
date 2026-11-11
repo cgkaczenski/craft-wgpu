@@ -21,4 +21,8 @@ bool blockStopsRain(BlockType type);
 // rain elsewhere.
 int precipitationForColumn(int biome, int topY);
 
+// The same in a weather (WeatherLook's rain and snow): while it snows more
+// than it rains (the snow weather), snow falls wherever rain would.
+int precipitationForColumn(int biome, int topY, float rain, float snow);
+
 constexpr int PRECIPITATION_SNOW_LINE = 160;

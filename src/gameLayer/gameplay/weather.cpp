@@ -10,6 +10,7 @@ const char *getWeatherName(int weather)
 	case weatherCloudy: return "cloudy";
 	case weatherRain: return "rain";
 	case weatherStorm: return "storm";
+	case weatherSnow: return "snow";
 	}
 	return "unknown";
 }
@@ -43,6 +44,17 @@ WeatherLook getWeatherLook(int weather)
 		l.skyDarken = 0.6f;
 		l.rain = 1;
 		break;
+	case weatherSnow:
+		// A bright, flat white-grey: the sun gone, the light all ambient,
+		// the sky a pale grey that the fog closes into.
+		l.sunStrength = 0.2f;
+		l.ambientStrength = 0.9f;
+		l.skyLightDrop = 2;
+		l.overcast = 1;
+		l.skyDarken = 0;
+		l.rain = 0;
+		l.snow = 1;
+		break;
 	default: break; // clear: the identity
 	}
 	return l;
@@ -59,6 +71,7 @@ WeatherLook mixWeatherLooks(const WeatherLook &a, const WeatherLook &b, float t)
 	l.overcast = mix(a.overcast, b.overcast);
 	l.skyDarken = mix(a.skyDarken, b.skyDarken);
 	l.rain = mix(a.rain, b.rain);
+	l.snow = mix(a.snow, b.snow);
 	return l;
 }
 
@@ -131,13 +144,15 @@ namespace
 {
 	// Which weather follows which, as weights (a Markov chain), and how long
 	// each lasts. Storms only come out of rain or clouds, and end in rain.
+	// Snow is rarer, mostly out of clouds, and clears through clouds.
 	const float nextWeatherWeights[WEATHER_COUNT][WEATHER_COUNT] =
 	{
-		//clear cloudy rain storm
-		{5,     4,     1,   0}, // after clear
-		{4,     2,     3,   1}, // after cloudy
-		{1,     4,     2,   2}, // after rain
-		{0,     2,     5,   0}, // after a storm
+		//clear cloudy rain storm snow
+		{5,     4,     1,   0,    0.5f}, // after clear
+		{4,     2,     3,   1,    1.5f}, // after cloudy
+		{1,     4,     2,   2,    0.5f}, // after rain
+		{0,     2,     5,   0,    0},    // after a storm
+		{2,     5,     0,   0,    1},    // after snow
 	};
 
 	const float weatherMinutes[WEATHER_COUNT][2] =
@@ -146,6 +161,7 @@ namespace
 		{4, 10}, // cloudy
 		{3, 8},  // rain
 		{2, 5},  // storm
+		{4, 10}, // snow
 	};
 
 	float randomRange(std::minstd_rand &rng, float a, float b)

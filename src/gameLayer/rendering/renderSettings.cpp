@@ -141,6 +141,11 @@ good performance.\n-Fancy: significant performance cost but looks very nice.");
 	programData.ui.menuRenderer.toggleOptions("Screen effects: ", "OFF|ON", &getShadingSettings().screenEffects, true,
 		Colors_White, 0, programData.ui.buttonTexture, Colors_Gray);
 
+	programData.ui.menuRenderer.Text("The PlayStation look: wobbling vertices, warping textures, 15-bit color...",
+		Colors_White);
+	programData.ui.menuRenderer.toggleOptions("PSX look: ", "OFF|IN SNOW|ALWAYS", &getShadingSettings().psxLook, true,
+		Colors_White, 0, programData.ui.buttonTexture, Colors_Gray);
+
 	programData.ui.menuRenderer.EndMenu();
 #pragma endregion
 
@@ -816,6 +821,7 @@ void saveShadingSettings()
 	SET_INT(crt);
 	SET_INT(crtIntensity);
 	SET_INT(screenEffects);
+	SET_INT(psxLook);
 	SET_VEC3(toneMapLift);
 	SET_VEC3(toneMapGain);
 
@@ -867,6 +873,7 @@ void loadShadingSettings()
 		GET_INT(crt);
 		GET_INT(crtIntensity);
 		GET_INT(screenEffects);
+		GET_INT(psxLook);
 
 
 		void *rawData = 0;
@@ -1602,6 +1609,7 @@ void ShadingSettings::normalize()
 	crt = glm::clamp(crt, 0, 1);
 	crtIntensity = glm::clamp(crtIntensity, 1, 100);
 	screenEffects = glm::clamp(screenEffects, 0, 1);
+	psxLook = glm::clamp(psxLook, 0, 2);
 	glm::vec3 toneMapLift = glm::clamp(toneMapLift ,glm::vec3(0.f), glm::vec3(1));
 	glm::vec3 toneMapGain = glm::clamp(toneMapGain, glm::vec3(0.f), glm::vec3(1));
 

@@ -23,6 +23,7 @@ enum WeatherType : unsigned char
 	weatherCloudy,
 	weatherRain,
 	weatherStorm,
+	weatherSnow,  // snow in every biome that has weather, and a whiteout fog
 
 	WEATHER_COUNT
 };
@@ -40,6 +41,9 @@ struct WeatherLook
 	float overcast = 0;        // the sky toward grey, and the sun, moon and flare hidden; 0..1
 	float skyDarken = 0;       // how much darker the grey sky is; 0..1
 	float rain = 0;            // the near fog's rainStrength (GL's computeFog term); 0..1
+	// How much of a snowfall: the flakes (where rain would fall, snow) and
+	// the whiteout fog; 0..1.
+	float snow = 0;
 };
 
 WeatherLook getWeatherLook(int weather);

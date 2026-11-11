@@ -53,8 +53,51 @@ struct Uniforms {
     // time), for the grass, leaves and waves; y GL's u_waterMove (0..20),
     // for the water's textures.
     animation: vec4f,
+    // The snow weather's whiteout: rgb its colour (linear), w how much (0..1).
+    snowFog: vec4f,
+    // The PSX look: x 1 when on, yz its grid (pixels across and down), w 1
+    // to map the textures without perspective (not indoors).
+    psx: vec4f,
+    // x how far indoors the camera is, 0..1.
+    indoors: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+// The snow weather's whiteout, a PlayStation's fog: by distance alone,
+// toward one colour, from a few blocks out to nothing left past
+// snowFogEnd (the sky goes to the same colour, sky.wgsl). Above water only:
+// under water has its own.
+const snowFogStart = 3.0;
+const snowFogEnd = 40.0;
+
+fn snowFogAmount(distance: f32) -> f32 {
+    if (u.fogParams.z != 0.0 || u.snowFog.w <= 0.0) { return 0.0; }
+    let t = clamp((distance - snowFogStart) / (snowFogEnd - snowFogStart), 0.0, 1.0);
+    // Thick early, as a whiteout is: most of it in the first half.
+    return u.snowFog.w * (1.0 - (1.0 - t) * (1.0 - t));
+}
+
+// Indoors the whiteout is only on what the open sky lights: out of a
+// window or a door, not the room's own walls. `skyUnchanged` is the baked
+// sky light where the surface is (15 under the open sky, a level less a
+// block sideways from there); from outside, everything has it.
+fn applySnowFog(color: vec3f, relative: vec3f, skyUnchanged: i32) -> vec3f {
+    let open = clamp(f32(skyUnchanged - 12) / 3.0, 0.0, 1.0);
+    let amount = snowFogAmount(length(relative)) * max(open, 1.0 - u.indoors.x);
+    return mix(color, u.snowFog.rgb, amount);
+}
+
+// The PSX look's wobble: the PlayStation drew vertices at whole pixels, so
+// at 240 lines they jump as the camera moves. A clip-space position snapped
+// to the grid's pixel corners (the grid is u.psx.yz; normalized device
+// coordinates span it in 2, hence the half). Points behind the camera are
+// left alone: dividing by a w near 0 would throw them across the screen.
+fn psxSnap(position: vec4f) -> vec4f {
+    if (u.psx.x == 0.0 || position.w <= 0.0) { return position; }
+    let half = u.psx.yz * 0.5;
+    let ndc = position.xy / position.w;
+    return vec4f(round(ndc * half) / half * position.w, position.zw);
+}
 
 // GL's linear <-> sRGB (defaultShader.frag's toLinearSRGB, and its inverse).
 fn toLinear(c: vec3f) -> vec3f {

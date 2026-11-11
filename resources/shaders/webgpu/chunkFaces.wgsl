@@ -142,7 +142,16 @@ struct VertexOutput {
     @location(10) @interpolate(flat) light: u32,
     // The paint (the texture index's high 5 bits), 0 for none.
     @location(11) @interpolate(flat) colors: u32,
+    // The PSX look's texture coordinates: the same uv, interpolated straight
+    // across the screen, without perspective correction (`linear`), as the
+    // PlayStation mapped textures. faceUV picks.
+    @location(12) @interpolate(linear) affineUV: vec2f,
 };
+
+// The texture coordinates to read with: affine in the PSX look.
+fn faceUV(in: VertexOutput) -> vec2f {
+    return select(in.uv, in.affineUV, u.psx.w != 0.0);
+}
 
 // defaultShader.vert's vertexColor: a fixed darkening per orientation (front,
 // back, top, bottom, left, right; grass; leaves).
@@ -313,7 +322,11 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     var out: VertexOutput;
     out.position = u.viewProjection * vec4f(relative, 1.0);
     out.position.z += zBias * 0.5;
+    // The PSX look's wobble; the prepass, the lit passes and the decal all
+    // come through here, so they still land on the same depth.
+    out.position = psxSnap(out.position);
     out.uv = vec2f(vertexUV[uvBase], vertexUV[uvBase + 1u]);
+    out.affineUV = out.uv;
     // A block's four slots: albedo, normal map, material map, parallax.
     out.layer = spannedLayer(textureLayers[textureIndex], orientation, blockPosition);
     out.normalLayer = textureLayers[textureIndex + 1u] & layerMask;
@@ -350,7 +363,7 @@ fn vs_shadow(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> Vertex
 // The depth prepass (zpass.frag): no color, only the alpha test.
 @fragment
 fn fs_depth(in: VertexOutput) {
-    let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
+    let albedo = textureSample(blockTextures, blockSampler, faceUV(in), in.layer);
     if (albedo.a <= 0.0) { discard; }
 }
 
@@ -448,11 +461,12 @@ struct Texels {
 
 fn readTexels(in: VertexOutput) -> Texels {
     var t: Texels;
-    t.albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
-    t.normalMap = textureSample(blockTextures, blockSampler, in.uv, in.normalLayer).rgb;
-    t.material = textureSample(blockTextures, blockSampler, in.uv, in.materialLayer).rgb;
-    t.ao = textureSample(aoTexture, aoSampler, aoCoordinate(in.flags, in.uv)).r;
-    t.water.p = vec2f(-f32(in.blockPos.z), -f32(in.blockPos.x)) + in.uv;
+    let uv = faceUV(in);
+    t.albedo = textureSample(blockTextures, blockSampler, uv, in.layer);
+    t.normalMap = textureSample(blockTextures, blockSampler, uv, in.normalLayer).rgb;
+    t.material = textureSample(blockTextures, blockSampler, uv, in.materialLayer).rgb;
+    t.ao = textureSample(aoTexture, aoSampler, aoCoordinate(in.flags, uv)).r;
+    t.water.p = vec2f(-f32(in.blockPos.z), -f32(in.blockPos.x)) + uv;
     t.water.dx = dpdx(t.water.p);
     t.water.dy = dpdy(t.water.p);
     return t;
@@ -491,6 +505,22 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
         m.metallic = 0.0;
     }
     albedo = paintAlbedo(albedo, in.colors);
+
+    // The snow weather's cover: the tops of blocks under the open sky (the
+    // sky light above them unblocked) whiten as it snows, keeping some of
+    // the texture's shading, and go rough and dull.
+    if (u.snowFog.w > 0.0 && !water && in.normal.y > 0.7 && levels.skyUnchanged >= 15) {
+        let cover = u.snowFog.w * 0.9;
+        let shading = dot(albedo, vec3f(0.2126, 0.7152, 0.0722));
+        // A speckle per texel (16 to a block), so a snowy block still reads
+        // as one.
+        let texel = floor(faceUV(in) * 16.0) + vec2f(in.blockPos.xz) * 16.0;
+        let speckle = fract(sin(dot(texel, vec2f(12.9898, 78.233))) * 43758.5453);
+        let snow = vec3f(0.56, 0.58, 0.62) * (0.75 + 1.1 * sqrt(shading)) * (0.9 + 0.2 * speckle);
+        albedo = mix(albedo, snow, cover);
+        m.roughness = mix(m.roughness, 0.85, cover);
+        m.metallic = mix(m.metallic, 0.0, cover);
+    }
 
     // Water's normal is GL's moving normal.png (18-parity), the rest the
     // block's own normal map.
@@ -746,11 +776,13 @@ fn computeFog(distance: f32, fragmentHeight: f32) -> f32 {
     return far * far * near;
 }
 
-// GL's last step: the color toward the sky behind it, above water.
+// GL's last step: the color toward the sky behind it, above water; then
+// the snow weather's whiteout.
 fn applyFog(in: VertexOutput, color: vec3f) -> vec3f {
     if (u.fogParams.z != 0.0) { return color; }
     let sky = textureLoad(skyColor, vec2i(in.position.xy), 0).rgb;
-    return mix(sky, color, computeFog(length(in.relative), f32(in.blockPos.y) + in.inBlock.y));
+    let fogged = mix(sky, color, computeFog(length(in.relative), f32(in.blockPos.y) + in.inBlock.y));
+    return applySnowFog(fogged, in.relative, lightLevels(in.light).skyUnchanged);
 }
 
 // fboMain's targets, in defaultShader.frag's order, GL's fifth (the
@@ -879,7 +911,8 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> Blend
 // stored it bottom row first (stbi flip on load): v is flipped to match.
 @fragment
 fn fs_decal(in: VertexOutput) -> @location(0) vec4f {
-    let uv = vec2f((in.uv.x + u.planes.z) / 10.0, 1.0 - in.uv.y);
+    let faceUv = faceUV(in);
+    let uv = vec2f((faceUv.x + u.planes.z) / 10.0, 1.0 - faceUv.y);
     let c = textureSample(crackTexture, blockSampler, uv);
     if (c.a < 0.01) { discard; }
     return vec4f(c.rgb, 1.0);

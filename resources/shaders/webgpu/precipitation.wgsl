@@ -105,8 +105,9 @@ fn fs_precipitation(in: PrecipitationOutput) -> @location(0) vec4f {
         alpha = along * width * 0.45;
         color = vec3f(0.62, 0.68, 0.76) * light;
     } else {
-        // Snow: three lanes of round flakes, falling slowly and swaying.
-        let lanes = 3.0;
+        // Snow: three lanes of round flakes, falling slowly and swaying; five
+        // in a heavy snowfall.
+        let lanes = 3.0 + floor(intensity * 2.0);
         let lane = floor(in.sheet.x * lanes);
         let inLane = fract(in.sheet.x * lanes);
         let h = hash(in.column + vec2f(lane * 9.13, lane * 5.1));
@@ -120,7 +121,8 @@ fn fs_precipitation(in: PrecipitationOutput) -> @location(0) vec4f {
         // In blocks: a lane is a third of a block wide.
         let dx = (inLane - 0.5 - sway) / lanes;
         let dy = (phase - 0.5) * spacing;
-        let size = 0.012 + hash(vec2f(flake, h)) * 0.014;
+        // Big enough to stay whole on the PSX look's 240 lines.
+        let size = 0.018 + hash(vec2f(flake, h)) * 0.02;
         alpha = (1.0 - smoothstep(size, size * 1.7, length(vec2f(dx, dy)))) * 0.75;
         color = vec3f(0.95, 0.96, 1.0) * light;
     }

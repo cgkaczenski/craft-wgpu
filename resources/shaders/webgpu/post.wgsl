@@ -38,6 +38,9 @@ struct PostUniforms {
     // Milestone G3, the splats: x blood, y water drops, z rain drops (0..1
     // each), w the animation clock in seconds.
     splat: vec4f,
+    // The PSX look: x 1 when on, yz the grid it draws on (pixels across and
+    // down; wgpuWorld's psxLines), w how far indoors the camera is.
+    psx: vec4f,
 };
 @group(0) @binding(0) var<uniform> post: PostUniforms;
 @group(0) @binding(1) var source: texture_2d<f32>;
@@ -533,18 +536,57 @@ fn bloodOver(color: vec3f, uv: vec2f) -> vec3f {
     return mix(color, blood, clamp(m * 1.8, 0.0, 1.0) * amount * 0.9);
 }
 
+// ---- The PSX look ----------------------------------------------------------
+//
+// The world's shaders snap its vertices to the grid and map its textures
+// without perspective (world.wgsl's psxSnap, chunkFaces.wgsl's affineUV).
+// Here the picture is drawn on that grid, one read per cell, and in the
+// PlayStation's 15-bit colour: each display value to 0..255, the GPU's
+// 4x4 dither offset added, then the low three bits dropped (psx-spx, "GPU
+// Dithering"). Last, after the tone mapper, the sRGB curve and the effects,
+// so nothing after it smooths the steps; and FXAA is skipped (wgpuWorld).
+
+// Where a pixel reads from: the centre of its cell of the grid.
+fn psxCellUv(uv: vec2f) -> vec2f {
+    if (post.psx.x == 0.0) { return uv; }
+    let grid = post.psx.yz;
+    return (floor(uv * grid) + 0.5) / grid;
+}
+
+fn psxColour(color: vec3f, uv: vec2f) -> vec3f {
+    // The GPU's dither offsets, by the cell's place in a 4x4 block (row by
+    // row, y then x).
+    var dither = array<f32, 16>(
+        -4.0,  0.0, -3.0,  1.0,
+         2.0, -2.0,  3.0, -1.0,
+        -3.0,  1.0, -4.0,  0.0,
+         3.0, -1.0,  2.0, -2.0);
+    // Indoors (w past halfway) the low two bits only, 18-bit colour, with
+    // the dither halved to match: lighter, still stepped.
+    let indoors = post.psx.w > 0.5;
+    let step = select(8.0, 4.0, indoors);
+    let cell = vec2u(floor(uv * post.psx.yz));
+    let offset = dither[(cell.y & 3u) * 4u + (cell.x & 3u)] * step / 8.0;
+    let eightBit = clamp(round(color * 255.0) + offset, vec3f(0.0), vec3f(255.0));
+    return floor(eightBit / step) / (256.0 / step - 1.0);
+}
+
 @fragment
 fn fs_toneMap(in: PostOutput) -> @location(0) vec4f {
-    let lens = splatLens(in.uv);
-    var color = sceneColor(clamp(in.uv + lens.offset, vec2f(0.0), vec2f(1.0)), lens.blur) * post.grade.x * lens.shade;
+    let psx = post.psx.x != 0.0;
+    let uv = psxCellUv(in.uv);
+    let lens = splatLens(uv);
+    var color = sceneColor(clamp(uv + lens.offset, vec2f(0.0), vec2f(1.0)), lens.blur) * post.grade.x * lens.shade;
     color = adjustColor(color);
     color = tonemap(color);
     color = toDisplay(color);
-    color = screenEffects(color, in.uv);
-    color = bloodOver(color, in.uv) + vec3f(lens.glint);
-    color += (1.0 / 255.0) * gradientNoise(in.position.xy) - (0.5 / 255.0);
+    color = screenEffects(color, uv);
+    color = bloodOver(color, uv) + vec3f(lens.glint);
+    // The dither against banding, unless the PSX look's own is coming.
+    if (!psx) { color += (1.0 / 255.0) * gradientNoise(in.position.xy) - (0.5 / 255.0); }
     color = clamp(color, vec3f(0.0), vec3f(1.0));
-    color = applyVignette(color, in.position.xy, post.boost.z);
+    color = applyVignette(color, uv * vec2f(textureDimensions(source)), post.boost.z);
+    if (psx) { color = psxColour(color, in.uv); }
     return vec4f(color, 1.0);
 }
 

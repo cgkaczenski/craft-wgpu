@@ -126,8 +126,58 @@ commented out.
   game, rain stopping under a roof in a scene, the Strike button and
   `/lightning`.
 
+**G1c, snow weather and the PSX look (branch `fnv-roadmap`):**
+
+- A fifth weather, snow (`/weather snow`): rarer than rain, mostly out of
+  clouds, 4-10 minutes. `WeatherLook::snow` makes snow fall wherever rain
+  would (`precipitationForColumn` with the weather; still none in the
+  desert), heavier and with bigger flakes, and whitens the tops of blocks
+  under the open sky as it comes (`chunkFaces.wgsl`'s `shade`).
+- The whiteout ([`world.wgsl`](../resources/shaders/webgpu/world.wgsl)'s
+  `applySnowFog`): a PlayStation-style fog by distance alone, toward one
+  colour, from 3 blocks to nothing left at 40, on the chunk faces and the
+  entities (which had no fog). The sky goes to the same colour, so the
+  world closes into it. The colour follows the light: grey-white by day,
+  dark blue at night.
+- The PSX look, a setting under Screen effects (`psxLook`: off, in snow,
+  always; `OURCRAFT_PSX=0|1|2` for scripted runs), after Acerola's Godot
+  PS1 shader with its faults fixed:
+  - vertices snapped to a 240-line grid (whole cells: the Godot shader
+    snaps to half pixels of the full window, so it barely wobbles), left
+    alone behind the camera (it divides by w unguarded);
+  - textures mapped without perspective (WGSL's `@interpolate(linear)`
+    instead of the Godot shader's multiply-and-divide by w) on blocks,
+    creatures and items, with the depth prepass reading the same uv so the
+    cut-outs still match;
+  - the picture drawn on the same grid and reduced to 15-bit colour with
+    the PlayStation's 4x4 dither in the tone map pass, after the tone
+    mapper and the sRGB curve (the Godot shader reduces before Godot's
+    lighting and tone mapping, in linear colour, and without the floor that
+    drops the low bits, so it never reduces at all); FXAA is skipped.
+  - The first-person hand and the held item keep their textures in
+    perspective (they are still snapped).
+- Indoors (`Lighting::indoors`, from the sky light where the camera is: 15
+  under the open sky, 12 or less a few blocks into a room or a cave, eased
+  over time): the whiteout is only on what the open sky lights, so the
+  room's walls are clear and the view out of a door or a window is still
+  white; the PSX grid goes to three times as fine (a third of the
+  wobble), and past halfway in the textures stop warping and the colour
+  goes to 18-bit (the low two bits dropped, the dither halved). Snow doesn't fall indoors anyway: each
+  column's snow stops at its highest block that stops rain. Leaves and
+  glass don't dim sky light, so under a tree or a glass roof is outdoors.
+  `OURCRAFT_SPAWN=x,y,z` moves the spawn for scripted runs (with y under
+  the ground, the player comes up in the first cave above it).
+- Checked: screenshots of a copy of `test` in snow at noon, dusk and night,
+  with the look on and off, and clear with it always on; in two caves with
+  the indoor handling on and off (the haze on the far walls gone). Not
+  checked: the wobble and the warping in motion, creatures and water in
+  the fog, the menu entry, a weather change running into snow, a house
+  with a door or window, walking from outside in.
+
 Not done, and why:
 
+- Snow that stays: the cover is the weather's, gone when the snow stops;
+  no snow layers are placed.
 - Per-biome weather weights: the weather is one state for the world, so a
   biome can only change what falls (above), not which weather comes.
 - A drawn lightning bolt: only the flash for now.

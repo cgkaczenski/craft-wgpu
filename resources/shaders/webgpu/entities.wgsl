@@ -55,9 +55,11 @@ fn transformNormal(m: mat4x4f, n: vec3f) -> vec3f {
     return normalize(cofactor * n) * sign(dot(a, cross(b, c)));
 }
 
-fn gBuffer(color: vec3f, relative: vec3f, normal: vec3f) -> GBuffer {
+// The snow weather's whiteout is on entities too (the chunk faces have
+// theirs in applyFog), or creatures would stand out of it.
+fn gBuffer(color: vec3f, relative: vec3f, normal: vec3f, packedLight: u32) -> GBuffer {
     var out: GBuffer;
-    out.color = vec4f(color, 1.0);
+    out.color = vec4f(applySnowFog(color, relative, lightLevels(packedLight).skyUnchanged), 1.0);
     out.position = vec4f((u.view * vec4f(relative, 1.0)).xyz, 0.9);
     out.normal = packNormal(normal);
     out.bloom = vec4f(0.0);
@@ -139,7 +141,7 @@ fn vs_cube(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) ins
         + cube.positionFloat.xyz + local;
 
     var out: CubeOutput;
-    out.position = u.viewProjection * vec4f(relative, 1.0);
+    out.position = psxSnap(u.viewProjection * vec4f(relative, 1.0));
     out.uv = uv;
     if ((flags & 1u) != 0u) {
         let quarter = vec2f(f32((flags >> 1u) & 3u), f32((flags >> 3u) & 3u));
@@ -160,7 +162,7 @@ fn fs_cube(in: CubeOutput) -> GBuffer {
     if (in.colour.a > 0.0) { albedo = vec4f(in.colour.rgb, 1.0); }
     if (albedo.a <= 0.0) { discard; }
     let N = normalize(in.normal);
-    return gBuffer(lightEntity(toLinear(albedo.rgb), in.light, in.relative, N, in.position.xy), in.relative, N);
+    return gBuffer(lightEntity(toLinear(albedo.rgb), in.light, in.relative, N, in.position.xy), in.relative, N, in.light);
 }
 
 // ---- Gizmo lines --------------------------------------------------------
@@ -183,6 +185,7 @@ fn fs_line() -> @location(0) vec4f {
 struct Model {
     // xyz the integer part of the position; w the first bone in `bones`.
     positionInt: vec4i,
+    // w: 1 for the first-person hand (perspective kept in the PSX look).
     positionFloat: vec4f,
     // rgb: a linear tint; w: the light where it stands, as baked (sky light
     // << 4 | block light), which lightLevels reads as it does a face's.
@@ -192,7 +195,7 @@ struct Model {
 // One per item (wgpuWorld::ItemInstance).
 struct Item {
     model: mat4x4f,       // GL's u_modelMatrix
-    positionInt: vec4i,
+    positionInt: vec4i,   // w: 1 for the held item (perspective kept in the PSX look)
     positionFloat: vec4f, // w: the light where it is, as baked (sky light << 4 | block light)
 };
 
@@ -215,7 +218,17 @@ struct EntityOutput {
     @location(3) relative: vec3f,
     @location(4) normal: vec3f,
     @location(5) @interpolate(flat) light: u32,
+    // The PSX look's uv, without perspective correction (chunkFaces.wgsl's
+    // affineUV); entityUV picks.
+    @location(6) @interpolate(linear) affineUV: vec2f,
+    // 1 for the first-person hand and the held item: they keep their
+    // textures in perspective, which would warp hard so close to the eye.
+    @location(7) @interpolate(flat) firstPerson: u32,
 };
+
+fn entityUV(in: EntityOutput) -> vec2f {
+    return select(in.uv, in.affineUV, u.psx.w != 0.0 && in.firstPerson == 0u);
+}
 
 struct ModelVertex {
     @location(0) shape: vec3f,
@@ -234,11 +247,13 @@ fn vs_model(v: ModelVertex, @builtin(instance_index) instance: u32) -> EntityOut
         + m.positionFloat.xyz + (skin * vec4f(v.shape, 1.0)).xyz;
 
     var out: EntityOutput;
-    out.position = u.viewProjection * vec4f(relative, 1.0);
+    out.position = psxSnap(u.viewProjection * vec4f(relative, 1.0));
     out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
+    out.affineUV = out.uv;
     out.textureIndex = u32(clamp(v.boneAndTexture.y, 0, 3));
     out.brightness = m.colorAndLight.rgb;
     out.light = u32(m.colorAndLight.w);
+    out.firstPerson = u32(m.positionFloat.w);
     out.relative = relative;
     out.normal = transformNormal(skin, v.normal);
     return out;
@@ -247,10 +262,11 @@ fn vs_model(v: ModelVertex, @builtin(instance_index) instance: u32) -> EntityOut
 // All four are sampled (textureSample must stay in uniform control flow),
 // then the vertex's one is kept.
 fn entityAlbedo(in: EntityOutput) -> vec4f {
-    let c0 = textureSample(entityTexture0, blockSampler, in.uv);
-    let c1 = textureSample(entityTexture1, blockSampler, in.uv);
-    let c2 = textureSample(entityTexture2, blockSampler, in.uv);
-    let c3 = textureSample(entityTexture3, blockSampler, in.uv);
+    let uv = entityUV(in);
+    let c0 = textureSample(entityTexture0, blockSampler, uv);
+    let c1 = textureSample(entityTexture1, blockSampler, uv);
+    let c2 = textureSample(entityTexture2, blockSampler, uv);
+    let c3 = textureSample(entityTexture3, blockSampler, uv);
     var c = c0;
     if (in.textureIndex == 1u) { c = c1; }
     if (in.textureIndex == 2u) { c = c2; }
@@ -288,7 +304,7 @@ fn fs_model(in: EntityOutput) -> GBuffer {
     if (c.a < 0.5) { discard; }
     let N = normalize(in.normal);
     let albedo = toLinear(c.rgb) * in.brightness;
-    return gBuffer(lightEntity(albedo, in.light, in.relative, N, in.position.xy), in.relative, N);
+    return gBuffer(lightEntity(albedo, in.light, in.relative, N, in.position.xy), in.relative, N, in.light);
 }
 
 struct ItemVertex {
@@ -304,11 +320,13 @@ fn vs_item(v: ItemVertex, @builtin(instance_index) instance: u32) -> EntityOutpu
         + item.positionFloat.xyz + (item.model * vec4f(v.shape, 1.0)).xyz;
 
     var out: EntityOutput;
-    out.position = u.viewProjection * vec4f(relative, 1.0);
+    out.position = psxSnap(u.viewProjection * vec4f(relative, 1.0));
     out.uv = vec2f(v.uv.x, 1.0 - v.uv.y);
+    out.affineUV = out.uv;
     out.textureIndex = 0u;
     out.brightness = vec3f(1.0);
     out.light = u32(item.positionFloat.w);
+    out.firstPerson = u32(item.positionInt.w);
     out.relative = relative;
     out.normal = transformNormal(item.model, v.normal);
     return out;
@@ -316,8 +334,8 @@ fn vs_item(v: ItemVertex, @builtin(instance_index) instance: u32) -> EntityOutpu
 
 @fragment
 fn fs_item(in: EntityOutput) -> GBuffer {
-    let c = textureSample(entityTexture0, blockSampler, in.uv);
+    let c = textureSample(entityTexture0, blockSampler, entityUV(in));
     if (c.a <= 0.0) { discard; }
     let N = normalize(in.normal);
-    return gBuffer(lightEntity(toLinear(c.rgb), in.light, in.relative, N, in.position.xy), in.relative, N);
+    return gBuffer(lightEntity(toLinear(c.rgb), in.light, in.relative, N, in.position.xy), in.relative, N, in.light);
 }

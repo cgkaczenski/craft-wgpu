@@ -85,6 +85,10 @@ struct ShadingSettings
 	// would rather not have flashes.
 	int screenEffects = 1;
 
+	// The PSX look (wgpuWorld's Lighting::psx): 0 off, 1 while it snows, 2
+	// always.
+	int psxLook = 1;
+
 	glm::vec3 toneMapLift = glm::vec3(0.5);
 	glm::vec3 toneMapGain = glm::vec3(0.5);
 

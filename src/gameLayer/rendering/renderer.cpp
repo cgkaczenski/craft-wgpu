@@ -2067,6 +2067,43 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	lighting.overcast = weather.overcast;
 	lighting.skyDarken = weather.skyDarken;
 	lighting.rain = weather.rain;
+	// The snow weather's whiteout. Its colour is about what snow in the open
+	// looks like in this light (computeAmbient's sky term on a face under the
+	// open sky, a little of the sun), a touch blue; the sky goes to it too, so
+	// the world closes into one colour.
+	lighting.snow = weather.snow;
+	{
+		auto toLinear = [](float c) { return c < 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); };
+		const float sky = 0.62f * std::min(toLinear(skyLightIntensity / 15.f * 0.8f + 0.2f), 1.f);
+		lighting.snowFogColour = (ambientColor * sky + sunLightColor * 0.15f) * glm::vec3(0.86f, 0.89f, 0.94f);
+	}
+	// The PSX look: always, or while it snows. OURCRAFT_PSX=0|1|2 overrides
+	// the setting, for scripted screenshots.
+	{
+		static const int environmentPsx = []()
+		{
+			const char *env = std::getenv("OURCRAFT_PSX");
+			return env ? std::atoi(env) : -1;
+		}();
+		const int psxLook = environmentPsx >= 0 ? environmentPsx : getShadingSettings().psxLook;
+		lighting.psx = psxLook == 2 || (psxLook == 1 && weather.snow >= 0.5f);
+	}
+	// How far indoors the camera is, from the sky light where it stands:
+	// 15 is under the open sky (it comes down undimmed through air, leaves
+	// and glass), and it drops a level a block sideways from there, so in
+	// a room it is 12 or less a few blocks past the door. Eased, so walking
+	// through a door doesn't pop.
+	{
+		static float indoors = 0;
+		float target = 0;
+		if (auto b = chunkSystem.getBlockSafe(blockPosition.x, blockPosition.y, blockPosition.z))
+		{
+			target = std::clamp((15 - b->getSkyLight()) / 3.f, 0.f, 1.f);
+		}
+		const float step = std::min(deltaTime * 2.5f, 1.f);
+		indoors += (target - indoors) * step;
+		lighting.indoors = indoors;
+	}
 	// Milestone 15: the tone mapper's and FXAA's settings, as GL sets them.
 	lighting.tonemapper = getShadingSettings().tonemapper;
 	// Milestone G2: the screen effects on top (the weather's overcast holds
@@ -2137,10 +2174,12 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	// Milestone G1b: the rain and snow around the camera, one sheet per block
 	// column, from where the column's highest blocking block stops it. The
 	// chunk's biome picks the kind: nothing in the desert, snow in the snow
-	// biome and high up, rain elsewhere. Not under water.
+	// biome and high up (and everywhere else in the snow weather), rain
+	// elsewhere. Not under water.
 	{
 		wgpuWorld::Precipitation precipitation;
-		precipitation.intensity = underWater ? 0.f : weather.rain;
+		// Rain, or the snow weather's snow (which falls where rain would).
+		precipitation.intensity = underWater ? 0.f : std::max(weather.rain, weather.snow);
 		if (precipitation.intensity > 0)
 		{
 			constexpr int radius = 16;
@@ -2176,7 +2215,7 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 						if (blockStopsRain(chunk->data.unsafeGet(lx, y, lz).getType())) { top = y + 1; break; }
 					}
 
-					float kind = (float)precipitationForColumn(chunk->data.biome, top);
+					float kind = (float)precipitationForColumn(chunk->data.biome, top, weather.rain, weather.snow);
 					if (preview) { kind = (float)preview; }
 					precipitation.columns[i + j * precipitation.size] = glm::vec2((float)top, kind);
 				}
@@ -2410,9 +2449,11 @@ void Renderer::renderEntities(
 
 	auto textureIdOf = [](std::uint64_t slot) -> uint32_t { return (uint32_t)slot; };
 
-	auto addModel = [&](Model &model, const glm::mat4 *matrices, size_t count, const PerEntityData &data)
+	auto addModel = [&](Model &model, const glm::mat4 *matrices, size_t count, const PerEntityData &data,
+		bool firstPerson = false)
 	{
 		wgpuWorld::ModelInstance instance;
+		instance.firstPerson = firstPerson;
 		instance.mesh = model.mesh;
 		instance.boneBase = (uint32_t)wgpuBones.size();
 		wgpuBones.insert(wgpuBones.end(), matrices, matrices + count);
@@ -2549,7 +2590,7 @@ void Renderer::renderEntities(
 
 		if (showHand)
 		{
-			addModel(model, skinningMatrix.data(), skinningMatrix.size(), entityData.back());
+			addModel(model, skinningMatrix.data(), skinningMatrix.size(), entityData.back(), true);
 		};
 
 	};
@@ -2769,6 +2810,7 @@ void Renderer::renderEntities(
 					item.model = glm::scale(glm::vec3{isA3DModel ? 1.f : 0.4f});
 				}
 				item.light = light;
+				item.firstPerson = mat != nullptr; // only the held item comes with a matrix
 				wgpuItems.push_back(item);
 			}
 

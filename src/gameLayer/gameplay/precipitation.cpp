@@ -12,3 +12,10 @@ int precipitationForColumn(int biome, int topY)
 	if (biome == BiomesManager::snow || topY >= PRECIPITATION_SNOW_LINE) { return precipitationSnow; }
 	return precipitationRain;
 }
+
+int precipitationForColumn(int biome, int topY, float rain, float snow)
+{
+	const int kind = precipitationForColumn(biome, topY);
+	if (kind == precipitationRain && snow > rain) { return precipitationSnow; }
+	return kind;
+}

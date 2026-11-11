@@ -436,6 +436,13 @@ void loadSpawnChunkAndPlaceSpawn(WorldGenerator &wg, StructuresManager &structur
 	// No player can have been sent anything yet, so the blocks this would
 	// send back to players are dropped.
 	std::vector<SendBlocksBack> sendNewBlocksToPlayers;
+	// OURCRAFT_SPAWN="x,y,z" moves the spawn, for scripted screenshots: with
+	// y under the ground, the player comes up in the first cave above it.
+	if (const char *env = std::getenv("OURCRAFT_SPAWN"))
+	{
+		glm::ivec3 p = worldSaver.spawnPosition;
+		if (std::sscanf(env, "%d,%d,%d", &p.x, &p.y, &p.z) == 3) { worldSaver.spawnPosition = p; }
+	}
 	const glm::ivec3 spawnPos = worldSaver.spawnPosition;
 	const int spawnChunkX = divideChunk(spawnPos.x);
 	const int spawnChunkZ = divideChunk(spawnPos.z);
@@ -1388,7 +1395,7 @@ std::string executeServerCommand(std::uint64_t cid, const char *command)
 			return "Lightning " + std::to_string((int)distance) + " blocks away";
 		}
 
-		// /weather, /weather <clear, cloudy, rain or storm> [seconds to change].
+		// /weather, /weather <clear, cloudy, rain, storm or snow> [seconds to change].
 		if (consumeStringToken("weather"))
 		{
 			auto &clock = getServerWorldClock();
@@ -1416,7 +1423,7 @@ std::string executeServerCommand(std::uint64_t cid, const char *command)
 				}
 			}
 
-			return "Usage: /weather <clear, cloudy, rain or storm> [seconds]";
+			return "Usage: /weather <clear, cloudy, rain, storm or snow> [seconds]";
 		}
 
 	}

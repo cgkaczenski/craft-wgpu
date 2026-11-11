@@ -85,8 +85,14 @@ namespace
 		glm::vec4 underWaterColor;   // rgb the color, w darken strength (milestone 18)
 		glm::vec4 underWaterParams;  // x darken distance, y fog gradient under water
 		glm::vec4 animation;         // x seconds (GL's u_timeGrass), y GL's u_waterMove (18-parity)
+		glm::vec4 snowFog;           // rgb the whiteout's colour (linear), w how much (the snow weather)
+		glm::vec4 psx;               // x 1 for the PSX look, yz its grid (pixels across and down), w 1 to warp the textures
+		glm::vec4 indoors;           // x how far indoors the camera is, 0..1 (the whiteout)
 	};
-	static_assert(sizeof(Uniforms) == 576, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 624, "uniform layout must match world.wgsl");
+
+	// The PSX look's lines down the screen: the PlayStation's usual 240.
+	constexpr float psxLines = 240.f;
 
 	// Milestone 17: hbao.wgsl's HbaoUniforms.
 	struct HbaoUniforms
@@ -109,8 +115,9 @@ namespace
 		glm::vec4 raySunParams;          // the same for the god rays' copies (milestone 18)
 		glm::vec4 rayMoonParams;
 		glm::vec4 weather;               // x overcast, y how much darker the grey (milestone G1)
+		glm::vec4 snowFog;               // rgb the whiteout's colour, w how much: the sky goes to it
 	};
-	static_assert(sizeof(SkyUniforms) == 288, "must match sky.wgsl's SkyUniforms");
+	static_assert(sizeof(SkyUniforms) == 304, "must match sky.wgsl's SkyUniforms");
 
 	// Milestone G1b: precipitation.wgsl's PrecipitationUniforms.
 	struct PrecipitationUniforms
@@ -159,8 +166,10 @@ namespace
 		glm::vec4 look;   // x contrast
 		// Milestone G3, the splats: blood, water drops, rain drops, time.
 		glm::vec4 splat;
+		// The PSX look: x 1 on, yz the grid it draws on (pixels across and down), w how far indoors.
+		glm::vec4 psx;
 	};
-	static_assert(sizeof(PostUniforms) == 176, "must match post.wgsl's PostUniforms");
+	static_assert(sizeof(PostUniforms) == 192, "must match post.wgsl's PostUniforms");
 
 	// Milestone 16: bloom.wgsl's BloomUniforms.
 	struct BloomUniforms
@@ -256,7 +265,7 @@ namespace
 	struct ModelGpu
 	{
 		glm::ivec4 positionInt;  // w: first bone
-		glm::vec4 positionFloat;
+		glm::vec4 positionFloat; // w: 1 for the first-person hand
 		glm::vec4 colorAndLight; // rgb: linear tint; w: the packed light
 	};
 	static_assert(sizeof(ModelGpu) == 48, "must match entities.wgsl's Model");
@@ -264,7 +273,7 @@ namespace
 	struct ItemGpu
 	{
 		glm::mat4 model;
-		glm::ivec4 positionInt;
+		glm::ivec4 positionInt;  // w: 1 for the held item
 		glm::vec4 positionFloat; // w: the light as baked (sky << 4 | block)
 	};
 	static_assert(sizeof(ItemGpu) == 96, "must match entities.wgsl's Item");
@@ -4556,6 +4565,18 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.underWaterColor = glm::vec4(lighting.underWaterColor, lighting.underwaterDarkenStrength);
 	uniforms.underWaterParams = glm::vec4(lighting.underwaterDarkenDistance, lighting.fogGradientUnderWater, 0.f, 0.f);
 	uniforms.animation = glm::vec4(lighting.animationTime, lighting.waterMove, 0.f, 0.f);
+	// The snow weather's whiteout, and the PSX look on a grid of psxLines
+	// lines, as wide as the screen's aspect makes it. Indoors the grid goes
+	// to three times as fine, the textures stop warping halfway in, and the
+	// colour keeps a bit more (post.wgsl's psxColour).
+	const float indoors = glm::clamp(lighting.indoors, 0.f, 1.f);
+	const glm::vec4 snowFog(lighting.snowFogColour, glm::clamp(lighting.snow, 0.f, 1.f));
+	const float lines = std::round(psxLines * (1.f + 2.f * indoors));
+	const glm::vec4 psx = lighting.psx
+		? glm::vec4(1.f, std::round(lines * aspect), lines, indoors < 0.5f ? 1.f : 0.f) : glm::vec4(0.f);
+	uniforms.snowFog = snowFog;
+	uniforms.psx = psx;
+	uniforms.indoors = glm::vec4(indoors, 0.f, 0.f, 0.f);
 
 	// Milestone 13: the sun's cascades, camera-relative. GL's matrices
 	// take world positions to -1..1 depth; here the camera position is
@@ -4592,6 +4613,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	sky.rayMoonParams = glm::vec4(0.f, 0.35f * clearSky, 0.f, 0.f);
 	// skyDarken below 0 brightens the grey: lightning (G1b).
 	sky.weather = glm::vec4(overcast, glm::clamp(lighting.skyDarken, -3.f, 1.f), 0.f, 0.f);
+	sky.snowFog = snowFog;
 	wgpuQueue().writeBuffer(w.skyUniformBuffer, 0, &sky, sizeof(sky));
 
 	// Milestone 15: the post chain's settings, for the composite.
@@ -4609,8 +4631,10 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	post.scene = glm::vec4(effects.blur, effects.radialBlur, effects.doubleVision.x, effects.doubleVision.y);
 	post.look = glm::vec4(effects.contrast, 0.f, 0.f, 0.f);
 	post.splat = glm::vec4(effects.blood, effects.waterDrops, effects.rainDrops, lighting.animationTime);
+	post.psx = lighting.psx ? glm::vec4(glm::vec3(psx), indoors) : glm::vec4(0.f);
 	wgpuQueue().writeBuffer(w.postUniformBuffer, 0, &post, sizeof(post));
-	w.fxaa = lighting.fxaa;
+	// FXAA would smear the PSX look's square pixels and dither.
+	w.fxaa = lighting.fxaa && !lighting.psx;
 
 	// Milestone 16: bloom's settings and lens dirt, for the composite.
 	BloomUniforms bloom;
@@ -4943,11 +4967,11 @@ void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<Model
 	for (const ModelInstance &m : models)
 	{
 		modelData.push_back(ModelGpu{ glm::ivec4(m.positionInt, (int)m.boneBase),
-			glm::vec4(m.positionFloat, 0.f), glm::vec4(m.color, (float)m.light) });
+			glm::vec4(m.positionFloat, m.firstPerson ? 1.f : 0.f), glm::vec4(m.color, (float)m.light) });
 	}
 	for (const ItemInstance &item : items)
 	{
-		itemData.push_back(ItemGpu{ item.model, glm::ivec4(item.positionInt, 0),
+		itemData.push_back(ItemGpu{ item.model, glm::ivec4(item.positionInt, item.firstPerson ? 1 : 0),
 			glm::vec4(item.positionFloat, (float)item.light) });
 	}
 
