@@ -67,11 +67,17 @@ fn gBuffer(color: vec3f, relative: vec3f, normal: vec3f) -> GBuffer {
 // ---- Dropped block items ----------------------------------------------
 
 struct Cube {
+    // xyz the block; w the edge in thousandths of a block, 0 the dropped
+    // item's 0.4 (milestone G4's debris sets it).
     positionInt: vec4i,
     // xyz the fraction of the position; w the light where it lies, as baked
     // (sky light << 4 | block light).
     positionFloat: vec4f,
-    // Texture slots (BlocksLoader::gpuIds indices) of the six faces.
+    // Texture slots (BlocksLoader::gpuIds indices) of the six faces: xyzw
+    // and slotsB.xy. Milestone G4's debris also uses slotsB.z, the turn (yaw
+    // in the low 16 bits, pitch in the high, 0..65535 a full turn), and
+    // slotsB.w, flags: bit 0 a quarter of the texture (which one in bits
+    // 1-4: u, then v), bit 5 a flat colour instead (rgba8 in slotsA.x).
     slotsA: vec4u,
     slotsB: vec4u,
 };
@@ -88,7 +94,18 @@ struct CubeOutput {
     @location(2) @interpolate(flat) light: u32,
     @location(3) relative: vec3f,
     @location(4) normal: vec3f,
+    // Milestone G4: a debris piece's flat colour; alpha 0 samples the texture.
+    @location(5) @interpolate(flat) colour: vec4f,
 };
+
+fn turn(v: vec3f, yaw: f32, pitch: f32) -> vec3f {
+    let cp = cos(pitch);
+    let sp = sin(pitch);
+    let a = vec3f(v.x, v.y * cp - v.z * sp, v.y * sp + v.z * cp);
+    let cy = cos(yaw);
+    let sy = sin(yaw);
+    return vec3f(a.x * cy + a.z * sy, a.y, -a.x * sy + a.z * cy);
+}
 
 @vertex
 fn vs_cube(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> CubeOutput {
@@ -98,28 +115,49 @@ fn vs_cube(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) ins
     let uv = vec2f(cubeVertices[base + 6u], cubeVertices[base + 7u]);
 
     let face = vertexIndex / 6u;
+    let flags = cube.slotsB.w;
+    let flatColour = (flags & 32u) != 0u;
     var slot = cube.slotsA[min(face, 3u)];
     if (face >= 4u) { slot = cube.slotsB[face - 4u]; }
+    if (flatColour) { slot = 0u; }
+
+    // A debris piece's own size and turn (milestone G4).
+    let size = select(0.4, f32(cube.positionInt.w) / 1000.0, cube.positionInt.w > 0);
+    var local = shape * size;
+    var normal = vec3f(cubeVertices[base + 3u], cubeVertices[base + 4u], cubeVertices[base + 5u]);
+    if (cube.slotsB.z != 0u) {
+        let yaw = f32(cube.slotsB.z & 0xFFFFu) / 65535.0 * 6.2831853;
+        let pitch = f32(cube.slotsB.z >> 16u) / 65535.0 * 6.2831853;
+        local = turn(local, yaw, pitch);
+        normal = turn(normal, yaw, pitch);
+    }
 
     // Integer difference first, then the fractions; the cube is scaled by
-    // 0.4 about the item's position (GL's u_modelMatrix).
+    // 0.4 about the item's position (GL's u_modelMatrix), or by the piece's
+    // size.
     let relative = vec3f(cube.positionInt.xyz - u.positionInt.xyz) - u.positionFloat.xyz
-        + cube.positionFloat.xyz + shape * 0.4;
+        + cube.positionFloat.xyz + local;
 
     var out: CubeOutput;
     out.position = u.viewProjection * vec4f(relative, 1.0);
     out.uv = uv;
+    if ((flags & 1u) != 0u) {
+        let quarter = vec2f(f32((flags >> 1u) & 3u), f32((flags >> 3u) & 3u));
+        out.uv = (uv + quarter) * 0.25;
+    }
     out.layer = textureLayers[slot] & 0x00FFFFFFu; // the top byte is a block span
     out.light = u32(cube.positionFloat.w);
     out.relative = relative;
-    // Scaled evenly, so the normal is the cube's own.
-    out.normal = vec3f(cubeVertices[base + 3u], cubeVertices[base + 4u], cubeVertices[base + 5u]);
+    // Scaled evenly and turned as a whole, so the normal is the cube's own.
+    out.normal = normal;
+    out.colour = select(vec4f(0.0), unpack4x8unorm(cube.slotsA.x), flatColour);
     return out;
 }
 
 @fragment
 fn fs_cube(in: CubeOutput) -> GBuffer {
-    let albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
+    var albedo = textureSample(blockTextures, blockSampler, in.uv, in.layer);
+    if (in.colour.a > 0.0) { albedo = vec4f(in.colour.rgb, 1.0); }
     if (albedo.a <= 0.0) { discard; }
     let N = normalize(in.normal);
     return gBuffer(lightEntity(toLinear(albedo.rgb), in.light, in.relative, N, in.position.xy), in.relative, N);

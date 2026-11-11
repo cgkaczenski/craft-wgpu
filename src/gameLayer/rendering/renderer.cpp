@@ -1,3 +1,4 @@
+#include <rendering/debris.h>
 #include <rendering/postModifiers.h>
 #include "rendering/renderer.h"
 #include "rendering/wgpuWorld.h"
@@ -1979,6 +1980,49 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		cube.slotsA = glm::uvec4(getGpuIdIndexForBlock(type, 0), getGpuIdIndexForBlock(type, 1),
 			getGpuIdIndexForBlock(type, 2), getGpuIdIndexForBlock(type, 3));
 		cube.slotsB = glm::uvec4(getGpuIdIndexForBlock(type, 4), getGpuIdIndexForBlock(type, 5), 0, 0);
+		blockCubes.push_back(cube);
+	}
+
+	// Milestone G4: the debris of strikes, as small turned cubes: a quarter
+	// of the block's texture, or a flat colour (entities.wgsl's Cube flags).
+	for (const debris::Piece &piece : debris::pieces())
+	{
+		const float size = debris::currentSize(piece);
+		if (size <= 0.002f) { continue; }
+
+		wgpuWorld::BlockCube cube;
+		glm::vec3 pieceFloat = {};
+		glm::ivec3 pieceInt = {};
+		decomposePosition(piece.position, pieceFloat, pieceInt);
+
+		uint32_t light = 0xF0;
+		if (auto b = chunkSystem.getBlockSafe(piece.position); b && !dontUpdateLightSystem)
+		{
+			light = (uint32_t(b->getSkyLight() & 0xF) << 4) | uint32_t(b->getLight() & 0xF);
+		}
+
+		cube.positionInt = glm::ivec4(pieceInt, std::max(1, (int)std::round(size * 1000.f)));
+		cube.positionFloat = glm::vec4(pieceFloat, (float)light);
+		auto angle = [](float radians)
+		{
+			const float turns = radians / 6.2831853f;
+			return uint32_t((turns - std::floor(turns)) * 65535.f) & 0xFFFFu;
+		};
+		const uint32_t turn = angle(piece.spin.x) | (angle(piece.spin.y) << 16);
+		if (piece.blockType)
+		{
+			const auto type = piece.blockType;
+			cube.slotsA = glm::uvec4(getGpuIdIndexForBlock(type, 0), getGpuIdIndexForBlock(type, 1),
+				getGpuIdIndexForBlock(type, 2), getGpuIdIndexForBlock(type, 3));
+			cube.slotsB = glm::uvec4(getGpuIdIndexForBlock(type, 4), getGpuIdIndexForBlock(type, 5),
+				std::max(turn, 1u), 1u | (uint32_t(piece.quarter & 15u) << 1));
+		}
+		else
+		{
+			const glm::uvec3 c = glm::uvec3(glm::clamp(piece.colour, glm::vec3(0.f), glm::vec3(1.f)) * 255.f + 0.5f);
+			cube.slotsA = glm::uvec4(c.r | (c.g << 8) | (c.b << 16) | (255u << 24), 0, 0, 0);
+			cube.slotsB = glm::uvec4(0, 0, std::max(turn, 1u), 32u);
+		}
 		blockCubes.push_back(cube);
 	}
 

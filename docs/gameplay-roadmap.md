@@ -239,6 +239,41 @@ sound for a hit.
   → decal, particles, sound.
 - Use it for mining hits, weapon hits on blocks, and hits on entities.
 
+**G4, done (branch `fnv-roadmap`):**
+
+- [`impact.h`](../include/gameLayer/gameplay/impact.h): 15 materials (stone,
+  metal, glass, ice, wood, plant, leaves, dirt, sand, gravel, clay, snow,
+  wool, and flesh and straw for entities), given to blocks in the order
+  `getSoundForBlockBreaking` tells them apart, and to entities by type
+  (dummies and scarecrows straw, the rest flesh). 7 sources from the item in
+  the hand: hand, pickaxe, axe (battle axes too), shovel, blade (swords,
+  knives, scythes), blunt (war hammers), pierce (spears).
+- The table, material × source × hit or break, is built once from rules:
+  the material's own debris (glass shatters into many fast shards, sand and
+  snow into many small grains), then the source (the tool a material wants
+  is louder and throws more and faster, a hand softer and less; blunt throws
+  harder, pierce fewer; a blade cuts more out of plants). A pickaxe or hammer
+  on stone adds the crack the game had and never played. The sounds stay
+  the blocks' own, scaled by the entry. The crack decal is still the mining
+  progress, not an entry.
+- [`debris.h`](../include/gameLayer/rendering/debris.h): the pieces, small
+  spinning cubes (up to 600) that fall, bounce on solid blocks, slide to a
+  stop and shrink away in about a second. They are wgpuWorld's block cubes,
+  the dropped items' renderer, which takes a size, a turn, a quarter of the
+  block's texture, or a flat colour now (`entities.wgsl`'s `Cube`; the
+  dropped items are unchanged), lit where they are.
+- Used for every mining tick and the break, for a weapon swung at a block
+  (it does not mine, but now it strikes: sound and a few pieces), and for
+  hits on entities (blood or straw, in place of the plain hit sound).
+- The client control panel's Impacts section shows the table for a material
+  and source and strikes in front of the camera. `OURCRAFT_IMPACT=<material>,<source>,<hit|break>[,<block id>]`
+  strikes there every 0.4 s for scripted screenshots.
+- Checked: stone, dirt and glass breaks, wood, flesh and straw hits in a copy
+  of `test` (screenshots). Not checked in the game: the sounds, real mining,
+  a weapon on a block, hitting a creature.
+- Not done: other players' strikes (there is no packet for them, so only
+  your own show), and decals per material (FNV's bullet holes).
+
 ### G5. Acoustic spaces and location music
 
 **FNV:** `fallout_shared/bgsacousticspace`, `fallout/audio/impactmixer`,

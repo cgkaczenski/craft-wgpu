@@ -1,3 +1,5 @@
+#include <gameplay/impact.h>
+#include <rendering/debris.h>
 #include <rendering/postModifiers.h>
 #include "gamePlayLogic.h"
 #include "rendering/camera.h"
@@ -369,6 +371,9 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	// Milestone G2: the screen effects advance first, so anything this frame
 	// can hold or trigger one.
 	postModifiers::update(deltaTime);
+	// Milestone G4: the debris of strikes falls and settles.
+	debris::update(deltaTime, gameData.chunkSystem);
+	impact::updateEnvironmentTest(deltaTime, gameData.c.position, gameData.c.viewDirection);
 
 #pragma region server stuff
 	{
@@ -1672,11 +1677,18 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 						{
 							gameData.currentBlockBreaking.timer -= deltaTime;
 							
+							// Milestone G4: where the ray meets the block, just in
+							// front of it, for the strike's debris.
+							const glm::dvec3 strikePoint = cameraRayPos
+								+ glm::dvec3(gameData.c.viewDirection) * double(std::max(raycastDist - 0.03f, 0.f));
+
 							if (gameData.currentBlockBreaking.timer <= 0)
 							{
-								auto sound = getSoundForBlockBreaking(raycastBlock->getType());
-								AudioEngine::playSound(sound, BREAKED_BLOCK_SOUND_VOLUME);
-								//AudioEngine::playSound(AudioEngine::crackStone, 0.3);
+								// The impact table's break: the block's sound, by
+								// what broke it, and its pieces.
+								const auto brokenType = raycastBlock->getType();
+								impact::play(impact::getBlockMaterial(brokenType), impact::getSource(item),
+									impact::eventBreak, strikePoint, -gameData.c.viewDirection, brokenType);
 
 								//break block
 								gameData.chunkSystem.breakBlockByClient(rayCastPos
@@ -1695,8 +1707,9 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 								if (soundTimer <= 0)
 								{
 									soundTimer = 0.2;
-									auto sound = getSoundForBlockStepping(raycastBlock->getType());
-									AudioEngine::playSound(sound, MINING_BLOCK_SOUND_VOLUME);
+									const auto struckType = raycastBlock->getType();
+									impact::play(impact::getBlockMaterial(struckType), impact::getSource(item),
+										impact::eventHit, strikePoint, -gameData.c.viewDirection, struckType);
 								}
 								soundTimer -= deltaTime;
 							}
@@ -2203,6 +2216,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		{
 			crt::debugUi();
 			postModifiers::debugUi();
+			impact::debugUi(gameData.c.position, gameData.c.viewDirection);
 
 			// Milestone G1: the world clock and the weather. The world's own
 			// controls send the same commands as typing them in chat (/time,
@@ -2747,11 +2761,32 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 					attackEntity(targetedEntity, gameData.currentItemSelected,
 						gameData.c.viewDirection, hitStatus);
 
-					AudioEngine::playHitSound();
+					// Milestone G4: the impact table's hit on what it is made
+					// of (flesh, or the dummies' straw).
+					const int material = impact::getEntityMaterial(getEntityTypeFromEID(targetedEntity));
+					if (material == impact::materialNone) { AudioEngine::playHitSound(); }
+					impact::play(material,
+						impact::getSource(*player.inventory.getItemFromIndex(gameData.currentItemSelected, nullptr)),
+						impact::eventHit,
+						cameraRayPos + glm::dvec3(gameData.c.viewDirection) * double(entityHitDistance),
+						-gameData.c.viewDirection, 0);
 				}
 
 			};
 
+		}
+		else if (!targetedEntity && !stopMainInput && raycastBlock && hitStatus.hitCorectness > 0)
+		{
+			// Milestone G4: a weapon swung at a block: it does not mine, but
+			// it strikes, with the block's sound and a few pieces.
+			Item &weapon = *player.inventory.getItemFromIndex(gameData.currentItemSelected, nullptr);
+			if (weapon.isWeapon() && raycastDist <= weapon.getWeaponStats().range)
+			{
+				const auto struckType = raycastBlock->getType();
+				impact::play(impact::getBlockMaterial(struckType), impact::getSource(weapon), impact::eventHit,
+					cameraRayPos + glm::dvec3(gameData.c.viewDirection) * double(std::max(raycastDist - 0.03f, 0.f)),
+					-gameData.c.viewDirection, struckType);
+			}
 		}
 
 	}
@@ -3476,6 +3511,7 @@ void closeGameLogic()
 	
 	gameData.mapEngine.close();
 	postModifiers::clear();
+	debris::clear();
 
 	//free all resources
 	gameData.clearData();
