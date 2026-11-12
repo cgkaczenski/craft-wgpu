@@ -1174,6 +1174,12 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 		float rivers = 0;
 		float lakes = 0;
 
+		// The most river and lake over every column of the chunk: a
+		// structure goes at the chunk's lowest point, and one column's
+		// values missed a river beside it.
+		float mostRivers = 0;
+		float mostLakes = 0;
+
 	}dataForStructureGen;
 
 	for (int x = 0; x < CHUNK_SIZE; x++)
@@ -2166,6 +2172,9 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 
 			}
 
+			dataForStructureGen.mostRivers = std::max(dataForStructureGen.mostRivers, riverChanceValue);
+			dataForStructureGen.mostLakes = std::max(dataForStructureGen.mostLakes, newLakeNoiseVal);
+
 			if (firstH < lowestLevelInChunk)
 			{
 				lowestLevelInChunk = firstH;
@@ -2289,15 +2298,16 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 
 					structuresChoice.push_back(nothing);
 
-					
-					if (currentBiomeIndex == BiomesManager::hayLand)
-					{
-						structuresChoice.push_back(barn);
-						structuresChoice.push_back(barn);
-						structuresChoice.push_back(barn);
-					}
+					// Water anywhere in the chunk (a river or lake in any column,
+					// or ground below the water's level): no land structures. The
+					// structure would sit at the lowest point, on the river bed,
+					// with the water standing in walls around it. The barns and
+					// the camps near the start skipped this test before.
+					const bool water = dataForStructureGen.mostLakes > 0.2
+						|| dataForStructureGen.mostRivers > 0.2
+						|| lowestLevelInChunk < waterLevel;
 
-					if (dataForStructureGen.lakes > 0.2 || dataForStructureGen.rivers > 0.2)
+					if (water)
 					{
 
 						//rivers and lakes structures
@@ -2305,15 +2315,22 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 					}
 					else
 					{
+						if (currentBiomeIndex == BiomesManager::hayLand)
+						{
+							structuresChoice.push_back(barn);
+							structuresChoice.push_back(barn);
+							structuresChoice.push_back(barn);
+						}
+
 						structuresChoice.push_back(goblinTower);
 						structuresChoice.push_back(smallAbandonedHouse);
 						structuresChoice.push_back(trainingCamp);
 						structuresChoice.push_back(smallStoneRuins);
-					}
 
-					if (chunkDistanceFromCenter < 16)
-					{
-						structuresChoice.push_back(trainingCamp);
+						if (chunkDistanceFromCenter < 16)
+						{
+							structuresChoice.push_back(trainingCamp);
+						}
 					}
 
 
