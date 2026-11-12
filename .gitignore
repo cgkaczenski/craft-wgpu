@@ -10,3 +10,6 @@ resources/saves2/
 errorLogs.txt
 resources/worlds/
 playerSettings/
+
+# Bug snapshots (Command+F2 in game): a frame and its debug info
+/bugSnapshots/

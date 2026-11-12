@@ -43,6 +43,9 @@ bool isServerRunning()
 	return serverRunning;
 }
 
+static std::string hostedWorldPath;
+const std::string &getHostedWorldPath() { return hostedWorldPath; }
+
 bool startServer(const std::string &path)
 {
 
@@ -55,6 +58,7 @@ bool startServer(const std::string &path)
 			return 0;
 		}
 
+		hostedWorldPath = path;
 		return 1;
 	}
 	else
@@ -126,6 +130,7 @@ void closeServer()
 	//todo cleanup stuff
 	if (serverRunning)
 	{
+		hostedWorldPath.clear();
 
 		closeEnetListener();
 

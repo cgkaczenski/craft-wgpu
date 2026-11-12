@@ -17,6 +17,9 @@ struct ServerChunkStorer;
 
 bool isServerRunning();
 bool startServer(const std::string &path);
+// The path startServer was given for the running server (a world folder);
+// empty when none runs here (joined someone else's).
+const std::string &getHostedWorldPath();
 ServerChunkStorer &getServerChunkStorer();
 int getServerTicksPerSeccond();
 void clearSD(WorldSaver &worldSaver);

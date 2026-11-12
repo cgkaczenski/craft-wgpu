@@ -7,6 +7,8 @@
 
 
 
+#include <string>
+
 struct GLFWwindow;
 
 namespace wgpuWindow
@@ -21,6 +23,10 @@ namespace wgpuWindow
 	// endFrame submits and presents. Between them, wgpu2d's flushes draw.
 	void beginFrame();
 	void endFrame();
+
+	// Saves this frame, as drawn (UI included), as a PNG at `path` when
+	// endFrame presents it. For the game's bug snapshots (Command+F2).
+	void requestScreenshot(const std::string &path);
 
 	void shutdown();
 

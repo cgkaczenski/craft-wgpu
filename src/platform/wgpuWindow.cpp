@@ -126,6 +126,10 @@ void beginFrame()
 	render::wgpuBeginFrame();
 }
 
+static std::string requestedScreenshot; // requestScreenshot's path, until endFrame saves it
+
+void requestScreenshot(const std::string &path) { requestedScreenshot = path; }
+
 void endFrame()
 {
 	// WGPU_SCREENSHOT_FRAME=N saves frame N as screenshot-frameN.png in the
@@ -145,6 +149,10 @@ void endFrame()
 		p = (*end == ',') ? end + 1 : end;
 	}
 
+	std::string requested;
+	requested.swap(requestedScreenshot);
+	if (!requested.empty()) { shoot = true; }
+
 	// The capture is taken inside wgpuEndFrame, so ask before it.
 	if (shoot) { render::wgpuRequestFrameCapture(); }
 
@@ -154,7 +162,8 @@ void endFrame()
 	int width = 0, height = 0;
 	if (shoot && render::wgpuTakeFrameCapture(pixels, width, height))
 	{
-		std::string name = "screenshot-frame" + std::to_string(frameIndex) + ".png";
+		std::string name = requested.empty()
+			? "screenshot-frame" + std::to_string(frameIndex) + ".png" : requested;
 		if (stbi_write_png(name.c_str(), width, height, 4, pixels.data(), width * 4))
 		{
 			std::cout << "screenshot: " << name << " (" << width << "x" << height << ")\n";

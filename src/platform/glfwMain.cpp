@@ -143,6 +143,10 @@ void keyCallback(GLFWwindow *window, int key, int scancode, int action, int mods
 		{
 			platform::internal::setButtonState(platform::Button::SlashQuestionMark, state);
 		}else
+		if (key == GLFW_KEY_LEFT_SUPER || key == GLFW_KEY_RIGHT_SUPER)
+		{
+			platform::internal::setButtonState(platform::Button::Super, state);
+		}else
 		if (key >= GLFW_KEY_F1 && key <= GLFW_KEY_F12)
 		{
 			int index = key - GLFW_KEY_F1;
@@ -228,19 +232,21 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // camera in game; the game re-centres the cursor at half the framebuffer
 // size each frame, so the offset from there is the turn), key@E, key@Space,
 // key@LShift or key@F9 (pressed, then released the same way), hold@W,N (held
-// for N frames: walking; hold@Mouse,N holds the left button) and quit (closes
-// the window, so shutdown runs). Feeds the callbacks below; the mouse position is overridden from
+// for N frames: walking; hold@Mouse,N holds the left button; hold@LCtrl,N
+// with a key@F2 inside it is Ctrl+F2) and quit (closes the window, so
+// shutdown runs). Feeds the callbacks below; the mouse position is overridden from
 // the first click on, without moving the real cursor.
 static glm::ivec2 scriptedMouse = {0, 0};
 static bool scriptedMouseActive = false; // set by the first click@ or move@ (coordinates may be negative)
 
-// A key named in a script: one letter or digit, Space or LShift. -1 if unknown.
+// A key named in a script: one letter or digit, Space, LShift or LCtrl. -1 if unknown.
 static int scriptedKey(const char *name)
 {
 	const std::string n = name;
 	if (n.size() == 1 && std::isalpha((unsigned char)n[0])) { return GLFW_KEY_A + (std::toupper((unsigned char)n[0]) - 'A'); }
 	if (n.size() == 1 && std::isdigit((unsigned char)n[0])) { return GLFW_KEY_0 + (n[0] - '0'); }
 	if (n == "Space") { return GLFW_KEY_SPACE; }
+	if (n == "LCtrl") { return GLFW_KEY_LEFT_CONTROL; }
 	if (n == "LShift") { return GLFW_KEY_LEFT_SHIFT; }
 	return -1;
 }

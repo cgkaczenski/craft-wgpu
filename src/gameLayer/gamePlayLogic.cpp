@@ -40,6 +40,10 @@
 #include <blockUpdates.h>
 #include <climits>
 #include "rendering/wgpuWorld.h"
+#include "wgpuWindow.h"
+#include <filesystem>
+#include <fstream>
+#include <ctime>
 #include <gameplay/weather.h>
 #include <biome.h>
 #include <gameplay/precipitation.h>
@@ -124,6 +128,9 @@ struct GameData
 
 	int craftingSlider = 0;
 	bool showUI = 1;
+	// The debug info in the top left (Command+F3 toggles it; on to start,
+	// unless OURCRAFT_DEBUG_INFO=0).
+	bool showDebugInfo = 1;
 
 	std::minstd_rand rng;
 
@@ -208,6 +215,13 @@ bool ShowOpenFileDialog(void *hwnd, char *filePath, unsigned int filePathSize, c
 #endif
 }
 
+
+// Where bug snapshots go: bugSnapshots/ in the project (beside resources/).
+static std::filesystem::path bugSnapshotFolder()
+{
+	return std::filesystem::path(RESOURCES_PATH).parent_path().parent_path() / "bugSnapshots";
+}
+
 bool initGameplay(ProgramData &programData, const char *c) //GAME STUFF!
 {
 
@@ -222,6 +236,11 @@ bool initGameplay(ProgramData &programData, const char *c) //GAME STUFF!
 	gameData.clearData();
 	//threadPoolForChunkBaking.setThreadsNumber(2, bakeWorkerThread);
 	gameData.c.position = glm::vec3(0, 65, 0);
+
+	{
+		const char *env = std::getenv("OURCRAFT_DEBUG_INFO");
+		if (env && std::string(env) == "0") { gameData.showDebugInfo = false; }
+	}
 
 	gameData.entityManager.localPlayer.entity = playerData.entity;
 	gameData.entityManager.localPlayer.entityId = playerData.yourPlayerEntityId;
@@ -656,6 +675,14 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		gameData.showUI = !gameData.showUI;
 	}
 
+	// Command+F3 (or Ctrl+F3): the debug info on and off. On a Mac whose
+	// top row is media keys, F3 needs fn as well.
+	if (platform::isKeyPressedOn(platform::Button::F3)
+		&& (platform::isKeyHeld(platform::Button::Super) || platform::isKeyHeld(platform::Button::LeftCtrl)))
+	{
+		gameData.showDebugInfo = !gameData.showDebugInfo;
+	}
+
 	if (!stopMainInput || gameData.insideInventoryMenu)
 		if (platform::isKeyReleased(platform::Button::E))
 		{
@@ -828,6 +855,26 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 					-prelucrateControllerMovementPower(platform::getControllerButtons().RStick.x, platform::getControllerButtons().RStick.y),
 					11.0f * deltaTime
 				);
+			}
+
+			// OURCRAFT_LOOK="yaw,pitch" (degrees, as the debug info prints
+			// them: yaw 0 toward -Z, 90 toward -X; pitch up positive) holds the
+			// camera there for the first 60 frames of play, past the turn the
+			// cursor's first position gives; in a scripted run (OURCRAFT_INPUT)
+			// for all of it, so the real mouse can't turn it and a screenshot
+			// repeats a view exactly.
+			{
+				static const char *look = std::getenv("OURCRAFT_LOOK");
+				static const bool scripted = std::getenv("OURCRAFT_INPUT") != nullptr;
+				static int lookFrames = 0;
+				float yaw = 0, pitch = 0;
+				if (look && (scripted || lookFrames < 60) && std::sscanf(look, "%f,%f", &yaw, &pitch) == 2)
+				{
+					lookFrames++;
+					gameData.c.yaw = glm::radians(yaw);
+					gameData.c.pitch = glm::radians(pitch);
+					gameData.c.rotateCamera({0, 0});
+				}
 			}
 
 			if (!gameData.escapePressed)
@@ -2937,6 +2984,152 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		gameData.mapEngine.update(programData, deltaTime, {posInt.x, posInt.z},
 			gameData.chunkSystem);
 
+	}
+
+#pragma endregion
+
+#pragma region debug info
+
+	// What a bug report needs to find the place again: the world, where the
+	// player is and faces, what they look at and hold, the light there, the
+	// time and weather, and the line that puts a scripted run back here.
+	// Command+F2 (or Ctrl+F2): a bug snapshot, this frame as drawn and the
+	// debug info and settings beside it, in bugSnapshots/<date-time>/ in the
+	// project (bugSnapshotFolder), for whoever fixes it to read.
+	const bool takeSnapshot = platform::isKeyPressedOn(platform::Button::F2)
+		&& (platform::isKeyHeld(platform::Button::Super) || platform::isKeyHeld(platform::Button::LeftCtrl));
+	static std::string snapshotMessage;
+	static float snapshotMessageTimer = 0;
+
+	if ((gameData.showDebugInfo && gameData.showUI) || takeSnapshot)
+	{
+		auto &renderer2d = programData.ui.renderer2d;
+		const glm::dvec3 feet = player.entity.position;
+		const glm::ivec3 feetBlock = from3DPointToBlock(feet);
+		const glm::vec3 view = gameData.c.viewDirection;
+		auto format = [](const char *f, auto... a)
+		{
+			char buffer[256];
+			std::snprintf(buffer, sizeof(buffer), f, a...);
+			return std::string(buffer);
+		};
+
+		std::string world = getHostedWorldPath();
+		if (auto slash = world.find_last_of("/\\"); slash != std::string::npos) { world = world.substr(slash + 1); }
+		if (world.empty()) { world = "(joined a server)"; }
+
+		// Yaw 0 toward -Z (north), 90 toward -X (west); pitch up positive.
+		float yaw = glm::degrees(std::atan2(-view.x, -view.z));
+		if (yaw < 0) { yaw += 360.f; }
+		const float pitch = glm::degrees(std::asin(glm::clamp(view.y, -1.f, 1.f)));
+		const char *compass = "north (-Z)";
+		if (yaw >= 45 && yaw < 135) { compass = "west (-X)"; }
+		else if (yaw >= 135 && yaw < 225) { compass = "south (+Z)"; }
+		else if (yaw >= 225 && yaw < 315) { compass = "east (+X)"; }
+
+		std::vector<std::string> lines;
+		lines.push_back(format("World: %s   FPS: %d", world.c_str(), programData.currentFps));
+		lines.push_back(format("XYZ: %.2f / %.2f / %.2f", feet.x, feet.y, feet.z));
+		lines.push_back(format("Block: %d %d %d   Chunk: %d %d", feetBlock.x, feetBlock.y, feetBlock.z,
+			divideChunk(feetBlock.x), divideChunk(feetBlock.z)));
+		lines.push_back(format("Facing: %s   yaw %.1f  pitch %.1f", compass, yaw, pitch));
+		if (raycastBlock)
+		{
+			lines.push_back(format("Looking at: %s at %d %d %d", Item(raycastBlock->getType()).getItemName().c_str(),
+				rayCastPos.x, rayCastPos.y, rayCastPos.z));
+		}
+		{
+			auto held = player.inventory.getItemFromIndex(gameData.currentItemSelected, nullptr);
+			if (held && held->type) { lines.push_back("Holding: " + held->getItemName()); }
+		}
+		const glm::ivec3 eyeBlock = from3DPointToBlock(gameData.c.position);
+		if (auto b = gameData.chunkSystem.getBlockSafe(eyeBlock.x, eyeBlock.y, eyeBlock.z))
+		{
+			lines.push_back(format("Light at eye: sky %d  block %d", (int)b->getSkyLight(), (int)b->getLight()));
+		}
+		{
+			auto &clock = getClientWorldClock();
+			const float dayTime = clock.dayTime();
+			// 0 is sunrise (6:00), 0.25 noon.
+			const float hours = std::fmod(dayTime * 24.f + 6.f, 24.f);
+			lines.push_back(format("Time: day %d  %02d:%02d (%.3f)   Weather: %s",
+				(int)(clock.worldSeconds / clock.dayLengthSeconds) + 1, (int)hours, (int)(std::fmod(hours, 1.f) * 60.f),
+				dayTime, getWeatherName(clock.weather)));
+		}
+		lines.push_back(format("Repeat: OURCRAFT_WORLD=%s OURCRAFT_SPAWN=%d,%d,%d OURCRAFT_LOOK=%.1f,%.1f",
+			world.c_str(), feetBlock.x, feetBlock.y, feetBlock.z, yaw, pitch));
+
+		if (takeSnapshot)
+		{
+			std::time_t now = std::time(nullptr);
+			char stamp[32] = {};
+			std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", std::localtime(&now));
+			const std::filesystem::path folder = bugSnapshotFolder() / stamp;
+			std::error_code error;
+			std::filesystem::create_directories(folder, error);
+
+			std::ofstream info(folder / "info.txt");
+			if (!error && info)
+			{
+				info << "ourCraft bug snapshot " << stamp << "\n";
+				info << "Build: " << __DATE__ << " " << __TIME__ << "\n\n";
+				for (auto &l : lines) { info << l << "\n"; }
+				const glm::dvec3 eye = gameData.c.position;
+				info << format("Camera: %.3f / %.3f / %.3f   view %.4f %.4f %.4f\n",
+					eye.x, eye.y, eye.z, view.x, view.y, view.z);
+				info << format("Window: %d x %d   UI shown: %d   debug info shown: %d\n",
+					w, h, (int)gameData.showUI, (int)gameData.showDebugInfo);
+				auto &clock = getClientWorldClock();
+				info << format("Weather: %s -> %s, %.2f of the way (%.0f s to change)   day length %.0f s\n",
+					getWeatherName(clock.weather), getWeatherName(clock.nextWeather), clock.transition,
+					clock.secondsUntilChange, clock.dayLengthSeconds);
+				auto &g = getShadingSettings();
+				info << format("Settings: view distance %d  shadows %d  tonemapper %d  PBR %d  lights %d (max %d)"
+					"  bloom %d  SSR %d  FXAA %d  water %d  LOD %d  CRT %d (%d)  screen effects %d  PSX look %d\n",
+					g.viewDistance, g.shadows, g.tonemapper, g.PBR, g.useLights, g.maxLights, g.bloom, g.SSR,
+					(int)g.FXAA, g.waterType, g.lodStrength, g.crt, g.crtIntensity, g.screenEffects, g.psxLook);
+				info.close();
+
+				wgpuWindow::requestScreenshot((folder / "frame.png").string());
+				snapshotMessage = "Bug snapshot saved: bugSnapshots/" + std::string(stamp);
+				std::cout << "Bug snapshot: " << folder.string() << "\n";
+			}
+			else
+			{
+				snapshotMessage = "Bug snapshot: could not write " + folder.string();
+				std::cout << snapshotMessage << "\n";
+			}
+			snapshotMessageTimer = 3;
+		}
+
+		// Sized to the window; a dark box behind so it reads on snow or sky.
+		if (gameData.showDebugInfo && gameData.showUI)
+		{
+			const float size = glm::clamp(h / 40.f, 14.f, 36.f);
+			const float lineHeight = size * 1.15f;
+			float width = 0;
+			for (auto &l : lines) { width = std::max(width, renderer2d.getTextSize(l.c_str(), programData.ui.font, size, 3, 0).x); }
+			const float margin = size * 0.4f;
+			renderer2d.renderRectangle({0, 0, width + margin * 2, lineHeight * lines.size() + margin * 2}, {0, 0, 0, 0.55f});
+			for (int i = 0; i < (int)lines.size(); i++)
+			{
+				renderer2d.renderText({margin, margin + lineHeight * (i + 0.8f)}, lines[i].c_str(), programData.ui.font,
+					Colors_White, size, 3, 0, false, {0, 0, 0, 0});
+			}
+		}
+	}
+
+	// The snapshot's note, from the frame after it (the saved frame is
+	// without it), for a few seconds.
+	if (snapshotMessageTimer > 0 && !takeSnapshot)
+	{
+		snapshotMessageTimer -= deltaTime;
+		auto &renderer2d = programData.ui.renderer2d;
+		const float size = glm::clamp(h / 40.f, 14.f, 36.f);
+		const float width = renderer2d.getTextSize(snapshotMessage.c_str(), programData.ui.font, size, 3, 0).x;
+		const glm::vec2 at = {(w - width) / 2.f, h * 0.8f}; // above the hotbar
+		renderer2d.renderRectangle({at.x - size * 0.4f, at.y - size, width + size * 0.8f, size * 1.5f}, {0, 0, 0, 0.55f});
+		renderer2d.renderText(at, snapshotMessage.c_str(), programData.ui.font, Colors_White, size, 3, 0, false, {0, 0, 0, 0});
 	}
 
 #pragma endregion
