@@ -10,6 +10,13 @@ nothing in it is repeated here. The plan these milestones came from, the
 conventions they settled, and the per-milestone verification notes are in
 [`roadmap.md`](roadmap.md).
 
+A third file, [`shader-effects-learning-outline.md`](shader-effects-learning-outline.md),
+is the same ground by technique instead of by milestone: what each effect
+(colour correction, dithering, bloom, fog, edge detection, upscaling,
+particles, reflections, shadows) does and how, the kinds there are, and
+where to read about it. This file says how each pass was built in WebGPU;
+that one says what the pass is for.
+
 The 3D side lives in one translation unit, `src/gameLayer/rendering/wgpuWorld.cpp`
 (about 5,200 lines by milestone 20), behind a header that names no WebGPU
 types (`include/gameLayer/rendering/wgpuWorld.h`), so `renderer.cpp`,
@@ -1839,6 +1846,9 @@ reproduced without a keyboard: `OURCRAFT_WORLD`, `OURCRAFT_INPUT`,
 `OURCRAFT_WORLD_DRAWS=direct|indirect|multi`, `OURCRAFT_SHADOWS=0|1|2`.
 
 ## Reference shelf
+
+For the effects themselves, by technique, with explainers, frame breakdowns
+and engine source: [`shader-effects-learning-outline.md`](shader-effects-learning-outline.md).
 
 Beyond the guide. [WebGPU Fundamentals](https://webgpufundamentals.org/) for
 the API explained from the JavaScript side —
