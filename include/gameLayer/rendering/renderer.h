@@ -48,6 +48,9 @@ struct Renderer
 
 	BlockGeometryIndex blockGeometry[ModelsManager::BLOCK_MODELS_COUNT];
 	BlockGeometryIndex blockGeometryForEntities[ModelsManager::BLOCK_MODELS_COUNT];
+	// Each block model as a mesh of its own (wgpuWorld::setMesh), for a
+	// block held in the hand as its model (renderEntities).
+	unsigned int blockModelMeshes[ModelsManager::BLOCK_MODELS_COUNT] = {};
 
 
 	void recreateBlockGeometryData(ModelsManager &modelsManager);

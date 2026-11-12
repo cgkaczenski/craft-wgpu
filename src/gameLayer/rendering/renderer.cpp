@@ -1512,6 +1512,18 @@ void Renderer::create(ModelsManager &modelsManager)
 	// it for the inventory's block icons.
 	wgpuWorld::setBlockCubeGeometry(data);
 
+	// And each block model as a mesh of its own, in the items' vertex format
+	// (the same eight floats), for one held in the hand.
+	for (int i = 0; i < ModelsManager::BLOCK_MODELS_COUNT; i++)
+	{
+		if (blockModelMeshes[i]) { wgpuWorld::removeMesh(blockModelMeshes[i]); blockModelMeshes[i] = 0; }
+		const BlockGeometryIndex &range = blockGeometryForEntities[i];
+		if (range.componentCount <= 0) { continue; }
+		blockModelMeshes[i] = wgpuWorld::newMeshId();
+		wgpuWorld::setMesh(blockModelMeshes[i], data.data() + range.startIndex,
+			(size_t)range.componentCount * 8 * sizeof(float), nullptr, 0, 0);
+	}
+
 #pragma endregion
 
 	created = true;
@@ -2480,25 +2492,32 @@ void Renderer::renderEntities(
 
 	glm::mat4 handItemMatrix = glm::mat4{1.f};
 
-	// The held item's type (0 for none or a block). OURCRAFT_HELD_ITEM="name"
-	// (as the item's name, e.g. "silver sword") shows that item instead, for
-	// scripted screenshots; only the drawing, not the inventory.
+	// The held item's type (0 for none or a block), and the held block's when
+	// it is one drawn in the hand as its model (0 otherwise: any other held
+	// block draws nothing, as in GL). OURCRAFT_HELD_ITEM="name" (as the item's
+	// or block's name, e.g. "silver sword", "Wood Torch") shows that instead,
+	// for scripted screenshots; only the drawing, not the inventory.
 	int heldItemType = 0;
+	int heldModelBlock = 0;
 	{
 		static const int environmentHeld = []()
 		{
 			const char *env = std::getenv("OURCRAFT_HELD_ITEM");
 			if (!env) { return 0; }
-			for (int i = ItemsStartPoint; i < lastItem; i++)
+			for (int i = 1; i < lastItem; i++)
 			{
+				if (i == BlocksCount) { i = ItemsStartPoint; }
 				if (Item(i).getItemName() == env) { return i; }
 			}
 			std::cout << "OURCRAFT_HELD_ITEM: no item named " << env << "\n";
 			return 0;
 		}();
 		auto handItem = entityManager.localPlayer.inventory.getItemFromIndex(currentHeldItemIndex, nullptr);
-		if (handItem && !handItem->isBlock() && handItem->type) { heldItemType = handItem->type; }
-		if (environmentHeld) { heldItemType = environmentHeld; }
+		int held = handItem ? handItem->type : 0;
+		if (environmentHeld) { held = environmentHeld; }
+		if (held >= ItemsStartPoint) { heldItemType = held; }
+		// The wood torch for now.
+		else if (held == BlockTypes::torchWood) { heldModelBlock = held; }
 	}
 	// Pixel items that take the hand's pose: held, the hand isn't drawn and
 	// the item is where the hand would be, through its idle, running and
@@ -2506,8 +2525,10 @@ void Renderer::renderEntities(
 	// runs handle bottom left to head top right, as the swords' do); the
 	// ones with a 3D model (assets/models/items/<name>.glb) keep the old
 	// way for now.
+	// And a held block drawn as its model, with poses of its own.
 	const bool itemTakesHandPose = [&]()
 	{
+		if (heldModelBlock) { return true; }
 		if (heldItemType < ItemsStartPoint) { return false; }
 		Item item(heldItemType);
 		if (!item.isTool() && !item.isWeapon()) { return false; }
@@ -2622,8 +2643,19 @@ void Renderer::renderEntities(
 				// The numbers are Minecraft's handheld transform at 70 degrees
 				// and 16:9: at rest, and 0.4 of the way through its swing.
 				struct ItemPose { glm::vec2 screen; float depth; float lean, tip, twist; };
-				const ItemPose atRest = {{0.68f, -1.1f}, 0.74f, 0.f, 20.f, -90.f};
-				const ItemPose swung = {{0.25f, -1.06f}, 0.9f, 44.f, -39.f, -64.f};
+				ItemPose atRest = {{0.68f, -1.1f}, 0.74f, 0.f, 20.f, -90.f};
+				ItemPose swung = {{0.25f, -1.06f}, 0.9f, 44.f, -39.f, -64.f};
+				// A block's model (the torch): Minecraft holds its torch by the
+				// same transform, and that one stands upright in its picture
+				// where a sword lies along the diagonal. So it leans 25 degrees
+				// forward where the sword leans 20 back, held a third of the
+				// way up, and in the swing it is tipped right over toward the
+				// crosshair.
+				if (heldModelBlock)
+				{
+					atRest = {{0.9f, -1.28f}, 0.56f, 0.f, -25.f, -90.f};
+					swung = {{0.19f, -0.81f}, 0.88f, 110.f, -70.f, -7.f};
+				}
 
 				// How far through the swing the hand is, 0..1, along the way
 				// from its rest to its hit position.
@@ -2659,8 +2691,16 @@ void Renderer::renderEntities(
 				// made 0.68 across, Minecraft's size in the hand.
 				const float picture = 16.f / 28.f;
 				const glm::vec3 grip = {-0.55f * picture, -0.55f * picture, 0.f};
-				const glm::mat4 bladeUp = glm::rotate(glm::radians(45.f), glm::vec3(0, 0, 1))
+				glm::mat4 bladeUp = glm::rotate(glm::radians(45.f), glm::vec3(0, 0, 1))
 					* glm::scale(glm::vec3(0.34f / picture)) * glm::translate(-grip);
+				// A block's model is in blocks, centred on its block (the
+				// torch stands on y -0.5) and already upright: the grip, 0.2 up
+				// from the middle of the block's floor, to the origin, and the
+				// block made 0.68 across, as the picture is.
+				if (heldModelBlock)
+				{
+					bladeUp = glm::scale(glm::vec3(0.68f)) * glm::translate(glm::vec3(0.f, 0.3f, 0.f));
+				}
 
 				// The walking bob: the hand's change from its rest while it
 				// walks, eased as the hand eases, into the camera's frame.
@@ -2951,6 +2991,22 @@ void Renderer::renderEntities(
 		{
 			renderOneItem(heldItemType, {}, lightAt(from3DPointToBlock(glm::dvec3(posInt) + glm::dvec3(posFloat))),
 				&handItemMatrix);
+		}
+		// A block held as its model: the model's mesh and the block's texture,
+		// drawn as an item is.
+		else if (heldModelBlock)
+		{
+			wgpuWorld::ItemInstance item;
+			item.mesh = blockModelMeshes[getDefaultBlockShapeForFurniture(heldModelBlock)];
+			item.texture = blocksLoader.texturesIds[getGpuIdIndexForBlock(heldModelBlock, 0)];
+			decomposePosition(c.position, item.positionFloat, item.positionInt);
+			item.model = handItemMatrix;
+			item.light = lightAt(from3DPointToBlock(glm::dvec3(posInt) + glm::dvec3(posFloat)));
+			// A block that gives light is lit by itself, as where it stands
+			// in the world: full block light, or a torch is black at night.
+			if (isLightEmitor(heldModelBlock)) { item.light |= 0xF; }
+			item.firstPerson = true;
+			wgpuItems.push_back(item);
 		}
 
 
