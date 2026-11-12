@@ -1767,6 +1767,29 @@ static glm::vec3 skyWeightsFor(float timeOfDay)
 	return weights;
 }
 
+// What the local player holds, as an item or block type (0 for nothing).
+// OURCRAFT_HELD_ITEM="name" (as the item's or block's name, e.g. "silver
+// sword", "Wood Torch") holds that instead, for scripted screenshots; only
+// for the drawing and the held light, not the inventory.
+static int heldTypeOf(ClientEntityManager &entityManager, int currentHeldItemIndex)
+{
+	static const int environmentHeld = []()
+	{
+		const char *env = std::getenv("OURCRAFT_HELD_ITEM");
+		if (!env) { return 0; }
+		for (int i = 1; i < lastItem; i++)
+		{
+			if (i == BlocksCount) { i = ItemsStartPoint; }
+			if (Item(i).getItemName() == env) { return i; }
+		}
+		std::cout << "OURCRAFT_HELD_ITEM: no item named " << env << "\n";
+		return 0;
+	}();
+	if (environmentHeld) { return environmentHeld; }
+	auto handItem = entityManager.localPlayer.inventory.getItemFromIndex(currentHeldItemIndex, nullptr);
+	return handItem ? handItem->type : 0;
+}
+
 void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	ProgramData &programData, BlocksLoader &blocksLoader, ClientEntityManager &entityManager, 
 	ModelsManager &modelsManager, 
@@ -2076,6 +2099,13 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	lighting.underWater = underWater;
 	// Milestone G1: the weather's grey sky (which also hides the sun and the
 	// moon) and the rain's thicker near fog.
+	// The held light: a block that gives light, held, lights around the
+	// player as a torch block does around itself (a level under its own 15,
+	// as the air next to one is).
+	{
+		const int held = heldTypeOf(entityManager, currentHeldItemIndex);
+		lighting.heldLight = held > 0 && held < BlocksCount && isLightEmitor((BlockType)held) ? 14 : 0;
+	}
 	lighting.overcast = weather.overcast;
 	lighting.skyDarken = weather.skyDarken;
 	lighting.rain = weather.rain;
@@ -2494,27 +2524,11 @@ void Renderer::renderEntities(
 
 	// The held item's type (0 for none or a block), and the held block's when
 	// it is one drawn in the hand as its model (0 otherwise: any other held
-	// block draws nothing, as in GL). OURCRAFT_HELD_ITEM="name" (as the item's
-	// or block's name, e.g. "silver sword", "Wood Torch") shows that instead,
-	// for scripted screenshots; only the drawing, not the inventory.
+	// block draws nothing, as in GL).
 	int heldItemType = 0;
 	int heldModelBlock = 0;
 	{
-		static const int environmentHeld = []()
-		{
-			const char *env = std::getenv("OURCRAFT_HELD_ITEM");
-			if (!env) { return 0; }
-			for (int i = 1; i < lastItem; i++)
-			{
-				if (i == BlocksCount) { i = ItemsStartPoint; }
-				if (Item(i).getItemName() == env) { return i; }
-			}
-			std::cout << "OURCRAFT_HELD_ITEM: no item named " << env << "\n";
-			return 0;
-		}();
-		auto handItem = entityManager.localPlayer.inventory.getItemFromIndex(currentHeldItemIndex, nullptr);
-		int held = handItem ? handItem->type : 0;
-		if (environmentHeld) { held = environmentHeld; }
+		const int held = heldTypeOf(entityManager, currentHeldItemIndex);
 		if (held >= ItemsStartPoint) { heldItemType = held; }
 		// The wood torch for now.
 		else if (held == BlockTypes::torchWood) { heldModelBlock = held; }

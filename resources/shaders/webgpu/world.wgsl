@@ -60,8 +60,36 @@ struct Uniforms {
     psx: vec4f,
     // x how far indoors the camera is, 0..1.
     indoors: vec4f,
+    // The light of what the player holds (heldLight.wgsl): x its level at
+    // the player (0-15; 0 none), y its reach in blocks, z its bands, w how
+    // much of a band is dithered into the next.
+    heldLight: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+#include "heldLight.wgsl"
+
+// The held light's level (0-15) at a point (from the camera) on a surface
+// facing `normal`. Worked out per texel of the world's grid, 16 to a block,
+// not per screen pixel: the distance is the texel's centre's, so a band's
+// edge runs along texels as the pictures on the blocks do, and the dither's
+// threshold is the texel's, so the pattern is painted on the world and
+// stays put as the camera turns (a pattern fixed to the screen would slide
+// over it like dirt on a window).
+fn heldLightLevel(relative: vec3f, normal: vec3f) -> i32 {
+    if (u.heldLight.x <= 0.0) { return 0; }
+    // Block faces lie on texel boundaries; half a texel in from the surface
+    // is inside the texel that shows.
+    let texel = floor((u.positionFloat.xyz + relative - normal * (0.5 / 16.0)) * 16.0);
+    let centre = (texel + 0.5) / 16.0 - u.positionFloat.xyz;
+    // The matrix's two axes are the two the surface runs along.
+    let n = abs(normal);
+    let t = vec3i(texel);
+    var cell = t.xz;
+    if (n.x > n.y && n.x >= n.z) { cell = t.zy; } else if (n.z > n.y) { cell = t.xy; }
+    let band = heldLightBand(length(centre - heldLightOrigin), u.heldLight, bayer4(cell));
+    return i32(heldLightLevelOfBand(band, u.heldLight));
+}
 
 // The snow weather's whiteout, a PlayStation's fog: by distance alone,
 // toward one colour, from a few blocks out to nothing left past
@@ -81,10 +109,24 @@ fn snowFogAmount(distance: f32) -> f32 {
 // window or a door, not the room's own walls. `skyUnchanged` is the baked
 // sky light where the surface is (15 under the open sky, a level less a
 // block sideways from there); from outside, everything has it.
-fn applySnowFog(color: vec3f, relative: vec3f, skyUnchanged: i32) -> vec3f {
+//
+// The held light lights the whiteout too. The fog's colour is what snow in
+// the open looks like in the light there is (the renderer's snowFogColour);
+// inside the held light's reach it is what snow looks like at the light's
+// level in that band, when that is brighter: the same curve and the block
+// light's warm tint. So the bands hold their brightness through the
+// whiteout, where a fog that stayed night-dark would swallow the outer ones.
+fn applySnowFog(color: vec3f, relative: vec3f, normal: vec3f, skyUnchanged: i32) -> vec3f {
     let open = clamp(f32(skyUnchanged - 12) / 3.0, 0.0, 1.0);
     let amount = snowFogAmount(length(relative)) * max(open, 1.0 - u.indoors.x);
-    return mix(color, u.snowFog.rgb, amount);
+    if (amount <= 0.0) { return color; }
+    var fog = u.snowFog.rgb;
+    let held = heldLightLevel(relative, normal);
+    if (held > 0) {
+        let lit = 0.62 * toLinear1(f32(held) / 15.0 * 0.8 + 0.2);
+        fog = max(fog, vec3f(255.0, 237.0, 214.0) / 255.0 * lit * vec3f(0.86, 0.89, 0.94));
+    }
+    return mix(color, fog, amount);
 }
 
 // The PSX look's wobble: the PlayStation drew vertices at whole pixels, so

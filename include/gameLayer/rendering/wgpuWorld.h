@@ -219,6 +219,9 @@ namespace wgpuWorld
 		// lighter: a grid twice as fine (so half the wobble) and the
 		// textures in perspective.
 		float indoors = 0;
+		// The light of what the player holds, as a block light level at the
+		// player (0-15; 0 for none, a torch 14): heldLight.wgsl.
+		int heldLight = 0;
 
 		// Milestone 15: the post chain's settings (toneMap.frag's uniforms,
 		// as the renderer computes them). Lift and gain already mapped

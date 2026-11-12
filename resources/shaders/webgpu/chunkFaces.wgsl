@@ -494,7 +494,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     let viewDepth = -(u.view * vec4f(in.relative, 1.0)).z;
     let shadow = sunShadow(in.relative, viewDepth, dot(u.sunDirection.xyz, in.normal), in.position.xy);
 
-    let ambient = computeAmbient(levels, in.normal, in.ambientMultiplier, (in.flags & 2u) != 0u, ao, shadow);
+    let ambient = computeAmbient(withHeldLight(levels, in.relative, in.normal), in.normal, in.ambientMultiplier,
+        (in.flags & 2u) != 0u, ao, shadow);
 
     var m = material(t.material);
     var albedo = toLinear(t.albedo.rgb);
@@ -782,7 +783,7 @@ fn applyFog(in: VertexOutput, color: vec3f) -> vec3f {
     if (u.fogParams.z != 0.0) { return color; }
     let sky = textureLoad(skyColor, vec2i(in.position.xy), 0).rgb;
     let fogged = mix(sky, color, computeFog(length(in.relative), f32(in.blockPos.y) + in.inBlock.y));
-    return applySnowFog(fogged, in.relative, lightLevels(in.light).skyUnchanged);
+    return applySnowFog(fogged, in.relative, in.normal, lightLevels(in.light).skyUnchanged);
 }
 
 // fboMain's targets, in defaultShader.frag's order, GL's fifth (the

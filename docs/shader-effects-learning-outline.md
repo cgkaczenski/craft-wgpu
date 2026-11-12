@@ -1054,6 +1054,90 @@ is one engine's answer as a diagram; section 1 has this game's.
 
 ---
 
+## 16. Worked example: the held torch's light
+
+One effect built from the blocks above, with what was considered at each
+choice. A torch in the hand lights the ground around the player in a few
+bands that dim outward, the bands' edges dithered into each other, at night,
+in rain and in snow. The code is `heldLight.wgsl` (the bands),
+`world.wgsl`'s `heldLightLevel` (where the threshold comes from),
+`lighting.wgsl`'s `withHeldLight` (how it joins the rest of the light) and
+`precipitation.wgsl`'s `heldLightOnDrop`.
+
+**What kind of light (14).** Three candidates:
+
+- A physically based point light, as the light blocks are: a smooth
+  falloff, brighter on surfaces that face it. Rejected: it has no bands to
+  begin with, and a light at the viewer makes every visible surface face
+  it, so the facing term adds nothing.
+- A shadow-mapped light. Not needed: the light is where the eye is, so
+  whatever the eye can see, the light can reach. A light at the viewer
+  never needs a shadow map.
+- **A block light that walks with the player.** Chosen. The game's baked
+  light is already a level from 0 to 15 that falls with distance, and a
+  level is a band. So the held light is one more block light level, by
+  distance alone, and the face takes the brighter of it and its baked one.
+  That one `max` gives the rest for free: daylight drowns the torch as it
+  drowns a torch block, the warm tint and the per-face shading come from
+  the existing ambient code, and nothing new is added to the lit colour.
+
+**Quantisation (3).** The level is the continuous falloff quantised: twelve
+blocks' reach in five bands, so levels 14, 11, 8, 6 and 3. Fewer, wider
+steps than a torch block's one level a block, because a step has to be a
+few blocks wide to read as a band from eye height.
+
+**Dithering (3).** Each choice in the table of kinds was a decision:
+
+- **Which kind.** Ordered, a 4×4 Bayer matrix. White noise looks like
+  dirt, error diffusion cannot run in a fragment shader, and blue noise
+  needs a texture; a Bayer pattern is also the one that looks like pixel
+  art, which suits blocks.
+- **Where the pattern lives.** On the world, not the screen. The threshold
+  is looked up by the world's texel (16 to a block), so the pattern is
+  painted on the ground and stays put when the camera turns. A screen
+  pattern would slide over the world like dirt on a window, which is the
+  motion problem section 3 warns about.
+- **What is dithered.** Only a band's edge. Dithering the whole falloff
+  would turn the bands into one smooth, grainy gradient; here 45% of each
+  band's width blends into the next and the rest stays flat.
+- **Per texel, not per pixel.** The distance is measured to the texel's
+  centre, so a band's edge runs along texels as the block's picture does,
+  and a texel is never cut in two by a ring.
+
+One trap worth knowing: a block face lies exactly on a texel boundary, so
+flooring its position flickers between two texels. The lookup steps half a
+texel in from the surface first.
+
+**Fog (6).** Checked against the numbers before writing anything. The near
+haze, rain included, removes well under a thousandth of the light inside
+twelve blocks, so it needed nothing. The snow's whiteout does matter: by
+twelve blocks it has replaced about 40% of the lit colour with the fog's,
+which at night is dark, so it swallowed the outer bands. The fix is to
+light the fog as well (in-scattering): `world.wgsl`'s `applySnowFog` takes
+the fog's colour, inside the torch's reach, as what snow looks like at that
+band's light level, when that is brighter than the night's. The fog over a
+band is then as bright as the band, and the bands hold through the
+whiteout. Beyond the reach the fog is untouched, so the torch puts no veil
+over the distance. Ray-marched volumetrics were considered and set aside:
+the light is at the eye, so the fog it lights depends only on distance,
+which a formula gives without a march.
+
+**Particles (11).** The rain and snow are stateless, drawn on sheets, so
+there is no particle to hand a light to; the fragment works out its own
+distance and takes the same band. The dither threshold there is the lane's
+own random number, so a whole streak falls on one side of an edge instead
+of being cut by a pattern.
+
+**Colour (2).** The warm tint is the one the ambient code already gives
+block light, applied in linear light before the tone mapper, so auto
+exposure and grading treat it as any other light.
+
+Checked in scripted screenshots: clear night with and without the torch,
+clear day (no change, as intended), rain at night, snow at night with the
+fog lit and unlit and with the PSX look on, and down a pit by day.
+
+---
+
 ## Exercises, smallest first
 
 Not a plan (the plans are [`roadmap.md`](roadmap.md) and

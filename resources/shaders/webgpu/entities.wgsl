@@ -59,7 +59,7 @@ fn transformNormal(m: mat4x4f, n: vec3f) -> vec3f {
 // theirs in applyFog), or creatures would stand out of it.
 fn gBuffer(color: vec3f, relative: vec3f, normal: vec3f, packedLight: u32) -> GBuffer {
     var out: GBuffer;
-    out.color = vec4f(applySnowFog(color, relative, lightLevels(packedLight).skyUnchanged), 1.0);
+    out.color = vec4f(applySnowFog(color, relative, normal, lightLevels(packedLight).skyUnchanged), 1.0);
     out.position = vec4f((u.view * vec4f(relative, 1.0)).xyz, 0.9);
     out.normal = packNormal(normal);
     out.bloom = vec4f(0.0);
@@ -282,7 +282,7 @@ fn lightEntity(albedo: vec3f, packedLight: u32, relative: vec3f, N: vec3f, fragC
     let levels = lightLevels(packedLight);
     let viewDepth = -(u.view * vec4f(relative, 1.0)).z;
     let shadow = sunShadow(relative, viewDepth, dot(u.sunDirection.xyz, N), fragCoord);
-    let ambient = computeAmbient(levels, N, 1.0, false, 1.0, shadow);
+    let ambient = computeAmbient(withHeldLight(levels, relative, N), N, 1.0, false, 1.0, shadow);
 
     let roughness = 0.9;
     let F0 = vec3f(0.04);

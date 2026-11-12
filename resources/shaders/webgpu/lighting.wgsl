@@ -336,6 +336,17 @@ fn lightLevels(packed: u32) -> LightLevels {
     return l;
 }
 
+// The levels with the held light in (world.wgsl's heldLightLevel): it is a
+// block light, so the brighter of it and the baked one counts, and daylight
+// drowns it as it does a torch block's. For the ambient light only: the
+// point lights test the baked level against their distance, and must not
+// see this one.
+fn withHeldLight(levels: LightLevels, relative: vec3f, normal: vec3f) -> LightLevels {
+    var l = levels;
+    l.block = max(l.block, heldLightLevel(relative, normal));
+    return l;
+}
+
 // The top of defaultShader.frag's main: the ambient light, linear.
 // `ambientMultiplier` is the orientation's fixed darkening (v_ambientMultiplier).
 fn computeAmbient(levels: LightLevels, faceNormal: vec3f, ambientMultiplier: f32, inWater: bool, ao: f32,

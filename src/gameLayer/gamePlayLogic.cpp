@@ -1802,6 +1802,15 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	worldClock.advance(deltaTime);
 
 	float dayTime = overrideDayTime ? overriddenDayTime : worldClock.dayTime();
+	// OURCRAFT_DAY_TIME=0..1 holds the time of day, for scripted screenshots.
+	{
+		static const float environmentDayTime = []()
+		{
+			const char *env = std::getenv("OURCRAFT_DAY_TIME");
+			return env ? (float)std::atof(env) : -1.f;
+		}();
+		if (environmentDayTime >= 0) { dayTime = environmentDayTime; }
+	}
 	programData.renderer.sunPos = calculateSunPosition(dayTime);
 
 	programData.renderer.weather = worldClock.look();
@@ -1809,6 +1818,22 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	{
 		programData.renderer.weather = mixWeatherLooks(getWeatherLook(overriddenWeather),
 			getWeatherLook(overriddenNextWeather), overriddenTransition);
+	}
+	// OURCRAFT_WEATHER=<name> (clear, rain, snow, ...: the weathers' names)
+	// holds that weather's look, for scripted screenshots.
+	{
+		static const int environmentWeather = []()
+		{
+			const char *env = std::getenv("OURCRAFT_WEATHER");
+			if (!env) { return -1; }
+			for (int i = 0; i < WEATHER_COUNT; i++)
+			{
+				if (std::string(getWeatherName(i)) == env) { return i; }
+			}
+			std::cout << "OURCRAFT_WEATHER: no weather named " << env << "\n";
+			return -1;
+		}();
+		if (environmentWeather >= 0) { programData.renderer.weather = getWeatherLook(environmentWeather); }
 	}
 
 	// Milestone G1b: the rain's sound, from what falls on the player's column:

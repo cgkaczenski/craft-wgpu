@@ -88,8 +88,9 @@ namespace
 		glm::vec4 snowFog;           // rgb the whiteout's colour (linear), w how much (the snow weather)
 		glm::vec4 psx;               // x 1 for the PSX look, yz its grid (pixels across and down), w 1 to warp the textures
 		glm::vec4 indoors;           // x how far indoors the camera is, 0..1 (the whiteout)
+		glm::vec4 heldLight;         // the held light: x its level (0 none), y reach, z bands, w dithered share
 	};
-	static_assert(sizeof(Uniforms) == 624, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 640, "uniform layout must match world.wgsl");
 
 	// The PSX look's lines down the screen: the PlayStation's usual 240.
 	constexpr float psxLines = 240.f;
@@ -126,8 +127,9 @@ namespace
 		glm::vec4 origin;         // xz column (0, 0) from the camera, y camera height, w reach
 		glm::ivec4 corner;        // xy column (0, 0)'s world block, z columns per side
 		glm::vec4 params;         // x intensity, y seconds, z brightness, w wind
+		glm::vec4 held;           // the held light, as Uniforms::heldLight
 	};
-	static_assert(sizeof(PrecipitationUniforms) == 112, "must match precipitation.wgsl");
+	static_assert(sizeof(PrecipitationUniforms) == 128, "must match precipitation.wgsl");
 
 	// Milestone 18: godRays.wgsl's RayUniforms and underwater.wgsl's WarpUniforms.
 	struct RayUniforms
@@ -558,6 +560,7 @@ namespace
 		uint32_t precipitationColumns = 0;
 		glm::mat4 frameViewProjection = glm::mat4(1.f); // render's
 		glm::dvec3 frameCameraPosition = {};
+		glm::vec4 frameHeldLight = {}; // this frame's Uniforms::heldLight, for the rain
 
 		// render's transparent passes, waiting for renderTransparent.
 		bool pendingTransparent = false;
@@ -4577,6 +4580,10 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.snowFog = snowFog;
 	uniforms.psx = psx;
 	uniforms.indoors = glm::vec4(indoors, 0.f, 0.f, 0.f);
+	// The held light: 12 blocks' reach in 5 bands, nearly half of each
+	// dithered into the next.
+	uniforms.heldLight = glm::vec4((float)glm::clamp(lighting.heldLight, 0, 15), 12.f, 5.f, 0.45f);
+	w.frameHeldLight = uniforms.heldLight;
 
 	// Milestone 13: the sun's cascades, camera-relative. GL's matrices
 	// take world positions to -1..1 depth; here the camera position is
@@ -5191,6 +5198,7 @@ void setPrecipitation(const Precipitation &precipitation)
 	uniforms.corner = glm::ivec4(precipitation.corner, precipitation.size, 0);
 	uniforms.params = glm::vec4(glm::clamp(precipitation.intensity, 0.f, 1.f), (float)std::fmod(seconds, 3600.0),
 		precipitation.brightness, precipitation.wind);
+	uniforms.held = w.frameHeldLight;
 	wgpuQueue().writeBuffer(w.precipitationUniformBuffer, 0, &uniforms, sizeof(uniforms));
 
 	w.precipitationColumns = count;

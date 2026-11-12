@@ -21,6 +21,8 @@ struct PrecipitationUniforms {
     // x the intensity (0..1), y seconds, z the brightness of the light the
     // drops catch, w the wind's lean (blocks sideways per block down).
     params: vec4f,
+    // The light of what the player holds, as world.wgsl's u.heldLight.
+    held: vec4f,
 };
 @group(0) @binding(0) var<uniform> p: PrecipitationUniforms;
 // Per column: x the world y the rain stops at, y 0 none, 1 rain, 2 snow.
@@ -31,7 +33,21 @@ struct PrecipitationOutput {
     @location(0) sheet: vec2f,                         // x across 0..1, y world height
     @location(1) @interpolate(flat) column: vec2f,     // world x, z (for the hash)
     @location(2) @interpolate(flat) kindAndFade: vec2f, // x kind, y fade with distance
+    @location(3) relative: vec3f,                      // from the camera, for the held light
 };
+
+#include "heldLight.wgsl"
+
+// What the held light adds to a drop or a flake: rgb the light it catches
+// (warm, as a torch's is on a face), a how much more of it shows. In the
+// light's own bands; the threshold at a band's edge is the lane's, so a
+// whole streak falls on one side or the other.
+fn heldLightOnDrop(relative: vec3f, threshold: f32) -> vec4f {
+    let band = heldLightBand(length(relative - heldLightOrigin), p.held, threshold);
+    if (band <= 0.0) { return vec4f(0.0); }
+    let level = heldLightLevelOfBand(band, p.held) / 15.0;
+    return vec4f(vec3f(1.0, 0.93, 0.84) * level * level * 0.9, level);
+}
 
 const hidden = vec4f(0.0, 0.0, 2.0, 1.0); // beyond the far plane: clipped
 
@@ -43,6 +59,7 @@ fn vs_precipitation(@builtin(vertex_index) index: u32, @builtin(instance_index) 
     out.sheet = vec2f(0.0);
     out.column = vec2f(0.0);
     out.kindAndFade = vec2f(0.0);
+    out.relative = vec3f(0.0);
 
     let size = u32(p.corner.z);
     let column = columns[instance];
@@ -65,7 +82,8 @@ fn vs_precipitation(@builtin(vertex_index) index: u32, @builtin(instance_index) 
     // Rain leans with the wind: the sheet's top moves downwind.
     let lean = select(0.0, p.params.w * (height - bottom), column.y < 1.5);
     let xz = center + across * side * 0.5 + vec2f(lean, lean * 0.3);
-    out.position = p.viewProjection * vec4f(xz.x, height - p.origin.y, xz.y, 1.0);
+    out.relative = vec3f(xz.x, height - p.origin.y, xz.y);
+    out.position = p.viewProjection * vec4f(out.relative, 1.0);
     out.sheet = vec2f(side * 0.5 + 0.5, height);
     out.column = vec2f(f32(p.corner.x + i32(i)), f32(p.corner.y + i32(j)));
     // Fading out toward the edge of the area, and in over the first blocks,
@@ -102,8 +120,9 @@ fn fs_precipitation(in: PrecipitationOutput) -> @location(0) vec4f {
         let along = smoothstep(0.0, streak * 0.25, phase) * (1.0 - smoothstep(streak * 0.5, streak, phase));
         let offset = (h - 0.5) * 0.5;
         let width = 1.0 - smoothstep(0.015, 0.05, abs(inLane - 0.5 - offset));
-        alpha = along * width * 0.45;
-        color = vec3f(0.62, 0.68, 0.76) * light;
+        let held = heldLightOnDrop(in.relative, h);
+        alpha = along * width * 0.45 * (1.0 + held.a);
+        color = vec3f(0.62, 0.68, 0.76) * (light + held.rgb);
     } else {
         // Snow: three lanes of round flakes, falling slowly and swaying; five
         // in a heavy snowfall.
@@ -123,8 +142,9 @@ fn fs_precipitation(in: PrecipitationOutput) -> @location(0) vec4f {
         let dy = (phase - 0.5) * spacing;
         // Big enough to stay whole on the PSX look's 240 lines.
         let size = 0.018 + hash(vec2f(flake, h)) * 0.02;
-        alpha = (1.0 - smoothstep(size, size * 1.7, length(vec2f(dx, dy)))) * 0.75;
-        color = vec3f(0.95, 0.96, 1.0) * light;
+        let held = heldLightOnDrop(in.relative, hash(vec2f(flake, h * 7.0)));
+        alpha = (1.0 - smoothstep(size, size * 1.7, length(vec2f(dx, dy)))) * 0.75 * (1.0 + held.a * 0.3);
+        color = vec3f(0.95, 0.96, 1.0) * (light + held.rgb);
     }
 
     alpha *= intensity * in.kindAndFade.y;
