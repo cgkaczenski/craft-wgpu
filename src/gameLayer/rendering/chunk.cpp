@@ -1639,10 +1639,17 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 				sunLight = 15;
 				torchLight = 0;
 			}
-			else
+			else if (sides[2])
 			{
-				sunLight = b.getSkyLight();
-				torchLight = b.getLight();
+				// The decal lies on the block's top, so it takes the light
+				// above it, as the top face does: the block itself is opaque
+				// and holds none.
+				sunLight = sides[2]->getSkyLight();
+				torchLight = sides[2]->getLight();
+			}
+			else if (y == CHUNK_HEIGHT - 1)
+			{
+				sunLight = 15;
 			}
 
 			pushFaceShapeTextureAndColor(transparentGeometry, decalsGeometry + rotation,

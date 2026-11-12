@@ -365,7 +365,13 @@ fn computeAmbient(levels: LightLevels, faceNormal: vec3f, ambientMultiplier: f32
 
     if (inWater) { ambient *= vec3f(0.38, 0.4, 0.42); }
     if (levels.sky > levels.block || levels.block == 0) {
-        ambient *= u.ambientColor.rgb;
+        // The sky's color by day or night where it reaches; where it
+        // doesn't (a cave), no brighter than a dim grey whatever the time,
+        // so that the day's white doesn't light it. Between, by how much
+        // sky reaches, so a cave mouth fades into the dark.
+        let reach = f32(levels.skyUnchanged) / 15.0;
+        let unlit = min(u.ambientColor.rgb, vec3f(0.35));
+        ambient *= mix(unlit, u.ambientColor.rgb, reach);
     } else {
         ambient *= vec3f(255.0, 237.0, 214.0) / 255.0; // torch light, slightly warmer
     }

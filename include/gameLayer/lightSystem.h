@@ -4,7 +4,10 @@
 
 //donotupdatelightsystem
 //donotoptimizelightsystem
-bool constexpr dontUpdateLightSystem = 1;
+// 1 turns the light system off: every face is baked as under the open sky,
+// caves included, and light blocks give no light. On since the sky light
+// is filled in a column at a time (setSunlightForAnEntireChunk).
+bool constexpr dontUpdateLightSystem = 0;
 
 struct ChunkSystem;
 struct Chunk;

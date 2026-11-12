@@ -35,6 +35,8 @@ struct ChunkSystem
 
 	std::vector<Chunk*> loadedChunks;
 	int squareSize = 4;
+	// Chunks just received, in chunk space (not the grid's: it moves with
+	// the player), whose sky light and light blocks are still to add.
 	std::vector<glm::ivec2> chunksToAddLight;
 	
 	glm::ivec2 lastPlayerPos = {};

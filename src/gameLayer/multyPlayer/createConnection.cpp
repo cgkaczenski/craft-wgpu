@@ -198,8 +198,9 @@ void recieveDataClient(ENetEvent &event,
 							{
 								chunk->setDontDrawYet(true);
 
-								//c is in chunk system coordonates space, not chunk space!
-								chunkSystem.chunksToAddLight.push_back({x, z});
+								// In chunk space: the chunk system's grid can move before
+								// the light is added (ChunkSystem::update).
+								chunkSystem.chunksToAddLight.push_back({chunkPacket->chunk.x, chunkPacket->chunk.z});
 
 								for (int x = 0; x < CHUNK_SIZE; x++)
 									for (int z = 0; z < CHUNK_SIZE; z++)

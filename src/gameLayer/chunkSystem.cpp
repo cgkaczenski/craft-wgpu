@@ -449,9 +449,13 @@ void ChunkSystem::update(glm::ivec3 playerBlockPosition, float deltaTime, UndoQu
 	if (!dontUpdateLightSystem)
 	{
 
-		//c is in chunk system coordonates space
-		for (auto &c : chunksToAddLight)
+		// The queue is in chunk space; c is the chunk's place in the grid
+		// now. The grid has moved with the player above, so the grid place
+		// it was received at may hold another chunk by now: that left the
+		// spawn's chunks without sky light.
+		for (auto &chunkPos : chunksToAddLight)
 		{
+			const glm::ivec2 c = chunkPos - cornerPos;
 			auto chunk = getChunkSafeFromMatrixSpace(c.x, c.y);
 			if (!chunk) { continue; }
 			
@@ -472,7 +476,9 @@ void ChunkSystem::update(glm::ivec3 playerBlockPosition, float deltaTime, UndoQu
 				auto &b = neighbour->unsafeGet(lightBlock.x, lightBlock.y, lightBlock.z);
 				auto &b2 = chunk->unsafeGet(darkBlock.x, darkBlock.y, darkBlock.z);
 
-				if (b.getSkyLight() > 1)
+				// Only where it brightens this side: with the sky light filled
+				// in above, most of the edge is already as bright.
+				if (b.getSkyLight() > b2.getSkyLight() + 1)
 				{
 					if (!b2.isOpaque())
 					{
@@ -482,7 +488,7 @@ void ChunkSystem::update(glm::ivec3 playerBlockPosition, float deltaTime, UndoQu
 					}
 				}
 
-				if (b.getLight() > 1)
+				if (b.getLight() > b2.getLight() + 1)
 				{
 					if (!b2.isOpaque())
 					{
@@ -1357,8 +1363,11 @@ bool ChunkSystem::placeBlockByClient(glm::ivec3 pos, unsigned char inventorySlot
 
 			undoQueue.addPlaceBlockEvent(pos, *b, block, oldBlockData);
 
+			// The type alone: with its flags (a torch on a wall) it matched
+			// no light block and counted as opaque, so a placed wall torch
+			// gave no light and took the light from its spot.
 			changeBlockLightStuff(pos, b->getSkyLight(), b->getLight(), b->getType(),
-				block.typeAndFlags, lightSystem);
+				block.getType(), lightSystem);
 
 			
 			//add extra data to undo queue and also that data
@@ -1431,9 +1440,14 @@ bool ChunkSystem::placeBlockByClientForce(glm::ivec3 pos, Block block,
 			}
 		}
 
+		// The light changes from the block that was here: the new one's
+		// copy carries no light of its own, and comparing it to itself
+		// changed nothing (a placed torch gave no light).
+		Block old = *b;
 		*b = block;
+		b->lightLevel = old.lightLevel;
 		
-		changeBlockLightStuff(pos, b->getSkyLight(), b->getLight(), b->getType(),
+		changeBlockLightStuff(pos, old.getSkyLight(), old.getLight(), old.getType(),
 			block.getType(), lightSystem);
 		
 		if (b->isOpaque() && !b->isLightEmitor()) { b->lightLevel = 0; }
@@ -1567,11 +1581,16 @@ void ChunkSystem::placeBlockNoClient(glm::ivec3 pos, Block block, LightSystem &l
 		chunk->removeBlockDataFromThisPos(*b, posInChunk.x, posInChunk.y, posInChunk.z);
 		clientEntityManager.removeBlockEntity(pos, b->getType());
 
+		// As above: the light changes from the block that was here, and the
+		// server's copy of the new one carries no light (it wiped a placed
+		// torch's light as the server confirmed it).
+		Block old = *b;
 		*b = block;
+		b->lightLevel = old.lightLevel;
 		clientEntityManager.addBlockEntity(pos, b->getType());
 
 
-		changeBlockLightStuff(pos, b->getSkyLight(), b->getLight(), b->getType(), block.getType(), lightSystem);
+		changeBlockLightStuff(pos, old.getSkyLight(), old.getLight(), old.getType(), block.getType(), lightSystem);
 
 		if (b->isOpaque() && !b->isLightEmitor()) { b->lightLevel = 0; }
 

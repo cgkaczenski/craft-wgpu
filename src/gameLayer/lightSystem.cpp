@@ -531,15 +531,61 @@ void LightSystem::setSunlightForAnEntireChunk(Chunk &chunk, ChunkSystem &chunkSy
 	//
 	//}
 
-	for (int xPos = xStart; xPos < xStart + CHUNK_SIZE; xPos++)
-		for (int zPos = ZStart; zPos < ZStart + CHUNK_SIZE; zPos++)
+	// Sky light as the flood from the top would leave it, without the flood:
+	// 15 straight down each column to its first opaque block (a level 15
+	// goes down undimmed). The flood from the top row alone (one block a
+	// frame down every loaded chunk at once) took seconds to reach the
+	// ground after joining.
+	int litBottom[CHUNK_SIZE][CHUNK_SIZE] = {}; // the column's lowest 15
+	for (int x = 0; x < CHUNK_SIZE; x++)
+		for (int z = 0; z < CHUNK_SIZE; z++)
 		{
-			if (!chunk.unsafeGet(xPos - xStart, CHUNK_HEIGHT - 1, zPos - ZStart).isOpaque())
+			int y = CHUNK_HEIGHT - 1;
+			for (; y >= 0; y--)
 			{
-				addSunLight(chunkSystem, {xPos, CHUNK_HEIGHT - 1, zPos}, 15);
-				//addSunLightAndPropagateDown(chunkSystem, {xPos, CHUNK_HEIGHT - 1, zPos}, 15);
+				auto &b = chunk.unsafeGet(x, y, z);
+				if (b.isOpaque()) { break; }
+				b.setSkyLevel(15);
 			}
+			litBottom[x][z] = y + 1;
 		}
 
-
+	// Then the flood only from where the light goes sideways: a 15 beside a
+	// see-through block that is darker, under an overhang, in a cave mouth
+	// or across the chunk's edge.
+	for (int x = 0; x < CHUNK_SIZE; x++)
+		for (int z = 0; z < CHUNK_SIZE; z++)
+		{
+			const glm::ivec2 sides[4] = {{x - 1, z}, {x + 1, z}, {x, z - 1}, {x, z + 1}};
+			for (int y = litBottom[x][z]; y < CHUNK_HEIGHT; y++)
+			{
+				bool spreads = false;
+				for (auto side : sides)
+				{
+					if (side.x >= 0 && side.y >= 0 && side.x < CHUNK_SIZE && side.y < CHUNK_SIZE)
+					{
+						// Inside: below that column's lowest 15 it is darker.
+						if (y < litBottom[side.x][side.y] && !chunk.unsafeGet(side.x, y, side.y).isOpaque())
+						{
+							spreads = true;
+						}
+					}
+					else if (auto b = chunkSystem.getBlockSafe(xStart + side.x, y, ZStart + side.y);
+						b && !b->isOpaque() && b->getSkyLight() < 14)
+					{
+						spreads = true;
+					}
+				}
+				if (spreads) { sunLigtsToAdd.push_back({{xStart + x, y, ZStart + z}, 15}); }
+				// Higher up, inside neighbours are all 15 too; the edge
+				// columns keep looking (the next chunk's light is unknown).
+				bool edge = x == 0 || z == 0 || x == CHUNK_SIZE - 1 || z == CHUNK_SIZE - 1;
+				if (!edge)
+				{
+					int highest = 0;
+					for (auto side : sides) { highest = std::max(highest, litBottom[side.x][side.y]); }
+					if (y + 1 >= highest) { break; }
+				}
+			}
+		}
 }
