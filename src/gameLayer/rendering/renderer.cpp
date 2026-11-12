@@ -2502,9 +2502,17 @@ void Renderer::renderEntities(
 	}
 	// Pixel items that take the hand's pose: held, the hand isn't drawn and
 	// the item is where the hand would be, through its idle, running and
-	// swing poses. The training sword and the silver sword for now.
-	const bool itemTakesHandPose = heldItemType == ItemTypes::trainingSword
-		|| heldItemType == ItemTypes::silverSword;
+	// swing poses. Every tool and weapon drawn as a picture (each picture
+	// runs handle bottom left to head top right, as the swords' do); the
+	// ones with a 3D model (assets/models/items/<name>.glb) keep the old
+	// way for now.
+	const bool itemTakesHandPose = [&]()
+	{
+		if (heldItemType < ItemsStartPoint) { return false; }
+		Item item(heldItemType);
+		if (!item.isTool() && !item.isWeapon()) { return false; }
+		return blocksLoader.itemsGeometry[heldItemType - ItemsStartPoint + 1].model3D.count == 0;
+	}();
 
 	auto renderHand = [&]()
 	{
@@ -2641,9 +2649,12 @@ void Renderer::renderEntities(
 
 				// The pixel item's square is -1..1, but a 16 pixel picture is
 				// padded to 28 when loaded (loadFromFileAndAddPadding), so it
-				// fills only the middle 16/28 of it: a sword's pommel at the
-				// picture's bottom left and its tip at the top right. The
-				// grip, on the handle, goes to the origin, the blade is turned
+				// fills only the middle 16/28 of it: a sword's pommel (a tool's
+				// handle end) at the picture's bottom left and its tip at the
+				// top right. A 22 pixel picture (the spears, the scythe) has
+				// the same size pixels, so it is held at the same point and its
+				// longer shaft runs on down. The grip, on the handle, goes to
+				// the origin, the blade is turned
 				// to point up with its flat toward +z, and the picture is
 				// made 0.68 across, Minecraft's size in the hand.
 				const float picture = 16.f / 28.f;

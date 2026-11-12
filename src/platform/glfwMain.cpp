@@ -490,6 +490,12 @@ int main()
 
 	int w = 500;
 	int h = 500;
+	// OURCRAFT_WINDOW="WxH" sizes the window, for scripted screenshots.
+	if (const char *env = std::getenv("OURCRAFT_WINDOW"))
+	{
+		int ew = 0, eh = 0;
+		if (std::sscanf(env, "%dx%d", &ew, &eh) == 2 && ew > 0 && eh > 0) { w = ew; h = eh; }
+	}
 	wind = glfwCreateWindow(w, h, "geam", nullptr, nullptr);
 	if (!wind)
 	{
