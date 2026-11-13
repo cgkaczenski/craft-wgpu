@@ -208,6 +208,12 @@ const topOfCubeFlag = 256u;
 // Flag bit 2 (Chunk::bake): a plain tall-grass plant's sprite, which gives
 // way to blades near the camera (vs_blade).
 const tallGrassFlag = 4u;
+// Flag bit 3 (Chunk::bake): ground grass blades stand on, the top of a grass
+// block open to the air or of anything under tall grass (bladeGround). Under
+// tall grass the position's y also has bit 15, which arrives as
+// tuftAboveFlag (past the flags byte, as topOfCubeFlag is).
+const bladeGroundFlag = 8u;
+const tuftAboveFlag = 512u;
 
 // A texture across span x span blocks: which of its slices this block's face
 // shows. The slices go up the texture array from the bottom row, left to
@@ -313,9 +319,10 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     let colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
 
     // The light and flag bytes ride in y's high bits.
-    let blockPosition = vec3i(face.position.x, face.position.y & 0xFFFF, face.position.z);
+    // y is 0-255; bit 15 is a flag (tuftAboveFlag).
+    let blockPosition = vec3i(face.position.x, face.position.y & 0x7FFF, face.position.z);
     let light = u32(face.position.y >> 16) & 0xFFu;
-    let flags = u32(face.position.y >> 24) & 0xFFu;
+    let flags = (u32(face.position.y >> 24) & 0xFFu) | select(0u, tuftAboveFlag, (face.position.y & 0x8000) != 0);
     let water = (flags & 1u) != 0u;
 
     let corner = stripToCorner[vertexIndex];
@@ -492,6 +499,50 @@ fn spriteDissolved(in: VertexOutput) -> bool {
     let texel = floor(faceUV(in) * 16.0) + vec2f(in.blockPos.xz) * 17.0 + f32(in.blockPos.y) * 5.0;
     return fract(sin(dot(texel, vec2f(12.9898, 78.233))) * 43758.5453) < in.blade.y;
 }
+
+// The ground under the blades: how much of it their roots and the shade of
+// them cover, 0..1, where a tuft stands (most of its block) and where a
+// clump does (vs_blade's own clump, worked out the same way), a little
+// more in the lush patches. Shown as a dither (bladeGroundShaded), so it is
+// whole texels, darker or not, as the held light's bands are.
+fn bladeGroundCover(in: VertexOutput) -> f32 {
+    if ((in.flags & bladeGroundFlag) == 0u || u.grass.x <= 0.0 || u.grass.z <= 0.0) { return 0.0; }
+    // The blades' cell: the block above this top.
+    let cell = in.blockPos + vec3i(0, 1, 0);
+    let cellRelative = vec3f(cell - u.positionInt.xyz) - u.positionFloat.xyz;
+    let shown = 1.0 - bladeSpriteShare(length(cellRelative.xz));
+    if (shown <= 0.0) { return 0.0; }
+
+    let at = in.inBlock.xz;
+    let cellLush = smoothstep(0.25, 0.75, bladePatch(vec2f(cell.xz)));
+    var cover = 0.0;
+    if ((in.flags & tuftAboveFlag) != 0u) {
+        cover = 0.85 * (1.0 - smoothstep(0.12, 0.55, length(at)));
+    } else if (u.grass.w > 0.0) {
+        let clump = bladeHash(cell, 6007u);
+        if (clump.z <= mix(0.12, 0.7, cellLush)) {
+            let clumpSize = mix(0.6, 1.0, clump.w);
+            let centre = (clump.xy - 0.5) * 0.55;
+            let reach = 0.32 * clumpSize;
+            cover = 0.75 * (1.0 - smoothstep(reach * 0.3, reach, length(at - centre)))
+                * min(u.grass.w / 16.0, 1.0);
+        }
+    }
+    return clamp(cover * mix(0.8, 1.0, cellLush), 0.0, 1.0) * shown * min(u.grass.z * 1.5, 1.0);
+}
+
+// Whether this texel of the ground is one of the shaded ones: the cover
+// against a 4x4 Bayer matrix laid over the top's own texels (16 a block),
+// so the pattern is painted on the ground and stays put as the camera moves.
+fn bladeGroundShaded(in: VertexOutput) -> bool {
+    let cover = bladeGroundCover(in);
+    if (cover <= 0.0) { return false; }
+    let texel = vec2i(floor((vec2f(in.blockPos.xz) + in.inBlock.xz + 0.5) * 16.0));
+    return bayer4(texel) < cover;
+}
+
+// How dark a shaded texel of the ground under the blades is.
+const bladeGroundShade = 0.5;
 
 // A blade's colour: the sprite's picture read up the blade's own column, the
 // row at the blade's height in the block, so a tuft is dark low down and
@@ -923,6 +974,7 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
         m.metallic = 0.0;
     }
     albedo = paintAlbedo(albedo, in.colors);
+    if (bladeGroundShaded(in)) { albedo *= bladeGroundShade; }
 
     // The snow weather's cover: the tops of blocks under the open sky (the
     // sky light above them unblocked) whiten as it snows, keeping some of

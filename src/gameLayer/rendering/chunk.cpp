@@ -707,6 +707,24 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 				pushFlagsLightAndPosition(*currentVector, position, 0, isInWater,
 					sunLight, torchLight, aoShape);
 
+				// Ground that grass blades stand on (Renderer's
+				// findGrassCells): flag bit 3 on the top of a grass block
+				// open to the air, or of anything under tall grass, where a
+				// tuft stands; that also sets bit 15 of the position's y
+				// (0-255, so free). chunkFaces.wgsl's bladeGround dithers it
+				// darker under the blades.
+				if (i == TOP && sides[TOP])
+				{
+					const auto above = sides[TOP]->getType();
+					const auto type = b.getType();
+					const bool tuft = above == BlockTypes::grass;
+					if (tuft || (sides[TOP]->air()
+						&& (type == BlockTypes::grassBlock || type == BlockTypes::yellowGrass)))
+					{
+						(*currentVector)[currentVector->size() - 2] |= (1 << 27) | (tuft ? (1 << 15) : 0);
+					}
+				}
+
 			}
 		}
 	};
