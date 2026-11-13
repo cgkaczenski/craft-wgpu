@@ -222,6 +222,18 @@ static std::filesystem::path bugSnapshotFolder()
 	return std::filesystem::path(RESOURCES_PATH).parent_path().parent_path() / "bugSnapshots";
 }
 
+// The view distance setting, in chunks from the player; OURCRAFT_VIEW_DISTANCE
+// overrides it, for test runs (timing one distance against another).
+static int viewDistanceSetting()
+{
+	static const int environment = []()
+	{
+		const char *env = std::getenv("OURCRAFT_VIEW_DISTANCE");
+		return env ? std::atoi(env) : 0;
+	}();
+	return environment > 0 ? environment : getShadingSettings().viewDistance;
+}
+
 bool initGameplay(ProgramData &programData, const char *c) //GAME STUFF!
 {
 
@@ -252,7 +264,7 @@ bool initGameplay(ProgramData &programData, const char *c) //GAME STUFF!
 	//playerData.timer;
 
 
-	gameData.chunkSystem.init(getShadingSettings().viewDistance * 2);
+	gameData.chunkSystem.init(viewDistanceSetting() * 2);
 
 
 	loadCurrentSkin();
@@ -421,7 +433,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		bool respawned = 0;
 
 		clientMessageLoop(validateEvent, inValidateRevision,
-			from3DPointToBlock(gameData.c.position), gameData.chunkSystem.squareSize,
+			from3DPointToBlock(gameData.c.position), gameData.chunkSystem.effectiveSquare(),
 			gameData.entityManager, gameData.undoQueue,
 			gameData.chunkSystem, gameData.lightSystem,
 			gameData.serverTimer, disconnect,
@@ -592,7 +604,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				data.timer = gameData.serverTimer;
 
 				//todo SET THIS ALSO SOMEWHERE ELSE LOL!!!!
-				gameData.entityManager.localPlayer.entity.chunkDistance = gameData.chunkSystem.squareSize;
+				gameData.entityManager.localPlayer.entity.chunkDistance = gameData.chunkSystem.effectiveSquare();
 				data.playerData = gameData.entityManager.localPlayer.entity;
 
 				sendPacket(getServer(),
@@ -1884,6 +1896,51 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		}();
 		if (environmentWeather >= 0) { programData.renderer.weather = getWeatherLook(environmentWeather); }
 	}
+	// OURCRAFT_WEATHER_CHANGE=<from>><to>:<start>:<length> (seconds into the
+	// run) turns one weather's look into another's, as the world clock's
+	// transitions do, for scripted runs: rain>clear:15:10.
+	{
+		struct Change { int from = -1, to = -1; float start = 0, length = 1; };
+		static const Change change = []()
+		{
+			Change c;
+			const char *env = std::getenv("OURCRAFT_WEATHER_CHANGE");
+			if (!env) { return c; }
+			char from[16] = {}, to[16] = {};
+			if (std::sscanf(env, "%15[a-z]>%15[a-z]:%f:%f", from, to, &c.start, &c.length) != 4) { return c; }
+			for (int i = 0; i < WEATHER_COUNT; i++)
+			{
+				if (std::string(getWeatherName(i)) == from) { c.from = i; }
+				if (std::string(getWeatherName(i)) == to) { c.to = i; }
+			}
+			return c;
+		}();
+		static double seconds = 0;
+		seconds += deltaTime;
+		if (change.from >= 0 && change.to >= 0)
+		{
+			float t = std::clamp((float)(seconds - change.start) / std::max(change.length, 0.01f), 0.f, 1.f);
+			programData.renderer.weather = mixWeatherLooks(getWeatherLook(change.from), getWeatherLook(change.to),
+				t * t * (3 - 2 * t));
+		}
+	}
+
+	// While the weather's fog is whole (rain, a storm, snow), only the
+	// chunks it leaves to be seen are loaded: its end and a chunk more, plus
+	// the circle's edge, whose chunks never draw (they only let their
+	// neighbours bake), so less is baked, streamed, drawn and shadowed. As
+	// soon as the fog starts to thin it is all of the view distance again;
+	// the horizon fog hides the ring while it comes back.
+	{
+		const WeatherLook &look = programData.renderer.weather;
+		int square = 0;
+		if (look.fog >= 0.99f)
+		{
+			const float reach = look.fogEnd + CHUNK_SIZE;
+			square = std::max(2 * (int)std::ceil(reach / CHUNK_SIZE + 1.6f), 6);
+		}
+		gameData.chunkSystem.setLoadSquare(square);
+	}
 
 	// Milestone G1b: the rain's sound, from what falls on the player's column:
 	// none in the desert or under snow, muffled under a roof, faint under water.
@@ -2052,7 +2109,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 #pragma region drop entities that are too far
 
 	gameData.entityManager.dropEntitiesThatAreTooFar({blockPositionPlayer.x,blockPositionPlayer.z},
-		gameData.chunkSystem.squareSize);
+		gameData.chunkSystem.effectiveSquare());
 
 
 #pragma endregion
@@ -3720,7 +3777,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 
 	//updateviewdistance changeviewdistance updaterenderdistance
-	gameData.chunkSystem.changeRenderDistance(getShadingSettings().viewDistance * 2, true);
+	gameData.chunkSystem.changeRenderDistance(viewDistanceSetting() * 2, true);
 
 
 	gameData.gameplayFrameProfiler.endFrame();

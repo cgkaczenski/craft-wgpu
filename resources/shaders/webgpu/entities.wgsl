@@ -55,11 +55,11 @@ fn transformNormal(m: mat4x4f, n: vec3f) -> vec3f {
     return normalize(cofactor * n) * sign(dot(a, cross(b, c)));
 }
 
-// The snow weather's whiteout is on entities too (the chunk faces have
+// The weather's fog is on entities too (the chunk faces have
 // theirs in applyFog), or creatures would stand out of it.
 fn gBuffer(color: vec3f, relative: vec3f, normal: vec3f, packedLight: u32) -> GBuffer {
     var out: GBuffer;
-    out.color = vec4f(applySnowFog(color, relative, normal, lightLevels(packedLight).skyUnchanged), 1.0);
+    out.color = vec4f(applyWeatherFog(color, relative, normal, lightLevels(packedLight).skyUnchanged), 1.0);
     out.position = vec4f((u.view * vec4f(relative, 1.0)).xyz, 0.9);
     out.normal = packNormal(normal);
     out.bloom = vec4f(0.0);

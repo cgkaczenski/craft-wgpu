@@ -41,9 +41,17 @@ struct WeatherLook
 	float overcast = 0;        // the sky toward grey, and the sun, moon and flare hidden; 0..1
 	float skyDarken = 0;       // how much darker the grey sky is; 0..1
 	float rain = 0;            // the near fog's rainStrength (GL's computeFog term); 0..1
-	// How much of a snowfall: the flakes (where rain would fall, snow) and
-	// the whiteout fog; 0..1.
+	// How much of a snowfall: the flakes (where rain would fall, snow), the
+	// snow on the ground's tops and no wet ground; 0..1.
 	float snow = 0;
+	// The weather's own fog, a PlayStation's: by distance alone toward one
+	// colour, which the sky goes to as well. How much of it (0..1), where
+	// nothing is left of the world (blocks), and how bright its colour is
+	// next to snow's (1). A whiteout in snow, a grey close in rain and a
+	// darker, closer one in a storm; none when clear or cloudy.
+	float fog = 0;
+	float fogEnd = 40;
+	float fogShade = 1;
 };
 
 WeatherLook getWeatherLook(int weather);

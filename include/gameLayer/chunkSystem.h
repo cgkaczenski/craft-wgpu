@@ -34,7 +34,19 @@ struct ChunkSystem
 	bool shouldUpdateLights = 0;
 
 	std::vector<Chunk*> loadedChunks;
+	// The array's chunks across: the view distance setting's, the most
+	// that is ever loaded.
 	int squareSize = 4;
+	// The chunks across actually loaded, in a circle (isChunkInRadius):
+	// squareSize, or fewer while the weather's fog hides the far ones
+	// (setLoadSquare). The server streams this many (the player's
+	// chunkDistance), and the entities go with the chunks.
+	int effectiveSquare() const;
+	// 0 for all of squareSize. A change drops (or lets the server send)
+	// the ring between the two on the next update.
+	void setLoadSquare(int square);
+	int loadSquare = 0;
+	int lastLoadSquare = 0;
 	// Chunks just received, in chunk space (not the grid's: it moves with
 	// the player), whose sky light and light blocks are still to add.
 	std::vector<glm::ivec2> chunksToAddLight;

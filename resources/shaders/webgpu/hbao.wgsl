@@ -23,6 +23,9 @@ struct HbaoUniforms {
     // x u_viewDistance ((squareSize / 2) * 16); y, z where the horizon fog
     // is whole and where it starts (world.wgsl's horizonFog); w unused.
     params: vec4f,
+    // x how much of the weather's fog there is, y where it is whole
+    // (world.wgsl's weatherFogAmount); zw unused.
+    fog: vec4f,
 };
 @group(0) @binding(0) var<uniform> hbao: HbaoUniforms;
 @group(0) @binding(1) var positionTexture: texture_2d<f32>; // view space; sky 0
@@ -159,6 +162,15 @@ fn aoHorizonFog(distance: f32) -> f32 {
     return 1.0 - t * t * (3.0 - 2.0 * t);
 }
 
+// The same for the weather's fog (world.wgsl's weatherFogAmount).
+fn aoWeatherFog(distance: f32) -> f32 {
+    if (hbao.fog.x <= 0.0) { return 1.0; }
+    let end = hbao.fog.y;
+    let start = end * 0.075;
+    let t = clamp((distance - start) / (end - start), 0.0, 1.0);
+    return 1.0 - hbao.fog.x * (1.0 - (1.0 - t) * (1.0 - t));
+}
+
 @fragment
 fn fs_apply(in: HbaoOutput) -> @location(0) vec4f {
     let position = textureSampleLevel(positionTexture, linearSampler, in.uv, 0.0).xyz;
@@ -173,5 +185,6 @@ fn fs_apply(in: HbaoOutput) -> @location(0) vec4f {
         }
     }
     aoValue /= 16.0;
-    return vec4f(0.0, 0.0, 0.0, aoValue * 1.45 * aoFog(dist) * aoHorizonFog(length(position)));
+    return vec4f(0.0, 0.0, 0.0, aoValue * 1.45 * aoFog(dist) * aoHorizonFog(length(position))
+        * aoWeatherFog(length(position)));
 }

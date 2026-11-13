@@ -35,6 +35,9 @@ WeatherLook getWeatherLook(int weather)
 		l.overcast = 0.9f;
 		l.skyDarken = 0.35f;
 		l.rain = 0.7f;
+		l.fog = 1;
+		l.fogEnd = 90;
+		l.fogShade = 0.6f;
 		break;
 	case weatherStorm:
 		l.sunStrength = 0.1f;
@@ -43,6 +46,9 @@ WeatherLook getWeatherLook(int weather)
 		l.overcast = 1;
 		l.skyDarken = 0.6f;
 		l.rain = 1;
+		l.fog = 1;
+		l.fogEnd = 60;
+		l.fogShade = 0.42f;
 		break;
 	case weatherSnow:
 		// A bright, flat white-grey: the sun gone, the light all ambient,
@@ -54,6 +60,9 @@ WeatherLook getWeatherLook(int weather)
 		l.skyDarken = 0;
 		l.rain = 0;
 		l.snow = 1;
+		l.fog = 1;
+		l.fogEnd = 40;
+		l.fogShade = 1;
 		break;
 	default: break; // clear: the identity
 	}
@@ -72,6 +81,16 @@ WeatherLook mixWeatherLooks(const WeatherLook &a, const WeatherLook &b, float t)
 	l.skyDarken = mix(a.skyDarken, b.skyDarken);
 	l.rain = mix(a.rain, b.rain);
 	l.snow = mix(a.snow, b.snow);
+	l.fog = mix(a.fog, b.fog);
+	// The fog's distance and colour are those of the weather that has it,
+	// by how much each has: from clear into rain the fog thickens at rain's
+	// distance, rather than sweeping in from wherever clear's would be.
+	const float wa = a.fog * (1 - t), wb = b.fog * t;
+	if (wa + wb > 0)
+	{
+		l.fogEnd = (a.fogEnd * wa + b.fogEnd * wb) / (wa + wb);
+		l.fogShade = (a.fogShade * wa + b.fogShade * wb) / (wa + wb);
+	}
 	return l;
 }
 

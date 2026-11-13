@@ -62,6 +62,16 @@ Chunk* ChunkSystem::getChunkSafeFromMatrixSpace(int x, int z)
 	}
 }
 
+int ChunkSystem::effectiveSquare() const
+{
+	return loadSquare > 0 ? std::min(loadSquare, squareSize) : squareSize;
+}
+
+void ChunkSystem::setLoadSquare(int square)
+{
+	loadSquare = std::max(square, 0);
+}
+
 void ChunkSystem::init(int squareDistance)
 {
 	created = 0;
@@ -377,8 +387,11 @@ void ChunkSystem::update(glm::ivec3 playerBlockPosition, float deltaTime, UndoQu
 
 #pragma region set chunk in matrix
 
-	if (!created || lastX != x || lastZ != z)
+	// Also when the loaded square changed (the weather's fog): the ring
+	// outside it goes, as when the player walks away from it.
+	if (!created || lastX != x || lastZ != z || lastLoadSquare != effectiveSquare())
 	{
+		lastLoadSquare = effectiveSquare();
 		shouldUpdateLights = true;
 
 		std::vector<Chunk*> newChunkVector;
@@ -745,7 +758,7 @@ bool isChunkInRadius(glm::ivec2 playerPos, glm::ivec2 chunkPos, int squareSize)
 
 bool ChunkSystem::isChunkInRadius(glm::ivec2 playerPos, glm::ivec2 chunkPos)
 {
-	return ::isChunkInRadius(playerPos, chunkPos, squareSize);
+	return ::isChunkInRadius(playerPos, chunkPos, effectiveSquare());
 }
 
 bool ChunkSystem::isChunkInRadiusAndBounds(glm::ivec2 playerPos, 

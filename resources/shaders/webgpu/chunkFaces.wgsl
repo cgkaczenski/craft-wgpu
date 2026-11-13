@@ -934,7 +934,7 @@ fn groundWet(in: VertexOutput, levels: LightLevels, water: bool) -> WetGround {
     g.crest = 0.0;
     // Not under the snow weather's cover, not water or what is under it,
     // and not what faces down.
-    let wetness = u.wet.x * (1.0 - u.snowFog.w);
+    let wetness = u.wet.x * (1.0 - u.wet.z);
     if (wetness <= 0.0 || water || (in.flags & 2u) != 0u || in.normal.y < -0.5) { return g; }
     // Where the open sky reaches (the baked sky light, 15 under it and a
     // level less a block sideways), fading out under a roof's edge. The
@@ -1043,8 +1043,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     // The snow weather's cover: the tops of blocks under the open sky (the
     // sky light above them unblocked) whiten as it snows, keeping some of
     // the texture's shading, and go rough and dull.
-    if (u.snowFog.w > 0.0 && !water && in.normal.y > 0.7 && levels.skyUnchanged >= 15) {
-        let cover = u.snowFog.w * 0.9;
+    if (u.wet.z > 0.0 && !water && in.normal.y > 0.7 && levels.skyUnchanged >= 15) {
+        let cover = u.wet.z * 0.9;
         let shading = dot(albedo, vec3f(0.2126, 0.7152, 0.0722));
         // A speckle per texel (16 to a block), so a snowy block still reads
         // as one.
@@ -1384,12 +1384,12 @@ fn horizonFogAmount(distance: f32) -> f32 {
 }
 
 // GL's last step: the color toward the sky behind it, above water; then
-// the snow weather's whiteout.
+// the weather's fog.
 fn applyFog(in: VertexOutput, color: vec3f) -> vec3f {
     if (u.fogParams.z != 0.0) { return color; }
     let sky = textureLoad(skyColor, vec2i(in.position.xy), 0).rgb;
     let fogged = mix(sky, color, computeFog(length(in.relative), f32(in.blockPos.y) + in.inBlock.y));
-    return applySnowFog(fogged, in.relative, in.normal, lightLevels(in.light).skyUnchanged);
+    return applyWeatherFog(fogged, in.relative, in.normal, lightLevels(in.light).skyUnchanged);
 }
 
 // fboMain's targets, in defaultShader.frag's order, GL's fifth (the

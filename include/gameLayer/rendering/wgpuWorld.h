@@ -239,10 +239,14 @@ namespace wgpuWorld
 		float overcast = 0;
 		float skyDarken = 0;
 		float rain = 0;
-		// The snow weather: how much (0..1) of the whiteout fog, which closes
-		// into `snowFogColour` (linear) over a few dozen blocks, the sky too.
+		// The snow weather, 0..1: snow on the tops of blocks, no wet ground.
 		float snow = 0;
-		glm::vec3 snowFogColour = {0.8f, 0.82f, 0.86f};
+		// The weather's fog (WeatherLook::fog): how much (0..1), closing
+		// into `weatherFogColour` (linear) by `weatherFogEnd` blocks, the
+		// sky too.
+		float weatherFog = 0;
+		float weatherFogEnd = 40;
+		glm::vec3 weatherFogColour = {0.8f, 0.82f, 0.86f};
 		// The PSX look (the psxLook setting): the vertices snapped to a
 		// 240-line grid, the textures mapped without perspective correction,
 		// the picture drawn on that grid in 15-bit colour with the

@@ -53,8 +53,9 @@ struct Uniforms {
     // time), for the grass, leaves and waves; y GL's u_waterMove (0..20),
     // for the water's textures.
     animation: vec4f,
-    // The snow weather's whiteout: rgb its colour (linear), w how much (0..1).
-    snowFog: vec4f,
+    // The weather's fog (snow's whiteout, rain's grey): rgb its colour
+    // (linear), w how much (0..1); horizonFog.z is where it is whole.
+    weatherFog: vec4f,
     // The PSX look: x 1 when on, yz its grid (pixels across and down), w 1
     // to map the textures without perspective (not indoors).
     psx: vec4f,
@@ -65,7 +66,8 @@ struct Uniforms {
     // much of a band is dithered into the next.
     heldLight: vec4f,
     // The rain on the ground (chunkFaces.wgsl's groundWet): x how wet it is,
-    // 0..1, y how hard it rains now, 0..1 (the rings in the puddles).
+    // 0..1, y how hard it rains now, 0..1 (the rings in the puddles); z how
+    // much it snows, 0..1 (snow on the tops, the ground not wet).
     wet: vec4f,
     // Grass blades (chunkFaces.wgsl's vs_blade): x how far from the camera
     // they reach, in blocks (0: off, and the tall-grass sprites stay whole),
@@ -76,7 +78,8 @@ struct Uniforms {
     // camera the world has gone wholly into the sky, in blocks, y where the
     // fog starts. x follows the nearest chunk not drawn yet, so the fog
     // hides it, and draws back to the view distance as the chunks come in
-    // (Renderer's horizon fog).
+    // (Renderer's horizon fog). z where the weather's fog is whole
+    // (weatherFogAmount), in blocks.
     horizonFog: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -105,36 +108,35 @@ fn heldLightLevel(relative: vec3f, normal: vec3f) -> i32 {
     return i32(heldLightLevelOfBand(band, u.heldLight));
 }
 
-// The snow weather's whiteout, a PlayStation's fog: by distance alone,
-// toward one colour, from a few blocks out to nothing left past
-// snowFogEnd (the sky goes to the same colour, sky.wgsl). Above water only:
-// under water has its own.
-const snowFogStart = 3.0;
-const snowFogEnd = 40.0;
-
-fn snowFogAmount(distance: f32) -> f32 {
-    if (u.fogParams.z != 0.0 || u.snowFog.w <= 0.0) { return 0.0; }
-    let t = clamp((distance - snowFogStart) / (snowFogEnd - snowFogStart), 0.0, 1.0);
+// The weather's fog, a PlayStation's: by distance alone, toward one
+// colour, from close by to nothing left past u.horizonFog.z blocks (40 in
+// snow, 90 in rain, 60 in a storm; the sky goes to the same colour,
+// sky.wgsl). Above water only: under water has its own.
+fn weatherFogAmount(distance: f32) -> f32 {
+    if (u.fogParams.z != 0.0 || u.weatherFog.w <= 0.0) { return 0.0; }
+    let end = u.horizonFog.z;
+    let start = end * 0.075; // 3 blocks of snow's 40
+    let t = clamp((distance - start) / (end - start), 0.0, 1.0);
     // Thick early, as a whiteout is: most of it in the first half.
-    return u.snowFog.w * (1.0 - (1.0 - t) * (1.0 - t));
+    return u.weatherFog.w * (1.0 - (1.0 - t) * (1.0 - t));
 }
 
-// Indoors the whiteout is only on what the open sky lights: out of a
+// Indoors the fog is only on what the open sky lights: out of a
 // window or a door, not the room's own walls. `skyUnchanged` is the baked
 // sky light where the surface is (15 under the open sky, a level less a
 // block sideways from there); from outside, everything has it.
 //
-// The held light lights the whiteout too. The fog's colour is what snow in
-// the open looks like in the light there is (the renderer's snowFogColour);
+// The held light lights the fog too. The fog's colour is what snow in the
+// open looks like in the light there is (the renderer's weatherFogColour);
 // inside the held light's reach it is what snow looks like at the light's
 // level in that band, when that is brighter: the same curve and the block
 // light's warm tint. So the bands hold their brightness through the
-// whiteout, where a fog that stayed night-dark would swallow the outer ones.
-fn applySnowFog(color: vec3f, relative: vec3f, normal: vec3f, skyUnchanged: i32) -> vec3f {
+// fog, where a fog that stayed night-dark would swallow the outer ones.
+fn applyWeatherFog(color: vec3f, relative: vec3f, normal: vec3f, skyUnchanged: i32) -> vec3f {
     let open = clamp(f32(skyUnchanged - 12) / 3.0, 0.0, 1.0);
-    let amount = snowFogAmount(length(relative)) * max(open, 1.0 - u.indoors.x);
+    let amount = weatherFogAmount(length(relative)) * max(open, 1.0 - u.indoors.x);
     if (amount <= 0.0) { return color; }
-    var fog = u.snowFog.rgb;
+    var fog = u.weatherFog.rgb;
     let held = heldLightLevel(relative, normal);
     if (held > 0) {
         let lit = 0.62 * toLinear1(f32(held) / 15.0 * 0.8 + 0.2);

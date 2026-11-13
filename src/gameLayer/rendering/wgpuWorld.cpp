@@ -89,9 +89,9 @@ namespace
 		glm::vec4 underWaterColor;   // rgb the color, w darken strength (milestone 18)
 		glm::vec4 underWaterParams;  // x darken distance, y fog gradient under water
 		glm::vec4 animation;         // x seconds (GL's u_timeGrass), y GL's u_waterMove (18-parity)
-		glm::vec4 snowFog;           // rgb the whiteout's colour (linear), w how much (the snow weather)
+		glm::vec4 weatherFog;        // rgb the weather's fog's colour (linear), w how much
 		glm::vec4 psx;               // x 1 for the PSX look, yz its grid (pixels across and down), w 1 to warp the textures
-		glm::vec4 indoors;           // x how far indoors the camera is, 0..1 (the whiteout)
+		glm::vec4 indoors;           // x how far indoors the camera is, 0..1 (the weather's fog)
 		glm::vec4 heldLight;         // the held light: x its level (0 none), y reach, z bands, w dithered share
 		glm::vec4 wet;               // x how wet the ground is, y how hard it rains now (the puddles' rings)
 		glm::vec4 grass;             // x the blades' reach (0 off), y the wind, z the density, w a clump's blades (vs_blade)
@@ -107,9 +107,10 @@ namespace
 	{
 		glm::mat4 view;       // world normals to view space
 		glm::mat4 projection; // view to clip space
-		glm::vec4 params;     // x the view distance the AO fades out at
+		glm::vec4 params;     // x the view distance the AO fades out at, y z the horizon fog's end and start
+		glm::vec4 fog;        // x how much of the weather's fog, y where it is whole
 	};
-	static_assert(sizeof(HbaoUniforms) == 144, "must match hbao.wgsl's HbaoUniforms");
+	static_assert(sizeof(HbaoUniforms) == 160, "must match hbao.wgsl's HbaoUniforms");
 
 	// Milestone 14: sky.wgsl's SkyUniforms and BakeParams.
 	struct SkyUniforms
@@ -123,7 +124,7 @@ namespace
 		glm::vec4 raySunParams;          // the same for the god rays' copies (milestone 18)
 		glm::vec4 rayMoonParams;
 		glm::vec4 weather;               // x overcast, y how much darker the grey (milestone G1)
-		glm::vec4 snowFog;               // rgb the whiteout's colour, w how much: the sky goes to it
+		glm::vec4 weatherFog;            // rgb the weather's fog's colour, w how much: the sky goes to it
 	};
 	static_assert(sizeof(SkyUniforms) == 304, "must match sky.wgsl's SkyUniforms");
 
@@ -5244,16 +5245,16 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.underWaterColor = glm::vec4(lighting.underWaterColor, lighting.underwaterDarkenStrength);
 	uniforms.underWaterParams = glm::vec4(lighting.underwaterDarkenDistance, lighting.fogGradientUnderWater, 0.f, 0.f);
 	uniforms.animation = glm::vec4(lighting.animationTime, lighting.waterMove, 0.f, 0.f);
-	// The snow weather's whiteout, and the PSX look on a grid of psxLines
+	// The weather's fog, and the PSX look on a grid of psxLines
 	// lines, as wide as the screen's aspect makes it. Indoors the grid goes
 	// to three times as fine, the textures stop warping halfway in, and the
 	// colour keeps a bit more (post.wgsl's psxColour).
 	const float indoors = glm::clamp(lighting.indoors, 0.f, 1.f);
-	const glm::vec4 snowFog(lighting.snowFogColour, glm::clamp(lighting.snow, 0.f, 1.f));
+	const glm::vec4 weatherFog(lighting.weatherFogColour, glm::clamp(lighting.weatherFog, 0.f, 1.f));
 	const float lines = std::round(psxLines * (1.f + 2.f * indoors));
 	const glm::vec4 psx = lighting.psx
 		? glm::vec4(1.f, std::round(lines * aspect), lines, indoors < 0.5f ? 1.f : 0.f) : glm::vec4(0.f);
-	uniforms.snowFog = snowFog;
+	uniforms.weatherFog = weatherFog;
 	uniforms.psx = psx;
 	uniforms.indoors = glm::vec4(indoors, 0.f, 0.f, 0.f);
 	// The held light: 12 blocks' reach in 5 bands, nearly half of each
@@ -5263,7 +5264,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	w.grassRadius = w.grassCells ? std::max(lighting.grassRadius, 0.f) : 0.f;
 	uniforms.grass = glm::vec4(w.grassRadius, glm::clamp(lighting.wind, 0.f, 1.f),
 		glm::clamp(lighting.grassDensity, 0.f, 1.f), grassClumpBlades * glm::clamp(lighting.grassClumps, 0.f, 1.f));
-	uniforms.wet = glm::vec4(glm::clamp(lighting.wetness, 0.f, 1.f), glm::clamp(lighting.rainOnGround, 0.f, 1.f), 0.f, 0.f);
+	uniforms.wet = glm::vec4(glm::clamp(lighting.wetness, 0.f, 1.f), glm::clamp(lighting.rainOnGround, 0.f, 1.f),
+		glm::clamp(lighting.snow, 0.f, 1.f), 0.f);
 	w.framePsx = psx;
 	w.frameSurface = glm::vec2((float)width, (float)height);
 	w.frameProjectionScale = glm::vec2(projection[0][0], projection[1][1]);
@@ -5285,7 +5287,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		glm::clamp(lighting.rain, 0.f, 1.f));
 	{
 		const float end = std::max(std::min(lighting.fogReach, lighting.fogDistance), 1.f);
-		uniforms.horizonFog = glm::vec4(end, end * std::clamp(lighting.horizonFogStart, 0.f, 1.f), 0.f, 0.f);
+		uniforms.horizonFog = glm::vec4(end, end * std::clamp(lighting.horizonFogStart, 0.f, 1.f),
+			std::max(lighting.weatherFogEnd, 4.f), 0.f);
 	}
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
 
@@ -5307,7 +5310,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	sky.rayMoonParams = glm::vec4(0.f, 0.35f * clearSky, 0.f, 0.f);
 	// skyDarken below 0 brightens the grey: lightning (G1b).
 	sky.weather = glm::vec4(overcast, glm::clamp(lighting.skyDarken, -3.f, 1.f), 0.f, 0.f);
-	sky.snowFog = snowFog;
+	sky.weatherFog = weatherFog;
 	wgpuQueue().writeBuffer(w.skyUniformBuffer, 0, &sky, sizeof(sky));
 
 	// Milestone 15: the post chain's settings, for the composite.
@@ -5347,6 +5350,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	// y, z: the horizon fog's end and start (Uniforms::horizonFog), so a
 	// fogged building's creases don't show through the fog.
 	hbao.params = glm::vec4(lighting.aoViewDistance, uniforms.horizonFog.x, uniforms.horizonFog.y, 0.f);
+	// And the weather's, out of doors (indoors it is only out of the
+	// windows; the room's own creases keep theirs).
+	hbao.fog = glm::vec4(lighting.underWater ? 0.f : uniforms.weatherFog.w * (1.f - indoors), uniforms.horizonFog.z, 0.f, 0.f);
 	wgpuQueue().writeBuffer(w.hbaoUniformBuffer, 0, &hbao, sizeof(hbao));
 	w.ssao = lighting.ssao;
 

@@ -1991,8 +1991,10 @@ namespace
 
 // How far from the camera the world is drawn whole, in blocks: to the
 // nearest chunk not drawn yet (not loaded, or not baked once), across. The
-// loaded square's outer ring is left out: it is never drawn, only there for
-// its neighbours' baking.
+// array's outer ring is left out: it is never drawn, only there for its
+// neighbours' baking. Places outside the loaded circle (smaller in the
+// weather's fog, ChunkSystem::effectiveSquare) count as not drawn: they
+// aren't.
 static float horizonFogReady(ChunkSystem &chunkSystem, glm::dvec3 camera)
 {
 	float nearest = 1e9f;
@@ -2347,15 +2349,19 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	lighting.overcast = weather.overcast;
 	lighting.skyDarken = weather.skyDarken;
 	lighting.rain = weather.rain;
-	// The snow weather's whiteout. Its colour is about what snow in the open
-	// looks like in this light (computeAmbient's sky term on a face under the
-	// open sky, a little of the sun), a touch blue; the sky goes to it too, so
-	// the world closes into one colour.
+	// The weather's fog (snow's whiteout, rain's and a storm's grey). Its
+	// colour is about what snow in the open looks like in this light
+	// (computeAmbient's sky term on a face under the open sky, a little of
+	// the sun), a touch blue, and darker in rain and storms; the sky goes to
+	// it too, so the world closes into one colour.
 	lighting.snow = weather.snow;
+	lighting.weatherFog = weather.fog;
+	lighting.weatherFogEnd = weather.fogEnd;
 	{
 		auto toLinear = [](float c) { return c < 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); };
 		const float sky = 0.62f * std::min(toLinear(skyLightIntensity / 15.f * 0.8f + 0.2f), 1.f);
-		lighting.snowFogColour = (ambientColor * sky + sunLightColor * 0.15f) * glm::vec3(0.86f, 0.89f, 0.94f);
+		lighting.weatherFogColour = (ambientColor * sky + sunLightColor * 0.15f) * glm::vec3(0.86f, 0.89f, 0.94f)
+			* weather.fogShade;
 	}
 	// The PSX look: always, or while it snows. OURCRAFT_PSX=0|1|2 overrides
 	// the setting, for scripted screenshots.
