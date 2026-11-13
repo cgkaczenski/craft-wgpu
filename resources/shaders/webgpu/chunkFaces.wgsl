@@ -336,10 +336,14 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     // same in the nearest of the sun's shadow maps, where the blades cast
     // their own shadows (vs_bladeShadow); in the farther two the sprite
     // stays, and its shadow is the tuft's.
+    // Toward the end of that cascade the sprite comes back into it as the
+    // blades' shadows go (bladeShadowShare).
     var dissolve = 0.0;
     if ((flags & tallGrassFlag) != 0u && u.grass.x > 0.0 && (!forShadow || shadowCascade == 0u)) {
         let away = length(vec2f(blockPosition.xz - u.positionInt.xz) - u.positionFloat.xz);
-        dissolve = 1.0 - bladeSpriteShare(away);
+        var spriteShare = bladeSpriteShare(away);
+        if (forShadow) { spriteShare = max(spriteShare, 1.0 - bladeShadowShare(away)); }
+        dissolve = 1.0 - spriteShare;
         if (dissolve >= 1.0) { shape = vec3f(0.0, -0.5, 0.0); }
     }
 
@@ -560,7 +564,7 @@ fn bladeAlbedo(in: VertexOutput, own: vec4f) -> vec4f {
 
 @vertex
 fn vs_blade(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
-    return bladeVertex(vertexIndex, instance);
+    return bladeVertex(vertexIndex, instance, false);
 }
 
 // The blades into the nearest cascade of the sun's shadow maps (wgpuWorld's
@@ -572,13 +576,32 @@ fn vs_blade(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) in
 // shadow of their own (shade asks from above their block).
 @vertex
 fn vs_bladeShadow(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
-    var out = bladeVertex(vertexIndex, instance);
+    var out = bladeVertex(vertexIndex, instance, true);
     if (out.blade.x <= 0.0) { return out; }
     out.position = u.shadowMatrices[0] * vec4f(out.relative, 1.0);
+    // Fewer of them toward the cascade's end, piece by piece as they give
+    // way to the sprites (bladeDissolved, fs_bladeDepth).
+    let cellRelative = vec3f(out.blockPos - u.positionInt.xyz) - u.positionFloat.xyz;
+    out.blade.z = max(out.blade.z, 1.0 - bladeShadowShare(length(cellRelative.xz)));
     return out;
 }
 
-fn bladeVertex(vertexIndex: u32, instance: u32) -> VertexOutput {
+// How much of a tuft's shadow, in the nearest cascade, is its blades' (the
+// rest its sprite's), by how far the cell is from the camera: all of it
+// near, none by where that cascade starts to mix with the next
+// (lighting.wgsl's sunShadow). The next has only the sprites, so the
+// ground's shadows are alike where one gives way to the other; with the
+// blades' shadows to the end, the ground was darker inside a line some 15
+// blocks ahead, and the line moved with the camera.
+fn bladeShadowShare(away: f32) -> f32 {
+    let end = shadowCascadeEnds.x - shadowCascadeBlend.x;
+    return 1.0 - smoothstep(end - 6.0, end - 0.5, away);
+}
+
+// `forShadow`: for the sun's shadow map, where a blade keeps its own turn
+// (not pulled toward the camera, or every shadow would turn as the player
+// walked).
+fn bladeVertex(vertexIndex: u32, instance: u32, forShadow: bool) -> VertexOutput {
     var out: VertexOutput;
     out.position = bladeHidden;
 
@@ -658,7 +681,7 @@ fn bladeVertex(vertexIndex: u32, instance: u32) -> VertexOutput {
     let toCamera = normalize(vec2f(-base.x, -base.z) + vec2f(0.0001, 0.0));
     let across = vec3f(-toCamera.y, 0.0, toCamera.x);
     if (dot(right, across) < 0.0) { right = -right; }
-    right = normalize(mix(right, across, 0.4));
+    if (!forShadow) { right = normalize(mix(right, across, 0.4)); }
 
     // Its own lean, and the wind: gusts of noise travelling downwind, and a
     // flutter of its own.

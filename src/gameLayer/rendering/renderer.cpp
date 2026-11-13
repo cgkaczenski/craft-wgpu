@@ -1710,7 +1710,13 @@ void Renderer::reloadShaders()
 // 0 on each axis: around the world origin that changes little, but a few
 // hundred blocks out it spreads the first cascade's 2048 texels over
 // hundreds of blocks. Here the maximum starts at lowest().
-static glm::dmat4 sunCascadeMatrix(Camera &c, glm::vec3 sunPos, double zEnd)
+// A cascade's box is fixed to the world's grid of its map's texels: its size
+// doesn't change as the camera turns (a sphere around the slice of the view,
+// whose size depends only on the projection), and its middle moves a whole
+// texel at a time. A box that slid with the camera moved every shadow's
+// edge across the texels as the player walked, so thin shadows (the grass
+// blades') crawled and flickered.
+static glm::dmat4 sunCascadeMatrix(Camera &c, glm::vec3 sunPos, double zEnd, double mapSize)
 {
 	const double zStart = -1;
 	const double depthMargin = 500; // GL's farPlane
@@ -1718,24 +1724,27 @@ static glm::dmat4 sunCascadeMatrix(Camera &c, glm::vec3 sunPos, double zEnd)
 	const glm::dmat4 inverseViewProjection = glm::inverse(c.getViewProjectionWithPositionMatrixDouble());
 	const glm::dquat lightRotation = glm::conjugate(glm::dquat(glm::rotation(glm::vec3(0, 0, 1), sunPos)));
 
-	glm::dvec3 boxMin(std::numeric_limits<double>::max());
-	glm::dvec3 boxMax(std::numeric_limits<double>::lowest());
-	for (int x = -1; x <= 1; x += 2)
-		for (int y = -1; y <= 1; y += 2)
-			for (int z = -1; z <= 1; z += 2)
-			{
-				glm::dvec4 corner = inverseViewProjection * glm::dvec4(x, y, z == -1 ? zStart : zEnd, 1.0);
-				corner /= corner.w;
-				const glm::dvec3 turned = lightRotation * glm::dvec3(corner);
-				boxMin = glm::min(boxMin, turned);
-				boxMax = glm::max(boxMax, turned);
-			}
+	glm::dvec3 corners[8];
+	glm::dvec3 middle(0.0);
+	for (int i = 0; i < 8; i++)
+	{
+		glm::dvec4 corner = inverseViewProjection * glm::dvec4((i & 1) ? 1 : -1, (i & 2) ? 1 : -1,
+			(i & 4) ? zEnd : zStart, 1.0);
+		corners[i] = glm::dvec3(corner) / corner.w;
+		middle += corners[i] / 8.0;
+	}
+	double radius = 0;
+	for (const glm::dvec3 &corner : corners) { radius = std::max(radius, glm::distance(corner, middle)); }
+	// Rounded up to a whole block, so the size holds still.
+	radius = std::ceil(radius);
 
-	// Each axis as long as the diagonal, about its own center.
-	const double diagonal = glm::distance(boxMax, boxMin);
-	const glm::dvec3 center = (boxMin + boxMax) * 0.5;
-	boxMin = center - diagonal * 0.5;
-	boxMax = center + diagonal * 0.5;
+	// The middle, in the light's space, snapped to the map's texels.
+	glm::dvec3 center = lightRotation * middle;
+	const double texel = 2.0 * radius / mapSize;
+	center.x = std::floor(center.x / texel) * texel;
+	center.y = std::floor(center.y / texel) * texel;
+	const glm::dvec3 boxMin = center - radius;
+	const glm::dvec3 boxMax = center + radius;
 
 	const glm::dmat4 lightProjection = glm::ortho(boxMin.x, boxMax.x, boxMin.y, boxMax.y,
 		-(boxMax.z + depthMargin), -(boxMin.z - depthMargin));
@@ -2293,9 +2302,10 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	if (lighting.shadows)
 	{
 		const float cascadeEnds[3] = { 0.9985f, 0.9995f, 0.99994f };
+		const double mapSizes[3] = { 2048, 2048, 1024 }; // wgpuWorld's shadowMapSizes
 		for (int i = 0; i < 3; i++)
 		{
-			lighting.shadowCascades[i] = sunCascadeMatrix(c, mainLightPosition, cascadeEnds[i]);
+			lighting.shadowCascades[i] = sunCascadeMatrix(c, mainLightPosition, cascadeEnds[i], mapSizes[i]);
 		}
 	}
 	// Milestone 14: the sky, the sun and moon, and the fog, from what
