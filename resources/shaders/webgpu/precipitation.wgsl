@@ -13,7 +13,7 @@ struct PrecipitationUniforms {
     // perspectiveRH_ZO times Camera::getViewMatrix (rotation only), as the
     // world's: camera-relative positions to clip space.
     viewProjection: mat4x4f,
-    // xz column (0, 0)'s corner relative to the camera; y the camera's
+    // xz column (0, 0)'s block relative to the camera; y the camera's
     // height (world y); w how far above and below the camera sheets reach.
     origin: vec4f,
     // xy the world block x and z of column (0, 0); z columns per side.
@@ -65,7 +65,8 @@ fn vs_precipitation(@builtin(vertex_index) index: u32, @builtin(instance_index) 
     let column = columns[instance];
     let i = instance % size;
     let j = instance / size;
-    let center = vec2f(p.origin.x + f32(i) + 0.5, p.origin.z + f32(j) + 0.5);
+    // A block is centred on its whole number: the column's middle is there.
+    let center = vec2f(p.origin.x + f32(i), p.origin.z + f32(j));
     let distance = length(center);
     let radius = f32(size) * 0.5;
 

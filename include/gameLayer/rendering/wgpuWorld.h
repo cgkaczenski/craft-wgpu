@@ -128,6 +128,10 @@ namespace wgpuWorld
 		// Per column, x fastest: x the world y the rain stops at (the top of
 		// the highest block that stops it), y 0 none, 1 rain, 2 snow.
 		std::vector<glm::vec2> columns;
+		// Real particles (weather.wgsl) instead of the sheets: a pool moving
+		// in a box around the camera, landing on the columns' tops.
+		bool particles = true;
+		float density = 0.6f;          // how much of the pool falls at full intensity, 0..1
 	};
 	void setPrecipitation(const Precipitation &precipitation);
 
@@ -222,6 +226,12 @@ namespace wgpuWorld
 		// The light of what the player holds, as a block light level at the
 		// player (0-15; 0 for none, a torch 14): heldLight.wgsl.
 		int heldLight = 0;
+		// The rain on the ground: how wet it is, 0..1 (what the open sky
+		// reaches darkens and shines, and puddles fill on the tops of blocks
+		// past 0.3), and how hard it rains now, 0..1 (the rings in the
+		// puddles).
+		float wetness = 0;
+		float rainOnGround = 0;
 
 		// Milestone 15: the post chain's settings (toneMap.frag's uniforms,
 		// as the renderer computes them). Lift and gain already mapped

@@ -2406,6 +2406,16 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				}
 				ImGui::Combo("Rain or snow", &programData.renderer.precipitationPreview,
 					"by biome\0rain\0snow\0");
+				ImGui::Checkbox("Rain and snow as particles", &programData.renderer.precipitationParticles);
+				if (programData.renderer.precipitationParticles)
+				{
+					ImGui::SliderFloat("Particle density", &programData.renderer.precipitationDensity, 0, 1);
+				}
+				ImGui::Checkbox("Wet ground and puddles", &programData.renderer.wetGround);
+				if (programData.renderer.wetGround)
+				{
+					ImGui::SliderFloat("Ground wetness", &programData.renderer.groundWetness, 0, 1);
+				}
 				ImGui::PopItemWidth();
 			}
 

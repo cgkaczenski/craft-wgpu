@@ -93,8 +93,9 @@ namespace
 		glm::vec4 psx;               // x 1 for the PSX look, yz its grid (pixels across and down), w 1 to warp the textures
 		glm::vec4 indoors;           // x how far indoors the camera is, 0..1 (the whiteout)
 		glm::vec4 heldLight;         // the held light: x its level (0 none), y reach, z bands, w dithered share
+		glm::vec4 wet;               // x how wet the ground is, y how hard it rains now (the puddles' rings)
 	};
-	static_assert(sizeof(Uniforms) == 640, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 656, "uniform layout must match world.wgsl");
 
 	// The PSX look's lines down the screen: the PlayStation's usual 240.
 	constexpr float psxLines = 240.f;
@@ -134,6 +135,29 @@ namespace
 		glm::vec4 held;           // the held light, as Uniforms::heldLight
 	};
 	static_assert(sizeof(PrecipitationUniforms) == 128, "must match precipitation.wgsl");
+
+	// Weather particles: weather.wgsl's WeatherUniforms.
+	struct WeatherUniforms
+	{
+		glm::mat4 viewProjection; // rotation only, as the world's
+		glm::vec4 camera;         // xyz the camera from the anchor, w the frame's seconds
+		glm::vec4 shift;          // xyz the anchor's step, w 1 to scatter the pool
+		glm::vec4 box;            // x half width, y reach up and down, z drawn, w pool size
+		glm::ivec4 corner;        // xy column (0, 0) from the anchor, z columns per side, w frame
+		glm::vec4 params;         // x intensity, y seconds, z brightness, w the anchor's world y
+		glm::vec4 wind;           // x the rain's lean
+		glm::vec4 held;           // the held light, as Uniforms::heldLight
+		glm::vec4 psx;            // x 1 in the PSX look, y the quads drawn per particle
+		glm::vec4 pixels;         // xy pixels across and down, zw the projection's x and y scale
+	};
+	static_assert(sizeof(WeatherUniforms) == 208, "must match weather.wgsl");
+
+	// The pool: weather.wgsl's Particle is two vec4s.
+	constexpr uint32_t weatherPoolSize = 16384;
+	// Quads per particle: the drop, flake or crown, and a landed raindrop's
+	// three droplets.
+	constexpr uint32_t weatherQuadsPerParticle = 4;
+	constexpr uint64_t weatherParticleBytes = 32;
 
 	// Milestone 18: godRays.wgsl's RayUniforms and underwater.wgsl's WarpUniforms.
 	struct RayUniforms
@@ -562,6 +586,28 @@ namespace
 		BindGroup precipitationBindGroup = nullptr;
 		bool precipitationPending = false;
 		uint32_t precipitationColumns = 0;
+		// Weather particles (weather.wgsl): the pool, simulated and drawn by
+		// recordPrecipitation when setPrecipitation asks for particles.
+		BindGroupLayout weatherComputeBindGroupLayout = nullptr;
+		BindGroupLayout weatherDrawBindGroupLayout = nullptr;
+		PipelineLayout weatherComputePipelineLayout = nullptr;
+		PipelineLayout weatherDrawPipelineLayout = nullptr;
+		ComputePipeline weatherComputePipeline = nullptr;
+		RenderPipeline weatherDrawPipeline = nullptr;
+		Buffer weatherUniformBuffer = nullptr;
+		Buffer weatherParticleBuffer = nullptr;
+		BindGroup weatherComputeBindGroup = nullptr; // names the column buffer: remade when it grows
+		BindGroup weatherDrawBindGroup = nullptr;
+		bool weatherPending = false;
+		uint32_t weatherDrawn = 0;
+		bool weatherScattered = false;   // the pool has been scattered at least once
+		glm::dvec3 weatherAnchor = {};   // the whole block the particles are relative to
+		std::chrono::steady_clock::time_point weatherLastStep = {};
+		int weatherFrame = 0;
+		// This frame's PSX grid, surface size and projection scale (render's).
+		glm::vec4 framePsx = {};
+		glm::vec2 frameSurface = {1, 1};
+		glm::vec2 frameProjectionScale = {1, 1};
 		glm::mat4 frameViewProjection = glm::mat4(1.f); // render's
 		glm::dvec3 frameCameraPosition = {};
 		glm::vec4 frameHeldLight = {}; // this frame's Uniforms::heldLight, for the rain
@@ -4336,8 +4382,11 @@ namespace
 
 	// Into this frame's encoder, after the transparent faces: the columns
 	// setPrecipitation left, seen from render's camera.
+	void recordWeather(CommandEncoder encoder);
+
 	void recordPrecipitation(CommandEncoder encoder)
 	{
+		recordWeather(encoder);
 		if (!w.precipitationPending) { return; }
 		w.precipitationPending = false;
 		if (!w.precipitationPipeline || !w.precipitationBindGroup || !w.precipitationColumns || !encoder) { return; }
@@ -4349,6 +4398,181 @@ namespace
 		pass.end();
 		pass.release();
 		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "precipitation", "Precipitation pass: rain or snow");
+	}
+
+	// ---- Weather particles (weather.wgsl) ---------------------------------
+
+	// The uniforms, the pool and the two bind group layouts: the simulation's
+	// (uniforms, columns, the pool to write) and the draw's (uniforms, the
+	// pool to read).
+	bool createWeatherResources()
+	{
+		ErrorScope scope("world weather resources");
+		w.weatherUniformBuffer = makeUniformBuffer("world weather uniforms", sizeof(WeatherUniforms));
+
+		BufferDescriptor bufferDesc = Default;
+		bufferDesc.label = StringView("world weather particles");
+		bufferDesc.usage = BufferUsage::Storage | BufferUsage::CopyDst;
+		bufferDesc.size = weatherPoolSize * weatherParticleBytes;
+		bufferDesc.mappedAtCreation = false;
+		w.weatherParticleBuffer = wgpuDevice().createBuffer(bufferDesc);
+
+		BindGroupLayoutEntry compute[3] = { uniformEntry(0, sizeof(WeatherUniforms)), emptyEntry(1), emptyEntry(2) };
+		compute[0].visibility = ShaderStage::Compute;
+		compute[1].visibility = ShaderStage::Compute;
+		compute[1].buffer.type = BufferBindingType::ReadOnlyStorage;
+		compute[1].buffer.hasDynamicOffset = false;
+		compute[1].buffer.minBindingSize = sizeof(glm::vec2);
+		compute[2].visibility = ShaderStage::Compute;
+		compute[2].buffer.type = BufferBindingType::Storage;
+		compute[2].buffer.hasDynamicOffset = false;
+		compute[2].buffer.minBindingSize = weatherParticleBytes;
+		w.weatherComputeBindGroupLayout = makeLayout("world weather simulation bind group layout", compute, 3);
+
+		BindGroupLayoutEntry draw[2] = { uniformEntry(0, sizeof(WeatherUniforms)), emptyEntry(3) };
+		draw[0].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+		draw[1].visibility = ShaderStage::Vertex;
+		draw[1].buffer.type = BufferBindingType::ReadOnlyStorage;
+		draw[1].buffer.hasDynamicOffset = false;
+		draw[1].buffer.minBindingSize = weatherParticleBytes;
+		w.weatherDrawBindGroupLayout = makeLayout("world weather draw bind group layout", draw, 2);
+		if (!w.weatherUniformBuffer || !w.weatherParticleBuffer || !w.weatherComputeBindGroupLayout
+			|| !w.weatherDrawBindGroupLayout) { return false; }
+
+		BindGroupEntry entries[2] = { Default, Default };
+		entries[0].binding = 0;
+		entries[0].buffer = w.weatherUniformBuffer;
+		entries[0].offset = 0;
+		entries[0].size = sizeof(WeatherUniforms);
+		entries[1].binding = 3;
+		entries[1].buffer = w.weatherParticleBuffer;
+		entries[1].offset = 0;
+		entries[1].size = weatherPoolSize * weatherParticleBytes;
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world weather draw bind group");
+		groupDesc.layout = w.weatherDrawBindGroupLayout;
+		groupDesc.entryCount = 2;
+		groupDesc.entries = entries;
+		w.weatherDrawBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		if (!w.weatherDrawBindGroup) { return false; }
+		return !scope.failed();
+	}
+
+	// The simulation (a compute pipeline) and the draw, blended onto the
+	// G-buffer's color as the sheets are. The compute pipeline is not in
+	// forEachReloadable's list (render pipelines only): a new one replaces
+	// the old here, and only when it was made.
+	bool createWeather()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/weather.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world weather");
+
+		w.weatherComputePipelineLayout = createPipelineLayout("world weather simulation pipeline layout",
+			&w.weatherComputeBindGroupLayout, 1);
+		w.weatherDrawPipelineLayout = createPipelineLayout("world weather draw pipeline layout",
+			&w.weatherDrawBindGroupLayout, 1);
+
+		ComputePipelineDescriptor computeDesc = Default;
+		computeDesc.label = StringView("world weather simulation");
+		computeDesc.layout = w.weatherComputePipelineLayout;
+		computeDesc.compute.nextInChain = nullptr;
+		computeDesc.compute.module = module;
+		computeDesc.compute.entryPoint = StringView("simulate");
+		computeDesc.compute.constantCount = 0;
+		computeDesc.compute.constants = nullptr;
+		ComputePipeline compute = wgpuDevice().createComputePipeline(computeDesc);
+
+		BlendState blend = Default;
+		blend.color.operation = BlendOperation::Add;
+		blend.color.srcFactor = BlendFactor::SrcAlpha;
+		blend.color.dstFactor = BlendFactor::OneMinusSrcAlpha;
+		blend.alpha.operation = BlendOperation::Add;
+		blend.alpha.srcFactor = BlendFactor::Zero;
+		blend.alpha.dstFactor = BlendFactor::One;
+		ColorTargetState targets[GBufferSlots];
+		colorTargets(ColorTargets::GBuffer, nullptr, targets);
+		targets[GColor].blend = &blend;
+		targets[GPosition].writeMask = ColorWriteMask::None;
+		targets[GNormal].writeMask = ColorWriteMask::None;
+		targets[GBloom].writeMask = ColorWriteMask::None;
+
+		DepthStencilState depth = Default;
+		depth.format = depthFormat;
+		depth.depthWriteEnabled = OptionalBool::False;
+		depth.depthCompare = CompareFunction::Less;
+		depth.stencilFront.compare = CompareFunction::Always;
+		depth.stencilFront.failOp = StencilOperation::Keep;
+		depth.stencilFront.depthFailOp = StencilOperation::Keep;
+		depth.stencilFront.passOp = StencilOperation::Keep;
+		depth.stencilBack = depth.stencilFront;
+		depth.stencilReadMask = 0;
+		depth.stencilWriteMask = 0;
+
+		RenderPipelineDescriptor desc = Default;
+		desc.label = StringView("world weather draw");
+		desc.layout = w.weatherDrawPipelineLayout;
+		desc.vertex.module = module;
+		desc.vertex.entryPoint = StringView("vs_weather");
+		desc.vertex.bufferCount = 0;
+		desc.vertex.buffers = nullptr;
+		desc.primitive.topology = PrimitiveTopology::TriangleStrip;
+		desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+		desc.primitive.frontFace = FrontFace::CCW;
+		desc.primitive.cullMode = CullMode::None;
+		desc.depthStencil = &depth;
+		desc.multisample.count = 1;
+		desc.multisample.mask = 0xFFFFFFFFu;
+		desc.multisample.alphaToCoverageEnabled = false;
+		FragmentState fragment = Default;
+		fragment.module = module;
+		fragment.entryPoint = StringView("fs_weather");
+		fragment.targetCount = GBufferSlots;
+		fragment.targets = targets;
+		desc.fragment = &fragment;
+		w.weatherDrawPipeline = wgpuDevice().createRenderPipeline(desc);
+
+		const bool invalid = scope.failed();
+		module.release();
+		if (compute && !invalid)
+		{
+			if (w.weatherComputePipeline) { w.weatherComputePipeline.release(); }
+			w.weatherComputePipeline = compute;
+		}
+		else if (compute)
+		{
+			compute.release();
+		}
+		return w.weatherDrawPipeline && w.weatherComputePipeline && !invalid;
+	}
+
+	// Into this frame's encoder, after the transparent faces: one step of the
+	// pool, then its draw, seen from render's camera.
+	void recordWeather(CommandEncoder encoder)
+	{
+		if (!w.weatherPending) { return; }
+		w.weatherPending = false;
+		if (!w.weatherComputePipeline || !w.weatherDrawPipeline || !w.weatherComputeBindGroup
+			|| !w.weatherDrawBindGroup || !encoder) { return; }
+
+		ComputePassDescriptor computeDesc = Default;
+		computeDesc.label = StringView("world weather simulation pass");
+		computeDesc.timestampWrites = nullptr;
+		ComputePassEncoder compute = encoder.beginComputePass(computeDesc);
+		compute.setPipeline(w.weatherComputePipeline);
+		compute.setBindGroup(0, w.weatherComputeBindGroup, 0, nullptr);
+		compute.dispatchWorkgroups((weatherPoolSize + 63) / 64, 1, 1);
+		compute.end();
+		compute.release();
+
+		if (!w.weatherDrawn) { return; }
+		RenderPassEncoder pass = beginGBufferPass(encoder, false, "world weather draw pass");
+		pass.setPipeline(w.weatherDrawPipeline);
+		pass.setBindGroup(0, w.weatherDrawBindGroup, 0, nullptr);
+		pass.draw(4, w.weatherDrawn * weatherQuadsPerParticle, 0, 0);
+		pass.end();
+		pass.release();
+		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "weather", "Weather pass: rain and snow particles");
 	}
 
 	bool createSky()
@@ -4643,7 +4867,8 @@ namespace
 	bool createPipelineSet()
 	{
 		return createPipelines() && createEntityPipelines() && createViewPipelines() && createSky()
-			&& createPost() && createBloom() && createHbao() && createRaysAndWarp() && createPrecipitation();
+			&& createPost() && createBloom() && createHbao() && createRaysAndWarp() && createPrecipitation()
+			&& createWeather();
 	}
 
 	// Every handle createPipelineSet assigns, for a reload to move aside,
@@ -4661,7 +4886,8 @@ namespace
 			&w.bloomFilterPipeline, &w.bloomDownPipeline, &w.bloomTentPipeline, &w.bloomUpPipeline,
 			&w.bloomBlurPipelines[0], &w.bloomBlurPipelines[1], &w.bloomApplyPipeline, &w.exposurePipeline,
 			&w.lastColorPipeline, &w.hbaoPipeline, &w.hbaoApplyPipeline,
-			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline };
+			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline,
+			&w.weatherDrawPipeline };
 		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
 		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
 		for (RenderPipeline &pipeline : w.viewPipelines) { onPipeline(pipeline); }
@@ -4671,7 +4897,8 @@ namespace
 			&w.entityPipelineLayout, &w.viewPipelineLayout, &w.skyBakePipelineLayout, &w.skyPipelineLayout,
 			&w.sunRaysPipelineLayout, &w.postPipelineLayout, &w.toneMapPipelineLayout, &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout,
 			&w.hbaoPipelineLayout, &w.hbaoApplyPipelineLayout, &w.rayMaskPipelineLayout, &w.rayBlurPipelineLayout,
-			&w.warpPipelineLayout, &w.precipitationPipelineLayout };
+			&w.warpPipelineLayout, &w.precipitationPipelineLayout,
+			&w.weatherComputePipelineLayout, &w.weatherDrawPipelineLayout };
 		for (PipelineLayout *layout : layouts) { onLayout(*layout); }
 	}
 
@@ -4691,6 +4918,7 @@ namespace
 
 		if (!createLayoutAndUniforms() || !createSkyResources() || !createPostResources() || !createBloomResources()
 			|| !createHbaoResources() || !createRaysAndWarpResources() || !createPrecipitationResources()
+			|| !createWeatherResources()
 			|| !createPipelineSet())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
@@ -4966,6 +5194,10 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	// dithered into the next.
 	uniforms.heldLight = glm::vec4((float)glm::clamp(lighting.heldLight, 0, 15), 12.f, 5.f, 0.45f);
 	w.frameHeldLight = uniforms.heldLight;
+	uniforms.wet = glm::vec4(glm::clamp(lighting.wetness, 0.f, 1.f), glm::clamp(lighting.rainOnGround, 0.f, 1.f), 0.f, 0.f);
+	w.framePsx = psx;
+	w.frameSurface = glm::vec2((float)width, (float)height);
+	w.frameProjectionScale = glm::vec2(projection[0][0], projection[1][1]);
 
 	// Milestone 13: the sun's cascades, camera-relative. GL's matrices
 	// take world positions to -1..1 depth; here the camera position is
@@ -5571,10 +5803,88 @@ void renderTransparent()
 	compositeFrame();
 }
 
+namespace
+{
+	// setPrecipitation's particles: the simulation's bind group (it names the
+	// column buffer), the anchor's step, and this frame's uniforms.
+	void setWeatherParticles(const Precipitation &precipitation)
+	{
+		if (!w.weatherComputeBindGroup)
+		{
+			BindGroupEntry entries[3] = { Default, Default, Default };
+			entries[0].binding = 0;
+			entries[0].buffer = w.weatherUniformBuffer;
+			entries[0].offset = 0;
+			entries[0].size = sizeof(WeatherUniforms);
+			entries[1].binding = 1;
+			entries[1].buffer = w.precipitationColumnBuffer;
+			entries[1].offset = 0;
+			entries[1].size = w.precipitationColumnCapacity * sizeof(glm::vec2);
+			entries[2].binding = 2;
+			entries[2].buffer = w.weatherParticleBuffer;
+			entries[2].offset = 0;
+			entries[2].size = weatherPoolSize * weatherParticleBytes;
+			BindGroupDescriptor groupDesc = Default;
+			groupDesc.label = StringView("world weather simulation bind group");
+			groupDesc.layout = w.weatherComputeBindGroupLayout;
+			groupDesc.entryCount = 3;
+			groupDesc.entries = entries;
+			w.weatherComputeBindGroup = wgpuDevice().createBindGroup(groupDesc);
+			if (!w.weatherComputeBindGroup) { return; }
+		}
+
+		// The frame's step, short enough that a hitch does not throw the
+		// pool through the floor. After a pause (no rain for a while, or
+		// the particles switched off), the pool is scattered afresh.
+		const auto now = std::chrono::steady_clock::now();
+		const double gap = std::chrono::duration<double>(now - w.weatherLastStep).count();
+		w.weatherLastStep = now;
+		bool scatter = !w.weatherScattered || gap > 0.5;
+		const float dt = (float)std::clamp(gap, 0.0, 1.0 / 20.0);
+
+		// The anchor: the camera's whole block. The pool moves by the step
+		// between the old anchor and the new, in whole blocks; a long jump
+		// (a teleport) scatters it instead.
+		const glm::dvec3 camera = w.frameCameraPosition;
+		const glm::dvec3 anchor = glm::floor(camera);
+		const glm::dvec3 step = w.weatherAnchor - anchor;
+		if (std::abs(step.x) > 48 || std::abs(step.y) > 48 || std::abs(step.z) > 48) { scatter = true; }
+		w.weatherAnchor = anchor;
+		w.weatherScattered = true;
+
+		static const auto start = std::chrono::steady_clock::now();
+		const double seconds = std::chrono::duration<double>(now - start).count();
+
+		const float intensity = glm::clamp(precipitation.intensity, 0.f, 1.f);
+		const float density = glm::clamp(precipitation.density, 0.f, 1.f);
+		w.weatherDrawn = (uint32_t)std::round(weatherPoolSize * intensity * density);
+
+		WeatherUniforms uniforms;
+		uniforms.viewProjection = w.frameViewProjection;
+		uniforms.camera = glm::vec4(glm::vec3(camera - anchor), dt);
+		uniforms.shift = glm::vec4(scatter ? glm::vec3(0.f) : glm::vec3(step), scatter ? 1.f : 0.f);
+		// Half a block inside the column map, so every particle has a column.
+		const float half = std::max(precipitation.size * 0.5f - 1.f, 1.f);
+		uniforms.box = glm::vec4(half, 14.f, (float)w.weatherDrawn, (float)weatherPoolSize);
+		uniforms.corner = glm::ivec4((int)(precipitation.corner.x - anchor.x), (int)(precipitation.corner.y - anchor.z),
+			precipitation.size, w.weatherFrame++);
+		uniforms.params = glm::vec4(intensity, (float)std::fmod(seconds, 3600.0), precipitation.brightness, (float)anchor.y);
+		uniforms.wind = glm::vec4(precipitation.wind, 0.f, 0.f, 0.f);
+		uniforms.held = w.frameHeldLight;
+		uniforms.psx = glm::vec4(w.framePsx.x, (float)weatherQuadsPerParticle, 0.f, 0.f);
+		const glm::vec2 pixels = w.framePsx.x > 0.f ? glm::vec2(w.framePsx.y, w.framePsx.z) : w.frameSurface;
+		uniforms.pixels = glm::vec4(pixels, w.frameProjectionScale);
+		wgpuQueue().writeBuffer(w.weatherUniformBuffer, 0, &uniforms, sizeof(uniforms));
+
+		w.weatherPending = true;
+	}
+}
+
 void setPrecipitation(const Precipitation &precipitation)
 {
 	w.precipitationPending = false;
 	w.precipitationColumns = 0;
+	w.weatherPending = false;
 	if (!w.initialized || precipitation.intensity <= 0 || precipitation.size <= 0) { return; }
 	const uint32_t count = (uint32_t)(precipitation.size * precipitation.size);
 	if (precipitation.columns.size() < count) { return; }
@@ -5583,6 +5893,9 @@ void setPrecipitation(const Precipitation &precipitation)
 	if (!ensureBuffer(w.precipitationColumnBuffer, w.precipitationColumnCapacity, count, sizeof(glm::vec2),
 		BufferUsage::Storage, "world precipitation columns", grown)) { return; }
 	wgpuQueue().writeBuffer(w.precipitationColumnBuffer, 0, precipitation.columns.data(), count * sizeof(glm::vec2));
+	if (grown && w.weatherComputeBindGroup) { w.weatherComputeBindGroup.release(); w.weatherComputeBindGroup = nullptr; }
+
+	if (precipitation.particles) { setWeatherParticles(precipitation); return; }
 
 	if (grown || !w.precipitationBindGroup)
 	{
@@ -5926,6 +6239,27 @@ void shutdown()
 	}
 	w.precipitationColumnCapacity = 0;
 	w.precipitationPending = false;
+	// Weather particles.
+	for (BindGroup *group : { &w.weatherComputeBindGroup, &w.weatherDrawBindGroup })
+	{
+		if (*group) { group->release(); *group = nullptr; }
+	}
+	if (w.weatherComputePipeline) { w.weatherComputePipeline.release(); w.weatherComputePipeline = nullptr; }
+	if (w.weatherDrawPipeline) { w.weatherDrawPipeline.release(); w.weatherDrawPipeline = nullptr; }
+	for (PipelineLayout *layout : { &w.weatherComputePipelineLayout, &w.weatherDrawPipelineLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (BindGroupLayout *layout : { &w.weatherComputeBindGroupLayout, &w.weatherDrawBindGroupLayout })
+	{
+		if (*layout) { layout->release(); *layout = nullptr; }
+	}
+	for (Buffer *buffer : { &w.weatherUniformBuffer, &w.weatherParticleBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
+	w.weatherPending = false;
+	w.weatherScattered = false;
 	if (w.blackView) { w.blackView.release(); w.blackView = nullptr; }
 	if (w.blackTexture) { w.blackTexture.destroy(); w.blackTexture.release(); w.blackTexture = nullptr; }
 	for (RenderPipeline *pipeline : { &w.toneMapToTexturePipeline, &w.toneMapToSurfacePipeline, &w.fxaaPipeline })

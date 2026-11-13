@@ -2146,6 +2146,38 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		indoors += (target - indoors) * step;
 		lighting.indoors = indoors;
 	}
+	// The rain on the ground: it gets wetter while rain (not snow, and not
+	// in the desert) falls where the camera is, and dries after. The first
+	// frame starts as wet as the weather would have made it.
+	{
+		float rainHere = 0;
+		if (Chunk *chunk = chunkSystem.getChunkSafeFromBlockPos(blockPosition.x, blockPosition.z))
+		{
+			static const bool environmentRain = []()
+			{
+				const char *env = std::getenv("OURCRAFT_PRECIPITATION");
+				return env && std::string(env) == "rain";
+			}();
+			int kind = precipitationForColumn(chunk->data.biome, blockPosition.y, weather.rain, weather.snow);
+			if (precipitationPreview) { kind = precipitationPreview; }
+			else if (environmentRain) { kind = precipitationRain; }
+			if (kind == precipitationRain) { rainHere = glm::clamp(weather.rain, 0.f, 1.f); }
+		}
+		static bool started = false;
+		if (!started) { started = true; groundWetness = rainHere; }
+		constexpr float secondsToSoak = 30.f, secondsToDry = 120.f;
+		if (rainHere > 0) { groundWetness += rainHere * deltaTime / secondsToSoak; }
+		else { groundWetness -= deltaTime / secondsToDry; }
+		static const float environmentWetness = []()
+		{
+			const char *env = std::getenv("OURCRAFT_WETNESS");
+			return env ? (float)std::atof(env) : -1.f;
+		}();
+		if (environmentWetness >= 0) { groundWetness = environmentWetness; }
+		groundWetness = glm::clamp(groundWetness, 0.f, 1.f);
+		lighting.wetness = wetGround ? groundWetness : 0.f;
+		lighting.rainOnGround = underWater ? 0.f : rainHere;
+	}
 	// Milestone 15: the tone mapper's and FXAA's settings, as GL sets them.
 	lighting.tonemapper = getShadingSettings().tonemapper;
 	// Milestone G2: the screen effects on top (the weather's overcast holds
@@ -2230,6 +2262,15 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 			precipitation.brightness = std::max(skyLightIntensity / 15.f, 0.08f) * 0.9f;
 			precipitation.wind = 0.2f * weather.rain * weather.rain;
 			precipitation.columns.assign(precipitation.size * precipitation.size, glm::vec2(0));
+			static const bool sheetsFromEnvironment = []()
+			{
+				const char *env = std::getenv("OURCRAFT_PRECIPITATION_STYLE");
+				return env && std::string(env) == "sheets";
+			}();
+			static bool styleChosen = false;
+			if (!styleChosen) { styleChosen = true; if (sheetsFromEnvironment) { precipitationParticles = false; } }
+			precipitation.particles = precipitationParticles;
+			precipitation.density = precipitationDensity;
 
 			static const int environmentPreview = []()
 			{
@@ -2259,7 +2300,9 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 
 					float kind = (float)precipitationForColumn(chunk->data.biome, top, weather.rain, weather.snow);
 					if (preview) { kind = (float)preview; }
-					precipitation.columns[i + j * precipitation.size] = glm::vec2((float)top, kind);
+					// A block is centred on its whole number: block y's top
+					// face is at y + 0.5, half a block under `top`.
+					precipitation.columns[i + j * precipitation.size] = glm::vec2((float)top - 0.5f, kind);
 				}
 		}
 		wgpuWorld::setPrecipitation(precipitation);

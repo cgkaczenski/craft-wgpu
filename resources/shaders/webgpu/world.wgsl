@@ -64,6 +64,9 @@ struct Uniforms {
     // the player (0-15; 0 none), y its reach in blocks, z its bands, w how
     // much of a band is dithered into the next.
     heldLight: vec4f,
+    // The rain on the ground (chunkFaces.wgsl's groundWet): x how wet it is,
+    // 0..1, y how hard it rains now, 0..1 (the rings in the puddles).
+    wet: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

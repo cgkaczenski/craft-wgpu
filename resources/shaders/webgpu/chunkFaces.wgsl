@@ -130,7 +130,8 @@ struct VertexOutput {
     // Camera-relative position, for the view direction.
     @location(3) relative: vec3f,
     @location(4) @interpolate(flat) normal: vec3f,
-    // Flag bits: 0 water, 1 in water, 4-7 the AO shape.
+    // Flag bits: 0 water, 1 in water, 4-7 the AO shape; 8 the top of a cube
+    // (not in the face's data: faceVertex sets it), where puddles lie.
     @location(5) @interpolate(flat) flags: u32,
     // The block's position and the point within it (GL's fragmentPositionI
     // and fragmentPositionF), for the point lights.
@@ -195,6 +196,8 @@ fn cornerShape(row: i32, corner: u32) -> vec3f {
 const layerMask = 0x00FFFFFFu;
 
 fn wrapCell(a: i32, n: i32) -> i32 { return ((a % n) + n) % n; }
+
+const topOfCubeFlag = 256u;
 
 // A texture across span x span blocks: which of its slices this block's face
 // shows. The slices go up the texture array from the bottom row, left to
@@ -347,7 +350,7 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     out.ambientMultiplier = ambientMultiplier;
     out.relative = relative;
     out.normal = normal;
-    out.flags = flags;
+    out.flags = flags | select(0u, topOfCubeFlag, orientation == 2);
     out.blockPos = blockPosition;
     out.inBlock = shape;
     out.light = light;
@@ -485,6 +488,117 @@ fn readTexels(in: VertexOutput) -> Texels {
     return t;
 }
 
+// ---- The rain on the ground -----------------------------------------------
+// While it rains (u.wet.x rises, and falls again after), what the open sky
+// reaches gets wet: darker and shinier. Past a point puddles fill on the
+// tops of blocks, in the low places of a height made of noise, so they grow
+// from their middles as it goes on raining and shrink back as it dries. A
+// puddle is flat and smooth: it mirrors the sky and what stands around it
+// (reflectPuddle), more the shallower the view. While rain falls, rings
+// spread on it.
+//
+// All of it per texel of the world's grid, 16 to a block, as the held light
+// is: a puddle's edge runs along texels and its rings are made of them, like
+// the pictures on the blocks. In whole numbers, so it is the same however
+// far the world is from the origin.
+
+// Three numbers 0..1 for a point of a whole-number grid and a `salt`.
+fn groundHash(p: vec2i, salt: i32) -> vec3f {
+    var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xd8163841u ^ bitcast<u32>(salt) * 0xcb1ab31fu;
+    h = (h ^ (h >> 15u)) * 0x2c1b3c6du;
+    h = (h ^ (h >> 12u)) * 0x297a2d39u;
+    h = h ^ (h >> 15u);
+    let h2 = (h ^ (h >> 16u)) * 0x7feb352du;
+    let h3 = (h2 ^ (h2 >> 15u)) * 0x846ca68bu;
+    return vec3f(f32(h >> 8u), f32(h2 >> 8u), f32(h3 >> 8u)) / 16777216.0;
+}
+
+// Which cell of `size` texels a texel is in (rounding down, below zero too).
+fn groundCell(texel: vec2i, size: i32) -> vec2i {
+    return (texel - vec2i(wrapCell(texel.x, size), wrapCell(texel.y, size))) / size;
+}
+
+// Smooth noise 0..1 over the world's texels, `period` texels from one of its
+// lattice points to the next.
+fn groundNoise(texel: vec2i, period: i32, salt: i32) -> f32 {
+    let cell = groundCell(texel, period);
+    let f = (vec2f(texel - cell * period) + 0.5) / f32(period);
+    let s = f * f * (3.0 - 2.0 * f);
+    let a = groundHash(cell, salt).x;
+    let b = groundHash(cell + vec2i(1, 0), salt).x;
+    let c = groundHash(cell + vec2i(0, 1), salt).x;
+    let d = groundHash(cell + vec2i(1, 1), salt).x;
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+// Puddles start to fill when the ground is this wet.
+const puddlesFrom = 0.3;
+// The rings: one drop at a time lands somewhere in each cell of this many
+// texels, and its ring spreads this many texels before it is gone.
+const ringCell = 12;
+const ringReach = 7.0;
+
+struct WetGround {
+    amount: f32,   // how wet the face is, 0..1
+    puddle: f32,   // how much of a puddle this texel is, 0..1
+    slope: vec2f,  // the rings' tilt of the puddle's surface, along x and z
+    crest: f32,    // a ring's crest (above 0) or the trough beside it (below), -1..1
+};
+
+fn groundWet(in: VertexOutput, levels: LightLevels, water: bool) -> WetGround {
+    var g: WetGround;
+    g.amount = 0.0;
+    g.puddle = 0.0;
+    g.slope = vec2f(0.0);
+    g.crest = 0.0;
+    // Not under the snow weather's cover, not water or what is under it,
+    // and not what faces down.
+    let wetness = u.wet.x * (1.0 - u.snowFog.w);
+    if (wetness <= 0.0 || water || (in.flags & 2u) != 0u || in.normal.y < -0.5) { return g; }
+    // Where the open sky reaches (the baked sky light, 15 under it and a
+    // level less a block sideways), fading out under a roof's edge. The
+    // tops of things take the rain whole, their sides some of it.
+    let open = clamp(f32(levels.skyUnchanged - 12) / 3.0, 0.0, 1.0);
+    g.amount = wetness * open * mix(0.6, 1.0, max(in.normal.y, 0.0));
+
+    if ((in.flags & topOfCubeFlag) == 0u || wetness <= puddlesFrom || open < 1.0) { return g; }
+    let texel = in.blockPos.xz * 16 + vec2i(clamp(floor((in.inBlock.xz + 0.5) * 16.0), vec2f(0.0), vec2f(15.0)));
+    // The ground's height, for the water to find the low places of:
+    // hollows two blocks or so across, with smaller ones in them.
+    let height = 0.6 * groundNoise(texel, 34, 1) + 0.4 * groundNoise(texel, 14, 2);
+    let level = mix(0.2, 0.37, smoothstep(puddlesFrom, 1.0, wetness));
+    let depth = level - height;
+    if (depth <= 0.0) { return g; }
+    g.puddle = smoothstep(0.0, 0.025, depth);
+
+    // The rings, from this cell's drop and its eight neighbours'. Each cell
+    // has its own pace; each drop of a cell lands somewhere else in it, and
+    // the lighter the rain, the more of them are skipped.
+    let rain = u.wet.y;
+    if (rain <= 0.0) { return g; }
+    let cell = groundCell(texel, ringCell);
+    let local = vec2f(texel - cell * ringCell) + 0.5;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let c = cell + vec2i(i, j);
+            let pace = groundHash(c, 3);
+            let clock = u.animation.x / (0.8 + 0.9 * pace.x) + pace.y * 7.0;
+            let drop = groundHash(c, 4 + i32(floor(clock)));
+            if (drop.z > rain * 0.85) { continue; }
+            let t = fract(clock);
+            let away = local - (vec2f(f32(i), f32(j)) + drop.xy) * f32(ringCell);
+            let distance = length(away);
+            // A crest with a trough either side of it, flattening out as
+            // it spreads.
+            let across = (distance - t * ringReach) / 1.3;
+            let ring = exp(-across * across * 0.5) * (1.0 - t);
+            g.crest += cos(across * 2.2) * ring;
+            g.slope += away / max(distance, 0.001) * sin(across * 2.2) * ring;
+        }
+    }
+    return g;
+}
+
 // A face lit: what fs_main and fs_blend both start from.
 struct Shaded {
     color: vec3f,   // linear light
@@ -494,6 +608,8 @@ struct Shaded {
     bloom: vec3f,   // the emissive light for bloom
     dotNV: f32,
     F0: vec3f,      // the reflectance at normal incidence
+    puddle: f32,    // how much of a puddle it is, 0..1 (groundWet)
+    crest: f32,     // a puddle's ring's crest (above 0) or trough (below)
 };
 
 // defaultShader.frag's lit path (u_shaders on), fog aside.
@@ -536,11 +652,28 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
         m.metallic = mix(m.metallic, 0.0, cover);
     }
 
+    // The rain on the ground: wet, it is darker and shinier (though not
+    // smooth enough for reflectSurface's reflections); a puddle is darker
+    // still, and as smooth as water.
+    let wet = groundWet(in, levels, water);
+    if (wet.amount > 0.0) {
+        albedo *= mix(1.0, 0.62, wet.amount);
+        m.roughness = mix(m.roughness, max(m.roughness * 0.5, 0.46), wet.amount);
+        albedo *= mix(1.0, 0.7, wet.puddle);
+        m.roughness = mix(m.roughness, 0.07, wet.puddle);
+        m.metallic = mix(m.metallic, 0.0, wet.puddle);
+    }
+
     // Water's normal is GL's moving normal.png (18-parity), the rest the
-    // block's own normal map.
+    // block's own normal map. A puddle lies flat over the block's bumps,
+    // tilted only by its rings.
     var normalTexel = t.normalMap;
     if (water) { normalTexel = waterNormalTexel(t.water); }
-    let N = applyNormalMap(in.normal, normalTexel, frontFacing);
+    var N = applyNormalMap(in.normal, normalTexel, frontFacing);
+    if (wet.puddle > 0.0) {
+        let surface = normalize(in.normal + vec3f(wet.slope.x, 0.0, wet.slope.y) * 0.35);
+        N = normalize(mix(N, surface, wet.puddle));
+    }
 
     // The caustics: light rippling on faces under water (flag bit 1), on
     // the point lights and the sun.
@@ -554,6 +687,7 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     let V = -normalize(in.relative);
     var F0 = mix(vec3f(0.04), albedo, m.metallic);
     if (water) { F0 = vec3f(0.021, 0.021, 0.05); }
+    F0 = mix(F0, vec3f(0.02), wet.puddle);
 
     var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0, caustics);
     let sun = sunLight(levels, m.metallic, m.roughness, V, albedo, N, F0, ao, shadow, caustics);
@@ -580,6 +714,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     // The brightest caustics glow (GL adds this to out_bloom with the sun).
     if (causticsPower > 1.2) { s.bloom += max(sun, vec3f(4.0)) * 0.0008; }
     s.F0 = F0;
+    s.puddle = wet.puddle;
+    s.crest = wet.crest;
     return s;
 }
 
@@ -728,6 +864,42 @@ fn fresnelSchlickRoughness(cosTheta: f32, F0: vec3f, roughness: f32) -> vec3f {
     return F0 + (max(vec3f(1.0 - roughness), F0) - F0) * pow(max(1.0 - cosTheta, 0.0), 5.0);
 }
 
+// The sky's colour in a direction, from the sky as drawn behind this frame
+// (skyColor): where on the screen that direction is, or the nearest edge
+// when it is off it. For a mirror that finds nothing else to show.
+fn skyToward(direction: vec3f) -> vec3f {
+    let clip = u.viewProjection * vec4f(direction, 0.0);
+    var uv = vec2f(0.5, 0.0); // behind the camera: the top of the screen
+    if (clip.w > 0.0001) { uv = clamp(vec2f(clip.x, -clip.y) / clip.w * 0.5 + 0.5, vec2f(0.0), vec2f(1.0)); }
+    let size = vec2f(textureDimensions(skyColor));
+    return textureLoad(skyColor, clamp(vec2i(uv * size), vec2i(0), vec2i(size) - 1), 0).rgb;
+}
+
+// A puddle's mirror: what the reflected ray lands on (with the SSR setting
+// on), or the sky that way. Little of it looking straight down, where the
+// ground shows through, and most of it at a shallow angle; a ring's crest
+// catches more of it and its trough less, which is what shows the rings
+// under a sky that is the same grey all over.
+fn reflectPuddle(in: VertexOutput, s: Shaded) -> Reflection {
+    var r: Reflection;
+    r.found = false;
+    let V = -normalize(in.relative);
+    var mirrored = skyToward(reflect(-V, s.normal));
+    if (u.lightParams.w != 0) {
+        let viewPos = (u.view * vec4f(in.relative, 1.0)).xyz;
+        let viewSpaceNormal = normalize((u.view * vec4f(s.normal, 0.0)).xyz);
+        let found = ssr(viewPos, in.normal, s.roughness * s.roughness, in.relative, V, viewSpaceNormal);
+        if (found.found) {
+            mirrored = found.color;
+            r.found = true;
+        }
+    }
+    let shallow = pow(1.0 - clamp(s.dotNV, 0.0, 1.0), 3.0);
+    let strength = clamp(0.12 + 0.88 * shallow + clamp(s.crest, -1.0, 1.0) * 0.3, 0.0, 1.0) * s.puddle;
+    r.color = mix(s.color, mirrored, strength);
+    return r;
+}
+
 // defaultShader.frag's "ssr" block, with the SSR setting on, on faces
 // smoother than 0.45. GL reads the face's view position from last frame's
 // positions at the pixel; this uses the face's own, which is the same
@@ -736,6 +908,7 @@ fn fresnelSchlickRoughness(cosTheta: f32, F0: vec3f, roughness: f32) -> vec3f {
 // else mixes it in by its fresnel and roughness. The ray steps by the
 // face's own normal for water (GL's v_normal), the mapped one otherwise.
 fn reflectSurface(in: VertexOutput, s: Shaded) -> Reflection {
+    if (s.puddle > 0.0) { return reflectPuddle(in, s); }
     var r: Reflection;
     r.color = s.color;
     r.found = false;

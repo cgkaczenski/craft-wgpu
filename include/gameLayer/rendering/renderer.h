@@ -115,6 +115,18 @@ struct Renderer
 	// Milestone G1b: 0 the biome picks rain or snow, 1 rain everywhere, 2
 	// snow everywhere (the debug panel; OURCRAFT_PRECIPITATION=rain|snow).
 	int precipitationPreview = 0;
+	// Rain and snow as particles (weather.wgsl) or as the column sheets
+	// (precipitation.wgsl); OURCRAFT_PRECIPITATION_STYLE=sheets starts with
+	// the sheets. And how much of the particle pool falls at full intensity.
+	bool precipitationParticles = true;
+	float precipitationDensity = 0.6f;
+	// Wet ground and puddles: how wet the ground is, 0..1. It rises while
+	// rain falls where the camera is (about half a minute of full rain to
+	// soaked) and dries in a couple of minutes after; puddles fill past 0.3
+	// (chunkFaces.wgsl). OURCRAFT_WETNESS=0..1 holds it, for scripted
+	// screenshots.
+	bool wetGround = true;
+	float groundWetness = 0;
 
 	// How much the sun shines into the lens, 0..1: on screen, toward the
 	// middle, not behind blocks or clouds. The lens flare measures it each
