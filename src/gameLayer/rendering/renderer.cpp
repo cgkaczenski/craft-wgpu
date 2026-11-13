@@ -1676,6 +1676,16 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 			i == ModelsManager::crateModel, noRotation(i));
 	}
 
+	// A face's orientation keeps its row in 13 bits: bits 13-15 carry flowing
+	// water's level (Chunk::bake, chunkFaces.wgsl). More rows than that and
+	// model faces would be read as water and drawn as the wrong row.
+	const size_t orientationCount = newVertexData.size() / 12;
+	if (orientationCount > 8192)
+	{
+		std::cerr << "Block geometry: " << orientationCount
+			<< " orientations, more than the 8192 a face can address\n";
+	}
+
 	wgpuWorld::setBlockGeometry(newVertexData, newUVData);
 }
 

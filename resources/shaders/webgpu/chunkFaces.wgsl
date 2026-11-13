@@ -5,8 +5,9 @@
 // One instance per block face, read from the face arena with instance step
 // mode: the same 16 bytes Chunk::bake writes for OpenGL (bigGpuBuffer.cpp's
 // setupVertexAttributes):
-//   bytes 0-1  orientation (short): which corner table row, 0-5 cube faces,
-//              6-9 grass, 10-15 leaves, 22-35 water, then models
+//   bytes 0-1  orientation (short): low 13 bits the corner table row, 0-5
+//              cube faces, 6-9 grass, 10-15 leaves, 22-35 water, then
+//              models; bits 13-15 flowing water's level (water faces only)
 //   bytes 2-3  texture index (short): low 11 bits the texture, high 5 colors
 //   bytes 4-15 block position (ivec3, world blocks); y packs light in bits
 //              16-23 and flags in 24-31 (flag bit 0: water)
@@ -292,13 +293,13 @@ fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, waterLevel
 // One corner of a face, placed by the camera: what every vertex entry point
 // starts from.
 fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
-    // Water faces carry the flowing water's level in bits 8-10.
-    var orientation = face.orientationAndTexture.x;
-    var waterLevel = 0.0;
-    if (orientation >= 256) {
-        waterLevel = f32((orientation >> 8u) & 7);
-        orientation = orientation & 0xFF;
-    }
+    // Water faces carry the flowing water's level in bits 13-15, above every
+    // orientation: the corner table has over 5000 rows (the models), so the
+    // orientation needs the low 13 bits. The attribute is a signed short, so
+    // a level of 4 or more arrives negative: read its 16 bits unsigned.
+    let orientationBits = u32(face.orientationAndTexture.x) & 0xFFFFu;
+    let waterLevel = f32(orientationBits >> 13u);
+    let orientation = i32(orientationBits & 0x1FFFu);
     let textureIndex = u32(face.orientationAndTexture.y) & 0x07FFu;
     let colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
 

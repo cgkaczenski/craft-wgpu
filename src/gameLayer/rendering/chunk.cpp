@@ -1801,8 +1801,12 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 
 		const bool blockIsWater = b.getType() == BlockTypes::water;
 		const int ownWaterStep = (blockIsWater && lod == 0) ? waterSurfaceStep(&b, sides[TOP]) : 0;
-		// The shader lowers the water faces' top corners by this (shape bits 8-10).
-		const int waterLevelBits = ownWaterStep > 0 ? (ownWaterStep << 8) : 0;
+		// The shader lowers the water faces' top corners by this (shape bits
+		// 13-15). They sit above every corner table row: the models' rows run
+		// past 5000, and with the level in bits 8-10 the shader read model faces
+		// at row 256 and beyond as water with a level, and drew them as the wrong
+		// row (row & 0xFF), such as a 2x2-block LOD face against a wall.
+		const int waterLevelBits = ownWaterStep > 0 ? (ownWaterStep << 13) : 0;
 
 		for (int index = 0; index < 6; index++)
 		{
