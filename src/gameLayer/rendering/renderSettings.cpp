@@ -245,9 +245,12 @@ good performance.\n-Fancy: significant performance cost but looks very nice.");
 
 	//programData.menuRenderer.BeginMenu("Volumetric", Colors_Gray, programData.buttonTexture);
 	//programData.menuRenderer.Text("Volumetric Settings...", Colors_White);
-	programData.ui.menuRenderer.sliderFloat("Fog gradient (O to disable it)",
-		&getShadingSettings().fogGradient,
-		0, 100, Colors_White, programData.ui.buttonTexture, Colors_Gray,
+	// The horizon fog, in the sky's colour, that hides the chunks still
+	// being drawn. (GL's near haze, the fogGradient, is in the debug
+	// window's "normal fog".)
+	programData.ui.menuRenderer.sliderFloat("Horizon fog",
+		&getShadingSettings().horizonFog,
+		0, 1, Colors_White, programData.ui.buttonTexture, Colors_Gray,
 		programData.ui.buttonTexture, Colors_White);
 	//programData.menuRenderer.EndMenu();
 
@@ -820,6 +823,7 @@ void saveShadingSettings()
 	SET_FLOAT(bloomMultiplier);
 	SET_FLOAT(exposure);
 	SET_FLOAT(fogGradient);
+	SET_FLOAT(horizonFog);
 
 
 	SET_FLOAT(toneMapSaturation);
@@ -918,6 +922,7 @@ void loadShadingSettings()
 		GET_FLOAT(bloomTresshold);
 		GET_FLOAT(bloomMultiplier);
 		GET_FLOAT(fogGradient);
+		GET_FLOAT(horizonFog);
 
 	}
 
@@ -1612,6 +1617,7 @@ void ShadingSettings::normalize()
 
 	exposure = glm::clamp(exposure, -2.f, 2.f);
 	fogGradient = glm::clamp(fogGradient, 0.f, 100.f);
+	horizonFog = glm::clamp(horizonFog, 0.f, 1.f);
 
 
 	toneMapSaturation = glm::clamp(toneMapSaturation, 0.f, 2.f);

@@ -227,6 +227,11 @@ namespace wgpuWorld
 		uint32_t moonTexture = 0;
 		float fogDistance = 100;  // GL's u_fogDistance: the view distance less a chunk
 		float fogGradient = 16;   // the fogGradient setting; 0 turns the near fog off
+		// The horizon fog: how far the world is drawn whole, in blocks (the
+		// nearest chunk not drawn yet, eased; never past fogDistance), and
+		// where the fog starts, as a share of that.
+		float fogReach = 100;
+		float horizonFogStart = 0.6f;
 		bool underWater = false;  // GL fogs only above water
 		// Milestone G1, the weather: how far the sky goes to grey (and the sun
 		// and moon fade) and how much darker that grey is, both 0..1; and

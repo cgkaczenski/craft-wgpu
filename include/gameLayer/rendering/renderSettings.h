@@ -65,6 +65,9 @@ struct ShadingSettings
 
 	float exposure = 0;
 	float fogGradient = 16.f;
+	// The horizon fog: how thick, 0 (only the world's edge fades into the
+	// sky) to 1 (the fog starts close by).
+	float horizonFog = 0.4f;
 	int bloom = 1;
 
 	int SSR = 1;

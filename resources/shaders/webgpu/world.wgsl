@@ -72,6 +72,12 @@ struct Uniforms {
     // y the wind, 0..1, z how dense, 0..1, w a clump of short grass's
     // blades next to the camera (0: no clumps).
     grass: vec4f,
+    // The horizon fog (chunkFaces.wgsl's computeFog): x how far from the
+    // camera the world has gone wholly into the sky, in blocks, y where the
+    // fog starts. x follows the nearest chunk not drawn yet, so the fog
+    // hides it, and draws back to the view distance as the chunks come in
+    // (Renderer's horizon fog).
+    horizonFog: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

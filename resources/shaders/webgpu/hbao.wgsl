@@ -20,7 +20,8 @@ struct HbaoUniforms {
     view: mat4x4f,
     // The camera's projection (x, y and w rows as GL's u_projection).
     projection: mat4x4f,
-    // x u_viewDistance ((squareSize / 2) * 16), yzw unused.
+    // x u_viewDistance ((squareSize / 2) * 16); y, z where the horizon fog
+    // is whole and where it starts (world.wgsl's horizonFog); w unused.
     params: vec4f,
 };
 @group(0) @binding(0) var<uniform> hbao: HbaoUniforms;
@@ -147,9 +148,21 @@ fn aoFog(dist: f32) -> f32 {
     return pow(rez, 16.0);
 }
 
+// What the horizon fog leaves of a surface (chunkFaces.wgsl's
+// horizonFogAmount): the darkening goes with it, or a fogged building's
+// creases show as lines in the sky.
+fn aoHorizonFog(distance: f32) -> f32 {
+    let end = hbao.params.y;
+    if (end <= 0.0) { return 1.0; }
+    let start = min(hbao.params.z, end - 1.0);
+    let t = clamp((distance - start) / (end - start), 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
+
 @fragment
 fn fs_apply(in: HbaoOutput) -> @location(0) vec4f {
-    let dist = -textureSampleLevel(positionTexture, linearSampler, in.uv, 0.0).z;
+    let position = textureSampleLevel(positionTexture, linearSampler, in.uv, 0.0).xyz;
+    let dist = -position.z;
     // GL's offsets -2..1 run up the screen; v runs down here, so y is
     // negated to cover the same 4x4 box.
     let texelSize = 1.0 / vec2f(textureDimensions(aoTexture));
@@ -160,5 +173,5 @@ fn fs_apply(in: HbaoOutput) -> @location(0) vec4f {
         }
     }
     aoValue /= 16.0;
-    return vec4f(0.0, 0.0, 0.0, aoValue * 1.45 * aoFog(dist));
+    return vec4f(0.0, 0.0, 0.0, aoValue * 1.45 * aoFog(dist) * aoHorizonFog(length(position)));
 }

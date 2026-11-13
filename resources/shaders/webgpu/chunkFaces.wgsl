@@ -332,11 +332,12 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     // A tall-grass sprite where blades grow instead: toward the camera it
     // loses its texels one by one (spriteDissolved) while its tuft's blades
     // come in one by one (vs_blade, by the same distance), so neither is
-    // seen to shrink or grow. Wholly gone, it is no more than a point. Not
-    // in the sun's shadow maps: there the sprite stays, and its shadow is
-    // the tuft's (the blades cast none).
+    // seen to shrink or grow. Wholly gone, it is no more than a point. The
+    // same in the nearest of the sun's shadow maps, where the blades cast
+    // their own shadows (vs_bladeShadow); in the farther two the sprite
+    // stays, and its shadow is the tuft's.
     var dissolve = 0.0;
-    if ((flags & tallGrassFlag) != 0u && u.grass.x > 0.0 && !forShadow) {
+    if ((flags & tallGrassFlag) != 0u && u.grass.x > 0.0 && (!forShadow || shadowCascade == 0u)) {
         let away = length(vec2f(blockPosition.xz - u.positionInt.xz) - u.positionFloat.xz);
         dissolve = 1.0 - bladeSpriteShare(away);
         if (dissolve >= 1.0) { shape = vec3f(0.0, -0.5, 0.0); }
@@ -559,6 +560,25 @@ fn bladeAlbedo(in: VertexOutput, own: vec4f) -> vec4f {
 
 @vertex
 fn vs_blade(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    return bladeVertex(vertexIndex, instance);
+}
+
+// The blades into the nearest cascade of the sun's shadow maps (wgpuWorld's
+// bladeShadowPipeline): the same blades, placed by the cascade's matrix, so
+// the ground under them and anything beside them takes their shadow. The
+// tall-grass sprites give way to them there as on screen (faceVertex), so a
+// tuft's shadow is the blades', not the sprite's as well. Not the farther
+// cascades: a blade is less than a texel of them. The blades take no
+// shadow of their own (shade asks from above their block).
+@vertex
+fn vs_bladeShadow(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    var out = bladeVertex(vertexIndex, instance);
+    if (out.blade.x <= 0.0) { return out; }
+    out.position = u.shadowMatrices[0] * vec4f(out.relative, 1.0);
+    return out;
+}
+
+fn bladeVertex(vertexIndex: u32, instance: u32) -> VertexOutput {
     var out: VertexOutput;
     out.position = bladeHidden;
 
@@ -1275,10 +1295,10 @@ fn reflectSurface(in: VertexOutput, s: Shaded) -> Reflection {
 // how much of the lit color is left at `dist` blocks from the camera, the
 // rest going to the sky behind. A near haze thickening with distance, more
 // so low down (airDensity grows with height above 60), and a hard edge at
-// u_fogDistance so the world's end fades into the sky. GL's rainStrength was
-// a constant 0 there; milestone G1 feeds it from the weather (fogParams.w):
-// rain thins the density a little, flattens the height falloff and raises
-// the haze. GL's time-of-day term (tmult) was commented out, its rain end
+// u_fogDistance so the world's end fades into the sky (here the horizon fog
+// instead, horizonFogAmount). GL's rainStrength was a constant 0 there;
+// milestone G1 feeds it from the weather (fogParams.w): rain thins the
+// density a little, flattens the height falloff and raises the haze. GL's time-of-day term (tmult) was commented out, its rain end
 // kept here: tmult = rainStrength. GL divides by the near fog's density, so
 // its setting of 0 ("disables" the near fog, by the menu) makes a NaN; here 0
 // skips it.
@@ -1299,8 +1319,22 @@ fn computeFog(distance: f32, fragmentHeight: f32) -> f32 {
             * clamp((eyeBrightnessSmooth / 255.0 - 2.0 / 16.0) * 4.0, 0.0, 1.0);
     }
 
-    let far = pow(exp(-pow(distance / u.fogParams.x, 32.0)), 0.10);
-    return far * far * near;
+    return (1.0 - horizonFogAmount(distance)) * near;
+}
+
+// The horizon fog: how much of the world has gone into the sky behind it at
+// `distance` blocks, 0..1. A PlayStation's fog, by distance alone, from
+// u.horizonFog.y to wholly at u.horizonFog.x, which the renderer keeps short
+// of the nearest chunk not drawn yet: a chunk still to come is a hole that
+// shows the sky, and the fog is the sky's colour, so it is not seen. GL's
+// was a hard edge at u_fogDistance (exp(-(d/fogDistance)^32)), which hid
+// nothing on the way.
+fn horizonFogAmount(distance: f32) -> f32 {
+    let end = u.horizonFog.x;
+    let start = min(u.horizonFog.y, end - 1.0);
+    let t = clamp((distance - start) / (end - start), 0.0, 1.0);
+    // Gentle at first, most of it toward the end.
+    return t * t * (3.0 - 2.0 * t);
 }
 
 // GL's last step: the color toward the sky behind it, above water; then

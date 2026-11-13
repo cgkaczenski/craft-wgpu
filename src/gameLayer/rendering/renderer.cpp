@@ -1980,6 +1980,30 @@ namespace
 	}
 }
 
+// How far from the camera the world is drawn whole, in blocks: to the
+// nearest chunk not drawn yet (not loaded, or not baked once), across. The
+// loaded square's outer ring is left out: it is never drawn, only there for
+// its neighbours' baking.
+static float horizonFogReady(ChunkSystem &chunkSystem, glm::dvec3 camera)
+{
+	float nearest = 1e9f;
+	const int n = chunkSystem.squareSize;
+	if ((int)chunkSystem.loadedChunks.size() < n * n) { return nearest; }
+	for (int x = 1; x < n - 1; x++)
+		for (int z = 1; z < n - 1; z++)
+		{
+			Chunk *chunk = chunkSystem.getChunksInMatrixSpaceUnsafe(x, z);
+			if (chunk && chunk->geometryVersion > 0 && !chunk->isDontDrawYet()) { continue; }
+			const glm::ivec2 at = chunkSystem.fromMatrixSpaceToChunkSpace(x, z);
+			// Blocks are centred on whole numbers.
+			const double minX = at.x * CHUNK_SIZE - 0.5, minZ = at.y * CHUNK_SIZE - 0.5;
+			const double dx = std::max({minX - camera.x, camera.x - (minX + CHUNK_SIZE), 0.0});
+			const double dz = std::max({minZ - camera.z, camera.z - (minZ + CHUNK_SIZE), 0.0});
+			nearest = std::min(nearest, (float)std::sqrt(dx * dx + dz * dz));
+		}
+	return nearest;
+}
+
 void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	ProgramData &programData, BlocksLoader &blocksLoader, ClientEntityManager &entityManager, 
 	ModelsManager &modelsManager, 
@@ -2285,6 +2309,20 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	lighting.sunTexture = programData.skyBoxLoaderAndDrawer.sunTexture.id;
 	lighting.moonTexture = programData.skyBoxLoaderAndDrawer.moonTexture.id;
 	lighting.fogDistance = (chunkSystem.squareSize / 2.f) * CHUNK_SIZE - CHUNK_SIZE;
+	// The horizon fog ends at the nearest chunk not drawn yet: the world
+	// goes into the sky before it, so a hole where a chunk is still to come
+	// shows only more sky. It closes in fast when one is nearer than the
+	// fog (a teleport, the world loading, running ahead of the loading),
+	// and draws back slowly as the chunks come in, to the view distance.
+	{
+		static float reach = -1.f;
+		const float target = std::min(horizonFogReady(chunkSystem, c.position), lighting.fogDistance);
+		if (reach < 0.f) { reach = target; }
+		else if (target < reach) { reach = std::max(target, reach - 160.f * deltaTime); }
+		else { reach = std::min(target, reach + 20.f * deltaTime); }
+		lighting.fogReach = std::max(reach, 24.f);
+		lighting.horizonFogStart = glm::mix(0.92f, 0.15f, glm::clamp(getShadingSettings().horizonFog, 0.f, 1.f));
+	}
 	lighting.fogGradient = getShadingSettings().fogGradient;
 	lighting.underWater = underWater;
 	// Milestone G1: the weather's grey sky (which also hides the sun and the

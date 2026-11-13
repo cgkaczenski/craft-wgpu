@@ -95,8 +95,9 @@ namespace
 		glm::vec4 heldLight;         // the held light: x its level (0 none), y reach, z bands, w dithered share
 		glm::vec4 wet;               // x how wet the ground is, y how hard it rains now (the puddles' rings)
 		glm::vec4 grass;             // x the blades' reach (0 off), y the wind, z the density, w a clump's blades (vs_blade)
+		glm::vec4 horizonFog;        // x where the world has gone into the sky, y where the fog starts (blocks)
 	};
-	static_assert(sizeof(Uniforms) == 672, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 688, "uniform layout must match world.wgsl");
 
 	// The PSX look's lines down the screen: the PlayStation's usual 240.
 	constexpr float psxLines = 240.f;
@@ -376,6 +377,8 @@ namespace
 		// ground under them not at all).
 		RenderPipeline bladePrepassPipeline = nullptr;
 		RenderPipeline bladeEqualPipeline = nullptr;
+		// The blades into the nearest shadow cascade (vs_bladeShadow).
+		RenderPipeline bladeShadowPipeline = nullptr;
 		Buffer grassCellBuffer = nullptr;
 		uint64_t grassCellCapacity = 0; // in cells
 		BindGroup grassBindGroup = nullptr;
@@ -1346,6 +1349,11 @@ namespace
 		blades.fragmentEntry = "fs_bladeDepth";
 		blades.targets = ColorTargets::GBufferMasked;
 		w.bladePrepassPipeline = createFacePipeline(module, blades);
+		// Into the nearest shadow cascade, after its chunks: depth only.
+		blades.label = "world grass blades, sun shadow cascade 0";
+		blades.vertexEntry = "vs_bladeShadow";
+		blades.targets = ColorTargets::None;
+		w.bladeShadowPipeline = createFacePipeline(module, blades);
 
 		// Pass 4: water into the peel depth, no color (glColorMask 0).
 		FacePipelineDesc waterDepth;
@@ -1394,7 +1402,7 @@ namespace
 		module.release();
 		return w.pipeline && w.waterDepthPipeline && w.peelPipeline && w.finalPeelPipeline
 			&& w.finalPlainPipeline && w.decalPipeline && w.shadowPipelines[0] && w.shadowPipelines[1]
-			&& w.shadowPipelines[2] && w.bladePipeline && w.bladeEqualPipeline && w.bladePrepassPipeline && !invalid;
+			&& w.shadowPipelines[2] && w.bladePipeline && w.bladeEqualPipeline && w.bladePrepassPipeline && w.bladeShadowPipeline && !invalid;
 	}
 
 	// The dropped block cubes and the gizmo lines (entities.wgsl).
@@ -4944,7 +4952,7 @@ namespace
 			&w.lastColorPipeline, &w.hbaoPipeline, &w.hbaoApplyPipeline,
 			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline,
 			&w.weatherDrawPipeline,
-			&w.bladePipeline, &w.bladeEqualPipeline, &w.bladePrepassPipeline };
+			&w.bladePipeline, &w.bladeEqualPipeline, &w.bladePrepassPipeline, &w.bladeShadowPipeline };
 		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
 		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
 		for (RenderPipeline &pipeline : w.viewPipelines) { onPipeline(pipeline); }
@@ -5275,6 +5283,10 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	}
 	uniforms.fogParams = glm::vec4(lighting.fogDistance, lighting.fogGradient, lighting.underWater ? 1.f : 0.f,
 		glm::clamp(lighting.rain, 0.f, 1.f));
+	{
+		const float end = std::max(std::min(lighting.fogReach, lighting.fogDistance), 1.f);
+		uniforms.horizonFog = glm::vec4(end, end * std::clamp(lighting.horizonFogStart, 0.f, 1.f), 0.f, 0.f);
+	}
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
 
 	// Milestone 14: the sky's uniforms. The sun at sunPos and the moon
@@ -5332,7 +5344,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	HbaoUniforms hbao;
 	hbao.view = camera.getViewMatrix();
 	hbao.projection = projection;
-	hbao.params = glm::vec4(lighting.aoViewDistance, 0.f, 0.f, 0.f);
+	// y, z: the horizon fog's end and start (Uniforms::horizonFog), so a
+	// fogged building's creases don't show through the fog.
+	hbao.params = glm::vec4(lighting.aoViewDistance, uniforms.horizonFog.x, uniforms.horizonFog.y, 0.f);
 	wgpuQueue().writeBuffer(w.hbaoUniformBuffer, 0, &hbao, sizeof(hbao));
 	w.ssao = lighting.ssao;
 
@@ -5478,6 +5492,20 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 				shadowPass.setBindGroup(0, w.shadowPassBindGroup, 0, nullptr);
 				shadowPass.setVertexBuffer(0, w.arena, 0, w.arenaFaces * faceBytes);
 				drawRecords(shadowPass, mode, shadowFirst[i], shadowCount[i]);
+			}
+			// The grass blades into the nearest cascade: the cells in view,
+			// as the opaque pass draws them.
+			if (i == 0 && w.bladeShadowPipeline && w.grassBindGroup && w.grassCells && w.grassRadius > 0.f)
+			{
+				shadowPass.setPipeline(w.bladeShadowPipeline);
+				shadowPass.setBindGroup(0, w.shadowPassBindGroup, 0, nullptr);
+				shadowPass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
+				shadowPass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
+				for (const GrassGroup &g : w.grassGroupsNow)
+				{
+					if (!g.cells || !g.bladesPerCell) { continue; }
+					shadowPass.draw((2 * g.segments + 3) * g.bladesPerCell, g.cells, 0, g.firstCell);
+				}
 			}
 			shadowPass.end();
 			shadowPass.release();
@@ -6373,6 +6401,7 @@ void shutdown()
 	if (w.bladePipeline) { w.bladePipeline.release(); w.bladePipeline = nullptr; }
 	if (w.bladeEqualPipeline) { w.bladeEqualPipeline.release(); w.bladeEqualPipeline = nullptr; }
 	if (w.bladePrepassPipeline) { w.bladePrepassPipeline.release(); w.bladePrepassPipeline = nullptr; }
+	if (w.bladeShadowPipeline) { w.bladeShadowPipeline.release(); w.bladeShadowPipeline = nullptr; }
 	if (w.bladePipelineLayout) { w.bladePipelineLayout.release(); w.bladePipelineLayout = nullptr; }
 	if (w.grassBindGroupLayout) { w.grassBindGroupLayout.release(); w.grassBindGroupLayout = nullptr; }
 	if (w.grassCellBuffer) { w.grassCellBuffer.release(); w.grassCellBuffer = nullptr; }
