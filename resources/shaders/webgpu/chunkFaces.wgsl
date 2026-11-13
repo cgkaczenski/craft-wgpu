@@ -214,6 +214,10 @@ const tallGrassFlag = 4u;
 // tuftAboveFlag (past the flags byte, as topOfCubeFlag is).
 const bladeGroundFlag = 8u;
 const tuftAboveFlag = 512u;
+// A plant's crossed sprite (tall grass, a flower, a cobweb: orientations
+// 6-9), set here, past the flags byte: it takes the sun as the ground does
+// (sunFacing).
+const plantSpriteFlag = 1024u;
 
 // A texture across span x span blocks: which of its slices this block's face
 // shows. The slices go up the texture array from the bottom row, left to
@@ -385,7 +389,8 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     out.ambientMultiplier = ambientMultiplier;
     out.relative = relative;
     out.normal = normal;
-    out.flags = flags | select(0u, topOfCubeFlag, orientation == 2);
+    out.flags = flags | select(0u, topOfCubeFlag, orientation == 2)
+        | select(0u, plantSpriteFlag, orientation >= 6 && orientation < 10);
     out.blockPos = blockPosition;
     out.inBlock = shape;
     out.light = light;
@@ -714,9 +719,8 @@ fn bladeVertex(vertexIndex: u32, instance: u32, forShadow: bool) -> VertexOutput
     out.materialLayer = textureLayers[textureIndex + 2u] & layerMask;
     // Lit as the sprite is: its faces' fixed darkening, and the normal of
     // one of its two crossed planes, the side toward the camera (the side of
-    // a sprite that is seen). With any other normal the sun lights a tuft
-    // and its sprite differently, and the change from one to the other
-    // shows.
+    // a sprite that is seen). That normal is for the light in the player's
+    // hand; the sun takes both as the ground (sunFacing).
     out.ambientMultiplier = vertexColor[6];
     out.relative = relative;
     let plane = select(vec3f(0.70710678, 0.0, 0.70710678), vec3f(0.70710678, 0.0, -0.70710678), r.z < 0.5);
@@ -976,6 +980,22 @@ fn groundWet(in: VertexOutput, levels: LightLevels, water: bool) -> WetGround {
     return g;
 }
 
+// The normal a face takes the sun by: its own, but straight up for grass (a
+// plant's crossed sprite, a blade), as the ground it stands on. The side of
+// a sprite that is seen faces the camera, and a blade's normal is made to,
+// so by their own normals the sun lit them on one side of a line through
+// the camera and not on the other: looking along a sprite's diagonal
+// (yaw 45, 135, 225, 315) the line ran up the middle of the screen, half
+// the field in the sun and half out of it, and it moved with the player.
+fn isGrass(in: VertexOutput) -> bool {
+    return in.blade.x > 0.0 || (in.flags & plantSpriteFlag) != 0u;
+}
+
+fn sunFacing(in: VertexOutput) -> vec3f {
+    if (isGrass(in)) { return vec3f(0.0, 1.0, 0.0); }
+    return in.normal;
+}
+
 // A face lit: what fs_main and fs_blend both start from.
 struct Shaded {
     color: vec3f,   // linear light
@@ -1003,9 +1023,10 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     // blades standing inside it at random.
     var shadowFrom = in.relative;
     if (in.blade.x > 0.0) { shadowFrom.y += 0.55 - in.inBlock.y; }
-    let shadow = sunShadow(shadowFrom, viewDepth, dot(u.sunDirection.xyz, in.normal), in.position.xy);
+    let sunNormal = sunFacing(in);
+    let shadow = sunShadow(shadowFrom, viewDepth, dot(u.sunDirection.xyz, sunNormal), in.position.xy);
 
-    let ambient = computeAmbient(withHeldLight(levels, in.relative, in.normal), in.normal, in.ambientMultiplier,
+    let ambient = computeAmbient(withHeldLight(levels, in.relative, in.normal), sunNormal, in.ambientMultiplier,
         (in.flags & 2u) != 0u, ao, shadow);
 
     var m = material(t.material);
@@ -1073,7 +1094,9 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     F0 = mix(F0, vec3f(0.02), wet.puddle);
 
     var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0, caustics);
-    let sun = sunLight(levels, m.metallic, m.roughness, V, albedo, N, F0, ao, shadow, caustics);
+    var sunN = N;
+    if (isGrass(in)) { sunN = sunNormal; }
+    let sun = sunLight(levels, m.metallic, m.roughness, V, albedo, sunN, F0, ao, shadow, caustics);
     color += sun;
 
     var s: Shaded;
