@@ -10,6 +10,8 @@ resources/saves2/
 errorLogs.txt
 resources/worlds/
 playerSettings/
+# OURCRAFT_PASS_DUMP output (written to the folder the game starts in)
+/passDump-frame*/
 
 # Bug snapshots (Command+F2 in game): a frame and its debug info
 /bugSnapshots/

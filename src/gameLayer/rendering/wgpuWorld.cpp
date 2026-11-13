@@ -37,7 +37,9 @@
 
 #include <render/wgpuFrame.h>
 #include <render/wgpu2d.h>
+#include <render/wgpuContext.h> // the frame capture, for the pass dump's final image
 #include <webgpu/webgpu.hpp>
+#include <stb_image_write/stb_image_write.h>
 
 #include <glm/glm.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -50,6 +52,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <cstdint>
 #include <iostream>
@@ -1498,6 +1502,357 @@ namespace
 		return !invalid;
 	}
 
+	// ---- Pass dump: OURCRAFT_PASS_DUMP=N ----------------------------------
+	//
+	// A way to see how one frame is drawn, step by step, without a GPU
+	// debugger. On the world's Nth frame each step's target is copied out as
+	// the frame records it (a copy runs in order with the passes, so it
+	// holds what the target held at that point), and at the start of the
+	// next frame the copies are mapped, made viewable and written as PNGs to
+	// passDump-frameN/ in the working directory, with an index.tsv in frame
+	// order. The final image, UI included, comes from wgpu2d's frame capture.
+	//
+	// Every target needs CopySrc for this, which dumpUsage adds only while
+	// the variable is set, so a normal run creates the textures as before.
+
+	// How a target's texels become an image a screen can show.
+	enum class DumpKind
+	{
+		Scene,    // linear HDR color: the exposure, an ACES fit, sRGB (as gbufferView's view 0)
+		Linear,   // linear light (bloom, god rays): clamped, sRGB
+		Display,  // already display values (the tone mapped image)
+		Position, // view-space position: |xyz| / 32 blocks, as gbufferView's view 1
+		Normal,   // packNormal's rgba16uint back to 0..1
+		Depth,    // the camera's depth as distance, square-rooted (gbufferView's view 5)
+		Shadow,   // an orthographic shadow map: stretched over the depths it holds
+		Gray,     // one channel, as it is (the AO)
+	};
+
+	struct DumpShot
+	{
+		std::string file, step;
+		Buffer buffer = nullptr;
+		uint32_t width = 0, height = 0, rowBytes = 0, texelBytes = 0;
+		TextureFormat format = TextureFormat::Undefined;
+		DumpKind kind = DumpKind::Scene;
+		bool mapped = false, failed = false;
+	};
+
+	struct PassDump
+	{
+		bool active = false;      // recording this frame's copies
+		bool written = false;     // done; one dump per run
+		float exposure = 1.f, nearPlane = 0.1f, farPlane = 1000.f;
+		std::vector<DumpShot> shots;
+	};
+	PassDump dump;
+
+	// The world frame to dump (1 is the first), or 0 for none.
+	long long dumpFrame()
+	{
+		static const long long frame = []
+		{
+			const char *env = std::getenv("OURCRAFT_PASS_DUMP");
+			return env && *env ? std::max(0LL, std::atoll(env)) : 0LL;
+		}();
+		return frame;
+	}
+
+	bool dumpWanted() { return dumpFrame() > 0; }
+
+	TextureUsage dumpUsage() { return dumpWanted() ? TextureUsage::CopySrc : TextureUsage::None; }
+
+	uint32_t dumpTexelBytes(TextureFormat format)
+	{
+		switch (format)
+		{
+			case TextureFormat::R8Unorm: return 1;
+			case TextureFormat::RG11B10Ufloat:
+			case TextureFormat::RGBA8Unorm:
+			case TextureFormat::Depth32Float: return 4;
+			case TextureFormat::RGBA16Float:
+			case TextureFormat::RGBA16Uint: return 8;
+			default: return 0;
+		}
+	}
+
+	// Records a copy of `texture`'s mip `mip` as it stands at this point in
+	// the frame. Outside a pass only: `encoder` must have none open.
+	void dumpTexture(CommandEncoder encoder, Texture texture, DumpKind kind, const char *name, const char *step,
+		uint32_t mip = 0)
+	{
+		if (!dump.active || !encoder || !texture) { return; }
+		DumpShot shot;
+		shot.format = texture.getFormat();
+		shot.texelBytes = dumpTexelBytes(shot.format);
+		shot.width = std::max(1u, texture.getWidth() >> mip);
+		shot.height = std::max(1u, texture.getHeight() >> mip);
+		shot.kind = kind;
+		shot.step = step;
+		char file[96];
+		std::snprintf(file, sizeof(file), "%02d-%s.png", (int)dump.shots.size() + 1, name);
+		shot.file = file;
+		if (!shot.texelBytes)
+		{
+			std::cout << "pass dump: " << name << ": format " << (int)shot.format << " is not handled\n";
+			return;
+		}
+		shot.rowBytes = (shot.width * shot.texelBytes + 255) & ~255u; // copies want 256-byte rows
+
+		BufferDescriptor desc = Default;
+		desc.label = StringView("world pass dump");
+		desc.usage = BufferUsage::CopyDst | BufferUsage::MapRead;
+		desc.size = (uint64_t)shot.rowBytes * shot.height;
+		desc.mappedAtCreation = false;
+		shot.buffer = wgpuDevice().createBuffer(desc);
+		if (!shot.buffer) { return; }
+
+		TexelCopyTextureInfo from = Default;
+		from.texture = texture;
+		from.mipLevel = mip;
+		from.origin = { 0, 0, 0 };
+		from.aspect = shot.format == TextureFormat::Depth32Float ? TextureAspect::DepthOnly : TextureAspect::All;
+		TexelCopyBufferInfo to = Default;
+		to.buffer = shot.buffer;
+		to.layout.offset = 0;
+		to.layout.bytesPerRow = shot.rowBytes;
+		to.layout.rowsPerImage = shot.height;
+		Extent3D size = { shot.width, shot.height, 1 };
+		encoder.copyTextureToBuffer(from, to, size);
+		dump.shots.push_back(std::move(shot));
+	}
+
+	float dumpToSrgb(float c)
+	{
+		c = std::clamp(c, 0.f, 1.f);
+		return c < 0.0031308f ? c * 12.92f : 1.055f * std::pow(c, 1.f / 2.4f) - 0.055f;
+	}
+
+	// gbufferView.wgsl's acesFitted.
+	glm::vec3 dumpAces(glm::vec3 c)
+	{
+		// The WGSL builds its matrices column by column and transposes them
+		// to use; glm's constructor is also column by column, so the same.
+		const glm::mat3 in(0.59719f, 0.35458f, 0.04823f, 0.07600f, 0.90834f, 0.01566f,
+			0.02840f, 0.13383f, 0.83777f);
+		const glm::mat3 out(1.60475f, -0.53108f, -0.07367f, -0.10208f, 1.10813f,
+			-0.00605f, -0.00327f, -0.07276f, 1.07602f);
+		c = glm::transpose(in) * c;
+		const glm::vec3 a = c * (c + 0.0245786f) - 0.000090537f;
+		const glm::vec3 b = c * (0.983729f * c + 0.4329510f) + 0.238081f;
+		c = glm::transpose(out) * (a / b);
+		return glm::clamp(c, glm::vec3(0.f), glm::vec3(1.f));
+	}
+
+	// One texel as numbers: rgb (or depth in x), whatever the format.
+	glm::vec4 dumpTexel(const DumpShot &shot, const uint8_t *p)
+	{
+		switch (shot.format)
+		{
+			case TextureFormat::R8Unorm: return glm::vec4(p[0] / 255.f);
+			case TextureFormat::RGBA8Unorm: return glm::vec4(p[0], p[1], p[2], p[3]) / 255.f;
+			case TextureFormat::RG11B10Ufloat:
+			{
+				uint32_t packed = 0;
+				std::memcpy(&packed, p, 4);
+				return glm::vec4(glm::unpackF2x11_1x10(packed), 1.f);
+			}
+			case TextureFormat::Depth32Float:
+			{
+				float d = 0;
+				std::memcpy(&d, p, 4);
+				return glm::vec4(d);
+			}
+			case TextureFormat::RGBA16Float:
+			{
+				uint16_t h[4];
+				std::memcpy(h, p, 8);
+				return glm::vec4(glm::unpackHalf1x16(h[0]), glm::unpackHalf1x16(h[1]),
+					glm::unpackHalf1x16(h[2]), glm::unpackHalf1x16(h[3]));
+			}
+			case TextureFormat::RGBA16Uint:
+			{
+				uint16_t u[4];
+				std::memcpy(u, p, 8);
+				return glm::vec4(u[0], u[1], u[2], u[3]);
+			}
+			default: return glm::vec4(0.f);
+		}
+	}
+
+	std::vector<uint8_t> dumpImage(const DumpShot &shot, const uint8_t *data)
+	{
+		const size_t count = (size_t)shot.width * shot.height;
+		std::vector<glm::vec4> texels(count);
+		for (uint32_t y = 0; y < shot.height; y++)
+		{
+			const uint8_t *row = data + (size_t)y * shot.rowBytes;
+			for (uint32_t x = 0; x < shot.width; x++)
+			{
+				texels[(size_t)y * shot.width + x] = dumpTexel(shot, row + (size_t)x * shot.texelBytes);
+			}
+		}
+
+		// A shadow map's depths sit in a narrow band; stretch over what was drawn.
+		float low = 1.f, high = 0.f;
+		if (shot.kind == DumpKind::Shadow)
+		{
+			for (const glm::vec4 &t : texels)
+			{
+				if (t.x < depthClear) { low = std::min(low, t.x); high = std::max(high, t.x); }
+			}
+		}
+
+		std::vector<uint8_t> rgba(count * 4);
+		for (size_t i = 0; i < count; i++)
+		{
+			const glm::vec4 t = texels[i];
+			glm::vec3 c(0.f);
+			switch (shot.kind)
+			{
+				case DumpKind::Scene:
+				{
+					const glm::vec3 m = dumpAces(glm::vec3(t) * dump.exposure);
+					c = glm::vec3(dumpToSrgb(m.r), dumpToSrgb(m.g), dumpToSrgb(m.b));
+					break;
+				}
+				case DumpKind::Linear: c = glm::vec3(dumpToSrgb(t.r), dumpToSrgb(t.g), dumpToSrgb(t.b)); break;
+				case DumpKind::Display: c = glm::clamp(glm::vec3(t), glm::vec3(0.f), glm::vec3(1.f)); break;
+				case DumpKind::Position: c = glm::clamp(glm::abs(glm::vec3(t)) / 32.f, glm::vec3(0.f), glm::vec3(1.f)); break;
+				case DumpKind::Normal: c = glm::vec3(t) / 65536.f; break;
+				case DumpKind::Depth:
+				{
+					const float n = dump.nearPlane, f = dump.farPlane;
+					const float distance = n * f / (f - t.x * (f - n));
+					c = glm::vec3(std::sqrt(std::clamp(distance / f, 0.f, 1.f)));
+					break;
+				}
+				case DumpKind::Shadow:
+					c = glm::vec3(t.x >= depthClear || high <= low ? 1.f : (t.x - low) / (high - low));
+					break;
+				case DumpKind::Gray: c = glm::vec3(t.r); break;
+			}
+			for (int k = 0; k < 3; k++) { rgba[i * 4 + k] = (uint8_t)std::lround(std::clamp(c[k], 0.f, 1.f) * 255.f); }
+			rgba[i * 4 + 3] = 255;
+		}
+		return rgba;
+	}
+
+	const char *dumpFormatName(TextureFormat format)
+	{
+		switch (format)
+		{
+			case TextureFormat::R8Unorm: return "r8unorm";
+			case TextureFormat::RGBA8Unorm: return "rgba8unorm";
+			case TextureFormat::RG11B10Ufloat: return "rg11b10ufloat";
+			case TextureFormat::Depth32Float: return "depth32float";
+			case TextureFormat::RGBA16Float: return "rgba16float";
+			case TextureFormat::RGBA16Uint: return "rgba16uint";
+			default: return "?";
+		}
+	}
+
+	// At the start of a frame: the dump frame's copies (now submitted) read
+	// back and written; then, if this is the dump frame, start recording.
+	void dumpFrameStart(const Camera &camera, const Lighting &lighting)
+	{
+		if (!dumpWanted() || dump.written) { return; }
+
+		if (dump.active)
+		{
+			dump.active = false;
+			dump.written = true;
+			const std::string dir = "passDump-frame" + std::to_string(dumpFrame());
+			std::error_code ec;
+			std::filesystem::create_directories(dir, ec);
+
+			for (DumpShot &shot : dump.shots)
+			{
+				if (!shot.buffer) { continue; }
+				WGPUBufferMapCallbackInfo info = {};
+				info.mode = WGPUCallbackMode_AllowProcessEvents;
+				info.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *target, void *)
+				{
+					DumpShot &s = *static_cast<DumpShot *>(target);
+					if (status == WGPUMapAsyncStatus_Success) { s.mapped = true; } else { s.failed = true; }
+				};
+				info.userdata1 = &shot;
+				wgpuBufferMapAsync(shot.buffer, WGPUMapMode_Read, 0, (size_t)shot.rowBytes * shot.height, info);
+			}
+			// A one-off, so it waits: the frame's work done, every mapping called back.
+			for (int i = 0; i < 100; i++)
+			{
+				wgpuDevicePoll(wgpuDevice(), true, nullptr);
+				if (std::all_of(dump.shots.begin(), dump.shots.end(),
+					[](const DumpShot &s) { return !s.buffer || s.mapped || s.failed; })) { break; }
+			}
+
+			std::ofstream index(dir + "/index.tsv");
+			index << "file\tstep\twidth\theight\tformat\n";
+			for (DumpShot &shot : dump.shots)
+			{
+				if (!shot.buffer) { continue; }
+				if (shot.mapped)
+				{
+					const size_t bytes = (size_t)shot.rowBytes * shot.height;
+					if (const void *data = wgpuBufferGetConstMappedRange(shot.buffer, 0, bytes))
+					{
+						const std::vector<uint8_t> rgba = dumpImage(shot, static_cast<const uint8_t *>(data));
+						stbi_write_png((dir + "/" + shot.file).c_str(), (int)shot.width, (int)shot.height, 4,
+							rgba.data(), (int)shot.width * 4);
+						index << shot.file << '\t' << shot.step << '\t' << shot.width << '\t' << shot.height << '\t'
+							<< dumpFormatName(shot.format) << '\n';
+					}
+					shot.buffer.unmap();
+				}
+				else
+				{
+					std::cout << "pass dump: " << shot.file << " never mapped\n";
+				}
+				shot.buffer.release();
+			}
+
+			// The finished frame, UI and final effects included (requested below).
+			std::vector<unsigned char> pixels;
+			int width = 0, height = 0;
+			if (wgpuTakeFrameCapture(pixels, width, height))
+			{
+				const std::string file = "99-final.png";
+				stbi_write_png((dir + "/" + file).c_str(), width, height, 4, pixels.data(), width * 4);
+				index << file << "\tThe finished frame on screen: the world, the decal and gizmo lines, "
+					"the HUD and menus, and any final effect\t" << width << '\t' << height << "\tsurface\n";
+			}
+
+			// The frame's numbers, from the world's own counters.
+			std::ofstream stats(dir + "/stats.txt");
+			stats << "draw calls (chunks)\t" << w.lastDrawCalls << "\n"
+				<< "visible chunks\t" << w.lastVisibleChunks << "\n"
+				<< "opaque faces\t" << w.lastFacesDrawn << "\n"
+				<< "transparent faces\t" << w.lastTransparentFacesDrawn << "\n"
+				<< "model draws\t" << w.lastModelDraws << "\n"
+				<< "item draws\t" << w.lastItemDraws << "\n";
+			for (int i = 0; i < shadowCascades; i++)
+			{
+				stats << "shadow cascade " << i << "\t" << w.lastShadowChunks[i] << " chunks, "
+					<< w.lastShadowFaces[i] << " faces\n";
+			}
+			stats << "exposure\t" << dump.exposure << "\n";
+			dump.shots.clear();
+			std::cout << "pass dump: wrote " << dir << "\n";
+			return;
+		}
+
+		if ((long long)w.renderedFrames + 1 == dumpFrame())
+		{
+			dump.active = true;
+			dump.exposure = lighting.exposure;
+			dump.nearPlane = camera.closePlane;
+			dump.farPlane = camera.farPlane;
+			wgpuRequestFrameCapture();
+			std::cout << "pass dump: recording world frame " << dumpFrame() << "\n";
+		}
+	}
+
 	// A render pass on the G-buffer's five targets and the depth: the opaque
 	// pass (clearing them) and the entity pass (keeping what is there).
 	// With `keepColor`, a clearing pass still loads the HDR color: the sky
@@ -1734,6 +2089,8 @@ namespace
 
 		fullscreenPass(encoder, w.gBufferViews[GBloom], true, w.bloomFilterPipeline, w.colorSourceGroup,
 			"world bloom filter");
+		dumpTexture(encoder, w.gBufferTextures[GBloom], DumpKind::Linear, "bloom-bright",
+			"Bloom filter: the pixels bright enough to glow");
 
 		bool horizontal = false;
 		bool firstTime = true;
@@ -1767,6 +2124,8 @@ namespace
 		}
 
 		w.bloomLast = last;
+		dumpTexture(encoder, w.blurTextures[last], DumpKind::Linear, "bloom-blurred",
+			"Bloom blur: blurred down a mip chain and added back up (half size)");
 	}
 
 	// The bloom's last step, after the AO as in GL's post process: the
@@ -1778,6 +2137,8 @@ namespace
 		w.bloomLast = -1;
 		if (!apply) { return; }
 		fullscreenPass(encoder, w.gBufferViews[GColor], true, w.bloomApplyPipeline, apply, "world bloom apply");
+		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "bloom-applied",
+			"Bloom apply: the glow, lens dirt and god rays added onto the HDR color");
 	}
 
 	// Milestone 17: the AO at half size, then laid over the HDR color.
@@ -1785,8 +2146,12 @@ namespace
 	{
 		if (!w.ssao || !w.hbaoBindGroup || !w.hbaoApplyBindGroup) { return; }
 		fullscreenPass(encoder, w.hbaoView, false, w.hbaoPipeline, w.hbaoBindGroup, "world hbao");
+		dumpTexture(encoder, w.hbaoTexture, DumpKind::Gray, "ambient-occlusion",
+			"HBAO: how much each pixel's surroundings hide it from ambient light (half size)");
 		fullscreenPass(encoder, w.gBufferViews[GColor], true, w.hbaoApplyPipeline, w.hbaoApplyBindGroup,
 			"world hbao apply");
+		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "ambient-occlusion-applied",
+			"HBAO apply: the occlusion darkening the HDR color");
 	}
 
 	// The frame's HDR color and positions kept for the next frame's
@@ -1832,6 +2197,8 @@ namespace
 				{
 					// Milestone 18: GL's warp, after the bloom, into its own texture.
 					fullscreenPass(encoder, w.warpView, false, w.warpPipeline, w.warpBindGroup, "world underwater warp");
+					dumpTexture(encoder, w.warpTexture, DumpKind::Scene, "underwater-warp",
+						"Underwater warp: the image wobbled, into its own texture");
 				}
 				recordLastFrame(encoder);
 			}
@@ -1909,10 +2276,17 @@ namespace
 			toneMapPass.draw(3, 1, 0, 0);
 			toneMapPass.end();
 			toneMapPass.release();
+			dumpTexture(encoder, w.fxaaInputTexture, DumpKind::Display, "tone-mapped",
+				"Tone map: HDR to display colors, with grading, screen effects and vignette (FXAA comes next)");
 		}
 
 		RenderPassEncoder pass = wgpuCurrentGamePass();
 		if (!pass) { return; }
+		// The 2D pass is shared with the UI's batches, so this draw gets a
+		// group of its own in a capture; it ends with this function, while
+		// the pass is still open.
+		DebugGroup group(pass, !chain ? "world composite: G-buffer view"
+			: w.fxaa ? "world composite: FXAA" : "world composite: tone map");
 		if (!chain)
 		{
 			pass.setPipeline(w.viewPipelines[w.compositeView]);
@@ -2500,7 +2874,7 @@ namespace
 	{
 		TextureDescriptor desc = Default;
 		desc.label = StringView(label);
-		desc.usage = usage;
+		desc.usage = usage | dumpUsage(); // CopySrc while OURCRAFT_PASS_DUMP is set
 		desc.dimension = TextureDimension::_2D;
 		desc.size.width = (uint32_t)width;
 		desc.size.height = (uint32_t)height;
@@ -3974,6 +4348,7 @@ namespace
 		pass.draw(4, w.precipitationColumns, 0, 0);
 		pass.end();
 		pass.release();
+		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "precipitation", "Precipitation pass: rain or snow");
 	}
 
 	bool createSky()
@@ -4228,6 +4603,10 @@ namespace
 
 		fullscreenPass(encoder, w.sunRaysView, true, w.rayMaskPipeline, w.rayMaskBindGroup, "world god rays mask");
 		fullscreenPass(encoder, w.sunRaysBlurView, false, w.rayBlurPipeline, w.rayBlurBindGroup, "world god rays blur");
+		dumpTexture(encoder, w.sunRaysTexture, DumpKind::Linear, "god-rays-mask",
+			"God rays: the sun, with the world's geometry masked out (half size)");
+		dumpTexture(encoder, w.sunRaysBlurTexture, DumpKind::Linear, "god-rays-blur",
+			"God rays: the mask blurred outward from the sun (half size)");
 
 		// The count out, when no earlier one is still in flight.
 		if (w.sunReadState == World::Readback::Idle)
@@ -4252,6 +4631,8 @@ namespace
 			pass.draw(4, 2, 0, 0); // instance 0 the sun, 1 the moon
 			pass.end();
 			pass.release();
+			dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "sun-and-moon",
+				"Sun and moon pass: the discs, behind the world's depth");
 		}
 		recordSunRays(encoder, drawable);
 	}
@@ -4503,6 +4884,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 
 	// Milestones 16 and 18: readings copied out in earlier frames.
 	serviceReadbacks();
+	dumpFrameStart(camera, lighting);
 
 	// The point lights, as GL gathers them: the visible chunks' lists,
 	// nearest chunk first (the list's end), until maxLights is reached
@@ -4806,6 +5188,10 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			}
 			shadowPass.end();
 			shadowPass.release();
+			static const char *const shadowDumpNames[shadowCascades] =
+				{ "shadow-cascade-0", "shadow-cascade-1", "shadow-cascade-2" };
+			dumpTexture(encoder, w.shadowTextures[i], DumpKind::Shadow, shadowDumpNames[i],
+				"Sun shadow map: one cascade's depth, seen from the sun");
 		}
 
 		// The sky (milestone 14): baked when first needed, then drawn into
@@ -4838,17 +5224,23 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			skyPass.draw(3, 1, 0, 0);
 			skyPass.end();
 			skyPass.release();
+			dumpTexture(encoder, w.skyTexture, DumpKind::Scene, "sky", "Sky pass: the sky into its own copy and the HDR color");
 		}
 		w.sunPending = true;
 
+		// Debug groups split the pass's draws in a GPU capture: each group's
+		// guard pops before pass.end() (an open group there is a validation
+		// error), hence the braces.
 		RenderPassEncoder pass = beginGBufferPass(encoder, true, "world opaque pass", true);
 		if (w.arena && opaqueCount)
 		{
 			if (depthPrepass)
 			{
+				DebugGroup group(pass, "chunks: depth prepass");
 				bindFaces(pass, w.prepassPipeline, false);
 				drawRecords(pass, mode, 0, opaqueCount);
 			}
+			DebugGroup group(pass, depthPrepass ? "chunks: solid (depth Equal)" : "chunks: solid (depth Less)");
 			bindFaces(pass, depthPrepass ? w.pipeline : w.solidLessPipeline, true);
 			drawRecords(pass, mode, 0, opaqueCount);
 		}
@@ -4857,6 +5249,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		// draws entities between its solid pass and the depth copy).
 		if (prepareCubes(blockCubes))
 		{
+			DebugGroup group(pass, "dropped block items");
 			pass.setPipeline(w.cubePipeline);
 			pass.setBindGroup(0, w.bindGroup, 0, nullptr);
 			pass.setBindGroup(1, w.cubeBindGroup, 0, nullptr);
@@ -4864,6 +5257,14 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		}
 		pass.end();
 		pass.release();
+
+		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "opaque-color",
+			"Opaque pass: chunks and dropped items, lit, into the G-buffer's HDR color");
+		dumpTexture(encoder, w.gBufferTextures[GPosition], DumpKind::Position, "opaque-position",
+			"Opaque pass: the G-buffer's view-space positions");
+		dumpTexture(encoder, w.gBufferTextures[GNormal], DumpKind::Normal, "opaque-normal",
+			"Opaque pass: the G-buffer's world normals");
+		dumpTexture(encoder, w.depthTexture, DumpKind::Depth, "opaque-depth", "Opaque pass: the depth buffer");
 	}
 
 	// The transparent passes wait for renderTransparent, after the entities
@@ -5040,33 +5441,45 @@ void renderEntities(const std::vector<glm::mat4> &bones, const std::vector<Model
 		draws++;
 	};
 
-	pass.setPipeline(w.modelPipeline);
-	for (uint32_t i = 0; i < models.size(); i++)
+	// A capture group each for the models and the items, closed before
+	// pass.end().
+	if (!models.empty())
 	{
-		auto mesh = w.meshes.find(models[i].mesh);
-		if (mesh == w.meshes.end() || !mesh->second.indices) { continue; }
-		BindGroup textures = textureGroup(models[i].textures);
-		if (!textures) { continue; }
-		pass.setBindGroup(2, textures, 0, nullptr);
-		drawMesh(mesh->second, i);
+		DebugGroup group(pass, "models");
+		pass.setPipeline(w.modelPipeline);
+		for (uint32_t i = 0; i < models.size(); i++)
+		{
+			auto mesh = w.meshes.find(models[i].mesh);
+			if (mesh == w.meshes.end() || !mesh->second.indices) { continue; }
+			BindGroup textures = textureGroup(models[i].textures);
+			if (!textures) { continue; }
+			pass.setBindGroup(2, textures, 0, nullptr);
+			drawMesh(mesh->second, i);
+		}
 	}
 
 	w.lastModelDraws = draws;
-	pass.setPipeline(w.itemPipeline);
-	for (uint32_t i = 0; i < items.size(); i++)
+	if (!items.empty())
 	{
-		auto mesh = w.meshes.find(items[i].mesh);
-		if (mesh == w.meshes.end()) { continue; }
-		const uint32_t ids[4] = { items[i].texture, items[i].texture, items[i].texture, items[i].texture };
-		BindGroup textures = textureGroup(ids);
-		if (!textures) { continue; }
-		pass.setBindGroup(2, textures, 0, nullptr);
-		drawMesh(mesh->second, i);
+		DebugGroup group(pass, "items");
+		pass.setPipeline(w.itemPipeline);
+		for (uint32_t i = 0; i < items.size(); i++)
+		{
+			auto mesh = w.meshes.find(items[i].mesh);
+			if (mesh == w.meshes.end()) { continue; }
+			const uint32_t ids[4] = { items[i].texture, items[i].texture, items[i].texture, items[i].texture };
+			BindGroup textures = textureGroup(ids);
+			if (!textures) { continue; }
+			pass.setBindGroup(2, textures, 0, nullptr);
+			drawMesh(mesh->second, i);
+		}
 	}
 
 	pass.end();
 	pass.release();
 	w.lastItemDraws = draws - w.lastModelDraws;
+	dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "entities",
+		"Entity pass: creatures, players, the hand and held items");
 }
 
 void renderTransparent()
@@ -5118,6 +5531,8 @@ void renderTransparent()
 				drawRecords(pass, mode, peelFirst, peelCount);
 				pass.end();
 				pass.release();
+				dumpTexture(encoder, w.peelDepthTexture, DumpKind::Depth, "water-depth",
+					"Water depth pass: the nearest water surface added to a copy of the depth");
 			}
 
 			// The peel (5): what lies beyond that surface, into the G-buffer.
@@ -5128,6 +5543,8 @@ void renderTransparent()
 				drawRecords(pass, mode, peelFirst, peelCount);
 				pass.end();
 				pass.release();
+				dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "peel",
+					"Peel pass: transparent faces beyond the water surface (seen through it)");
 			}
 
 			// Copy color and depth (6): what the water will show under it.
@@ -5143,6 +5560,8 @@ void renderTransparent()
 			drawRecords(pass, mode, finalFirst, finalCount);
 			pass.end();
 			pass.release();
+			dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "transparent",
+				"Transparent pass: water, glass and leaves' see-through faces, blended");
 		}
 
 		// Milestone G1b: the rain and snow, in front of glass and water.
