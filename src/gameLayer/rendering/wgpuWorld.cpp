@@ -429,6 +429,10 @@ namespace
 		BindGroup shadowPassBindGroup = nullptr;
 		RenderPipeline shadowPipelines[shadowCascades] = {};
 		uint64_t lastShadowFaces[shadowCascades] = {};
+		// The far cascade's map holds what Lighting::shadowCascades[2] drew
+		// (false until drawn, and once the maps are new or shadows were off).
+		bool farShadowValid = false;
+		uint64_t farShadowDraws = 0, farShadowFrames = 0;
 		uint32_t lastShadowChunks[shadowCascades] = {};
 
 		// Milestone 14: the sky (sky.wgsl). The three baked skies, each a
@@ -2827,6 +2831,7 @@ namespace
 					TextureAspect::DepthOnly, usage);
 				if (!w.shadowViews[i]) { return false; }
 			}
+			w.farShadowValid = false;
 		}
 		return true;
 	}
@@ -5415,16 +5420,33 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	// (not just the camera's visible ones: what is behind the camera can
 	// shade what is in front), culled against that cascade's box, as GL's
 	// renderShadow loops over loadedChunks.
+	// The far cascade only takes the casters within the far shadows' reach
+	// (lighting.wgsl's farShadowFade: out by halfway into the horizon fog)
+	// and a margin for a low sun's long shadows into it: past that its
+	// shadows aren't shown, and most of its faces were there.
 	uint32_t shadowFirst[shadowCascades] = {};
 	uint32_t shadowCount[shadowCascades] = {};
+	const double farShadowReach = 0.5 * (uniforms.horizonFog.x + uniforms.horizonFog.y) + 48.0;
+	// The far cascade's map is kept from an earlier frame unless Renderer
+	// asks for it again (or it holds nothing yet).
+	const bool drawFarShadow = drawShadows && (lighting.farShadowRedraw || !w.farShadowValid);
+	if (drawShadows) { w.farShadowFrames++; }
 	for (int i = 0; i < shadowCascades && drawShadows; i++)
 	{
+		if (i == shadowCascades - 1 && !drawFarShadow) { continue; }
 		const FrustumVolume box(lighting.shadowCascades[i]);
 		shadowFirst[i] = (uint32_t)w.drawArgs.size();
 		uint64_t faces = 0;
 		for (const auto &[chunk, range] : w.chunks)
 		{
 			if (const_cast<Chunk *>(chunk)->isDontDrawYet()) { continue; }
+			if (i == shadowCascades - 1)
+			{
+				const double minX = chunk->data.x * CHUNK_SIZE - 0.5, minZ = chunk->data.z * CHUNK_SIZE - 0.5;
+				const double dx = std::max({minX - camera.position.x, camera.position.x - (minX + CHUNK_SIZE), 0.0});
+				const double dz = std::max({minZ - camera.position.z, camera.position.z - (minZ + CHUNK_SIZE), 0.0});
+				if (dx * dx + dz * dz > farShadowReach * farShadowReach) { continue; }
+			}
 			AABBVolume bounds;
 			bounds.minVertex = { chunk->data.x * CHUNK_SIZE, 0, chunk->data.z * CHUNK_SIZE };
 			bounds.maxVertex = { (chunk->data.x + 1) * CHUNK_SIZE, CHUNK_HEIGHT + 1, (chunk->data.z + 1) * CHUNK_SIZE };
@@ -5436,6 +5458,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		w.lastShadowFaces[i] = faces;
 		w.lastShadowChunks[i] = shadowCount[i];
 	}
+	if (!drawShadows) { w.farShadowValid = false; }
 	if (!drawShadows)
 	{
 		for (int i = 0; i < shadowCascades; i++) { w.lastShadowFaces[i] = 0; w.lastShadowChunks[i] = 0; }
@@ -5473,6 +5496,12 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			{ "world sun shadow pass 0", "world sun shadow pass 1", "world sun shadow pass 2" };
 		for (int i = 0; i < shadowCascades && drawShadows; i++)
 		{
+			if (i == shadowCascades - 1)
+			{
+				if (!drawFarShadow) { continue; }
+				w.farShadowValid = true;
+				w.farShadowDraws++;
+			}
 			RenderPassDepthStencilAttachment shadowDepth = Default;
 			shadowDepth.view = w.shadowViews[i];
 			shadowDepth.depthLoadOp = LoadOp::Clear;
@@ -6258,7 +6287,8 @@ void shutdown()
 			<< w.meshes.size() << " meshes; " << w.frameLights.size() << " point lights from "
 			<< w.chunkLights.size() << " chunks with lights; sun shadow cascades "
 			<< w.lastShadowChunks[0] << "/" << w.lastShadowChunks[1] << "/" << w.lastShadowChunks[2] << " chunks, "
-			<< w.lastShadowFaces[0] << "/" << w.lastShadowFaces[1] << "/" << w.lastShadowFaces[2] << " faces; bloom "
+			<< w.lastShadowFaces[0] << "/" << w.lastShadowFaces[1] << "/" << w.lastShadowFaces[2] << " faces, the far one drawn "
+			<< w.farShadowDraws << " times in " << w.farShadowFrames << " frames; bloom "
 			<< (w.bloom ? std::to_string(w.bloomMips + 1) + " levels" : std::string("off")) << "; "
 			<< w.exposureReadings << " exposure readings, the last (" << w.exposureColor.x << ", "
 			<< w.exposureColor.y << ", " << w.exposureColor.z << "); " << w.sunReadings

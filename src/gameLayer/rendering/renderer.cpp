@@ -1751,6 +1751,25 @@ static glm::dmat4 sunCascadeMatrix(Camera &c, glm::vec3 sunPos, double zEnd, dou
 	return lightProjection * glm::mat4_cast(lightRotation);
 }
 
+// The far cascade: a box around a sphere about the player (not the view's
+// slice), so it holds whichever way the camera turns and can be kept from
+// frame to frame; snapped to its map's texels as the others are.
+static glm::dmat4 sunSphereMatrix(glm::dvec3 middle, double radius, glm::vec3 sunPos, double mapSize)
+{
+	const double depthMargin = 500; // GL's farPlane: casters above the box
+	const glm::dquat lightRotation = glm::conjugate(glm::dquat(glm::rotation(glm::vec3(0, 0, 1), sunPos)));
+	radius = std::ceil(radius);
+	glm::dvec3 center = lightRotation * middle;
+	const double texel = 2.0 * radius / mapSize;
+	center.x = std::floor(center.x / texel) * texel;
+	center.y = std::floor(center.y / texel) * texel;
+	const glm::dvec3 boxMin = center - radius;
+	const glm::dvec3 boxMax = center + radius;
+	const glm::dmat4 lightProjection = glm::ortho(boxMin.x, boxMax.x, boxMin.y, boxMax.y,
+		-(boxMax.z + depthMargin), -(boxMin.z - depthMargin));
+	return lightProjection * glm::mat4_cast(lightRotation);
+}
+
 // Milestone 14: SkyBoxLoaderAndDrawer::drawBefore's choice of two skies and
 // their mix, as one weight per sky (day, twilight, night).
 static glm::vec3 skyWeightsFor(float timeOfDay)
@@ -2303,11 +2322,43 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	if (const char *env = std::getenv("OURCRAFT_SHADOWS")) { lighting.shadows = glm::clamp(std::atoi(env), 0, 2); }
 	if (lighting.shadows)
 	{
-		const float cascadeEnds[3] = { 0.9985f, 0.9995f, 0.99994f };
+		const float cascadeEnds[2] = { 0.9985f, 0.9995f };
 		const double mapSizes[3] = { 2048, 2048, 1024 }; // wgpuWorld's shadowMapSizes
-		for (int i = 0; i < 3; i++)
+		for (int i = 0; i < 2; i++)
 		{
 			lighting.shadowCascades[i] = sunCascadeMatrix(c, mainLightPosition, cascadeEnds[i], mapSizes[i]);
+		}
+
+		// The far cascade, around the player out to where its shadows go
+		// (lighting.wgsl's farShadowFade: halfway into the horizon fog) and
+		// a margin, and kept: drawn again only once the player has moved a
+		// few blocks or the sun a little, and every second or so for the
+		// chunks that came and changed. Its shadows are far off, at about a
+		// block a texel, and hardly change from frame to frame; it was the
+		// most faces of any pass.
+		{
+			const double fogEnd = (chunkSystem.squareSize / 2.0) * CHUNK_SIZE - CHUNK_SIZE;
+			const double fogStart = fogEnd * glm::mix(0.92, 0.15, (double)glm::clamp(getShadingSettings().horizonFog, 0.f, 1.f));
+			const double radius = 0.5 * (fogEnd + fogStart) + 48.0;
+			static glm::dmat4 matrix(1.0);
+			static glm::dvec3 drawnAt(0.0);
+			static glm::vec3 drawnSun(0.f);
+			static double drawnRadius = -1;
+			static int age = 0;
+			const bool redraw = drawnRadius != radius || age >= 60
+				|| glm::distance(c.position, drawnAt) > 8.0
+				|| glm::dot(glm::normalize(mainLightPosition), drawnSun) < std::cos(glm::radians(0.2f));
+			if (redraw)
+			{
+				matrix = sunSphereMatrix(c.position, radius, mainLightPosition, mapSizes[2]);
+				drawnAt = c.position;
+				drawnSun = glm::normalize(mainLightPosition);
+				drawnRadius = radius;
+				age = 0;
+			}
+			else { age++; }
+			lighting.shadowCascades[2] = matrix;
+			lighting.farShadowRedraw = redraw;
 		}
 	}
 	// Milestone 14: the sky, the sun and moon, and the fog, from what

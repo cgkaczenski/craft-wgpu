@@ -46,10 +46,10 @@ const PI = 3.14159265359;
 @group(0) @binding(12) var shadowSampler: sampler_comparison;
 
 // The bias is in the map's depth, which spans the cascade's box and 500
-// blocks either side of it (Renderer's sunCascadeMatrix): about 1050, 1120
-// and 2000 blocks. So the far cascade's 0.005 is 10 blocks: nothing within
-// 10 blocks of a face shades it there, and a house has no shadows of its
-// own. That is on purpose: its map is about a block to the texel, and with
+// blocks either side of it (Renderer's sunCascadeMatrix and, for the far
+// one, sunSphereMatrix): about 1050, 1120 and 1700 blocks at view distance
+// 24. So the far cascade's 0.005 is 8 or 9 blocks: nothing that near a
+// face shades it there, and a house has no shadows of its own. That is on purpose: its map is about a block to the texel, and with
 // a bias small enough for such shadows a roof's shadow on a wall is a row
 // of block-sized teeth. sunShadow fades the nearer cascade's shadows in
 // instead.
@@ -135,6 +135,16 @@ fn cascadeShadow(cascade: u32, relative: vec3f, dotLightNormal: f32, fragCoord: 
     return pow(clamp(shadow, 0.0, 1.0), 2.2);
 }
 
+// The far cascade's shadows go out over the first half of the horizon fog
+// (world.wgsl's horizonFog: y where it starts, x where it is whole), where
+// the world is going into the sky anyway; past that its map holds no
+// casters (wgpuWorld's farShadowReach), so less is drawn into it.
+fn farShadowFade(distance: f32) -> f32 {
+    let start = u.horizonFog.y;
+    let end = 0.5 * (u.horizonFog.x + u.horizonFog.y);
+    return smoothstep(start, max(end, start + 1.0), distance);
+}
+
 // Where each cascade gives way to the next, in blocks ahead of the camera
 // (GL's 16 and 44), and over how many blocks before that the two are mixed.
 const shadowCascadeEnds = vec2f(16.0, 44.0);
@@ -150,7 +160,10 @@ fn sunShadow(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: ve
     let mode = u.lightParams.z;
     if (mode == 0) { return 1.0; }
 
-    if (viewDepth >= shadowCascadeEnds.y) { return cascadeShadow(2u, relative, dotLightNormal, fragCoord, mode); }
+    if (viewDepth >= shadowCascadeEnds.y) {
+        let far = cascadeShadow(2u, relative, dotLightNormal, fragCoord, mode);
+        return mix(far, 1.0, farShadowFade(length(relative)));
+    }
     var cascade = 1u;
     var end = shadowCascadeEnds.y;
     var blend = shadowCascadeBlend.y;

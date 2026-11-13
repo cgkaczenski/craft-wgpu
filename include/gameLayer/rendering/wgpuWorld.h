@@ -209,6 +209,10 @@ namespace wgpuWorld
 		// space (-1..1 deep) from world coordinates. Nearest cascade first.
 		int shadows = 0;
 		glm::dmat4 shadowCascades[3] = { glm::dmat4(1.0), glm::dmat4(1.0), glm::dmat4(1.0) };
+		// Whether the far cascade's map is drawn again this frame. Renderer
+		// keeps it between (its shadows hardly change from frame to frame),
+		// and shadowCascades[2] is then the matrix it was drawn with.
+		bool farShadowRedraw = true;
 
 		// Milestone 14: the sky. How much of each of GL's three baked skies
 		// (day, twilight, night) the time of day shows (drawBefore's two
