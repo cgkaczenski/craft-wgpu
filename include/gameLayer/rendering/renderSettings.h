@@ -93,6 +93,10 @@ struct ShadingSettings
 	// hidden, 1 shown. F9 flips it in game (fn+F9 on a Mac).
 	int debugMenus = 0;
 
+	// Grass blades near the camera instead of flat grass (chunkFaces.wgsl's
+	// vs_blade): 0 off, 1 on.
+	int grassBlades = 1;
+
 	glm::vec3 toneMapLift = glm::vec3(0.5);
 	glm::vec3 toneMapGain = glm::vec3(0.5);
 

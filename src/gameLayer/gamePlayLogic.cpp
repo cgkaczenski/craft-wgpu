@@ -2413,6 +2413,9 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				{
 					ImGui::SliderFloat("Particle density", &programData.renderer.precipitationDensity, 0, 1);
 				}
+				ImGui::SliderFloat("Grass blade reach", &programData.renderer.grassRadius, 4, 48);
+				ImGui::SliderFloat("Grass blade density", &programData.renderer.grassDensity, 0, 1);
+				ImGui::SliderFloat("Short grass clumps", &programData.renderer.grassClumps, 0, 1);
 				ImGui::Checkbox("Wet ground and puddles", &programData.renderer.wetGround);
 				if (programData.renderer.wetGround)
 				{

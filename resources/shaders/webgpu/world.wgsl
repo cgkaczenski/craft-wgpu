@@ -67,6 +67,11 @@ struct Uniforms {
     // The rain on the ground (chunkFaces.wgsl's groundWet): x how wet it is,
     // 0..1, y how hard it rains now, 0..1 (the rings in the puddles).
     wet: vec4f,
+    // Grass blades (chunkFaces.wgsl's vs_blade): x how far from the camera
+    // they reach, in blocks (0: off, and the tall-grass sprites stay whole),
+    // y the wind, 0..1, z how dense, 0..1, w a clump of short grass's
+    // blades next to the camera (0: no clumps).
+    grass: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 

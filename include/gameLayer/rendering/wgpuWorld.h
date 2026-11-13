@@ -135,6 +135,32 @@ namespace wgpuWorld
 	};
 	void setPrecipitation(const Precipitation &precipitation);
 
+	// Grass blades: the cells in view they grow in this frame
+	// (chunkFaces.wgsl's vs_blade has the packing: xyz the block they stand
+	// in, w the light, the tall grass's texture, whether it is a tuft and
+	// its band), sorted into groups: a band of distance (near, middle, far)
+	// times bare top (a clump of short grass) or tuft, group = band * 2 + tuft. A group's cells are
+	// drawn together, with as many blades each as its distance needs.
+	// Uploaded only when they change. Lighting::grassRadius turns them on.
+	constexpr int grassBands = 3;
+	constexpr int grassGroups = grassBands * 2;
+	// A cell's blades at full density, at any distance, and a blade's
+	// segments: a tuft's (by band), and a clump of short grass's
+	// (chunkFaces.wgsl's bladeTuftCount, bladeTuftSegments and
+	// bladeClumpSegments: keep them alike; the clump's count goes to the
+	// shader in its uniforms).
+	constexpr float grassTuftBlades = 32.f;
+	constexpr uint32_t grassTuftSegments[grassBands] = {4, 3, 2};
+	constexpr float grassClumpBlades = 16.f;
+	constexpr uint32_t grassClumpSegments = 3;
+	struct GrassGroup
+	{
+		uint32_t firstCell = 0, cells = 0;
+		uint32_t bladesPerCell = 0;
+		uint32_t segments = 0;
+	};
+	void setGrassCells(const std::vector<glm::ivec4> &cells, const GrassGroup groups[grassGroups]);
+
 	// The corner table (4 corners x 3 floats per face orientation) and the UV
 	// table (4 corners x 2 floats) that Renderer::recreateBlockGeometryData
 	// builds for OpenGL's u_vertexData and vertexUV.
@@ -232,6 +258,13 @@ namespace wgpuWorld
 		// puddles).
 		float wetness = 0;
 		float rainOnGround = 0;
+		// Grass blades (chunkFaces.wgsl's vs_blade): how far from the camera
+		// they reach, in blocks (0: none, the tall-grass sprites whole), how
+		// dense, 0..1, and the wind that bends them, 0..1.
+		float grassRadius = 0;
+		float grassDensity = 1;
+		float grassClumps = 1;          // the clumps of short grass between the tufts, 0 (none) to 1
+		float wind = 0.35f;
 
 		// Milestone 15: the post chain's settings (toneMap.frag's uniforms,
 		// as the renderer computes them). Lift and gain already mapped

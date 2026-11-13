@@ -127,6 +127,13 @@ struct Renderer
 	// screenshots.
 	bool wetGround = true;
 	float groundWetness = 0;
+	// Grass blades (chunkFaces.wgsl's vs_blade, on with the Grass setting):
+	// how far from the camera they reach, in blocks, and how dense, 0..1.
+	float grassRadius = 22.f;
+	float grassDensity = 1.f;
+	// The clumps of short grass on the grass blocks between the tufts: how
+	// full they are, 0 (none) to 1.
+	float grassClumps = 1.f;
 
 	// How much the sun shines into the lens, 0..1: on screen, toward the
 	// middle, not behind blocks or clouds. The lens flare measures it each

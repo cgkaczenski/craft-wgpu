@@ -142,6 +142,12 @@ struct Chunk
 	size_t lightsElementCountSize = 0;
 
 	unsigned char currentLod = 0;
+	// Goes up each time the chunk's opaque faces are uploaded again
+	// (sendDataToOpenGL): what is drawn changed, so anything worked out from
+	// the blocks for drawing (Renderer's grass cells) is out of date. The
+	// dirty flag can't tell: a chunk is often baked again before the
+	// renderer gets to see it dirty.
+	unsigned int geometryVersion = 0;
 	std::bitset<16> flags = {};
 	
 	DECLARE_FLAG(Dirty, 0);

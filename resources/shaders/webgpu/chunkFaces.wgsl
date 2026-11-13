@@ -148,6 +148,12 @@ struct VertexOutput {
     // across the screen, without perspective correction (`linear`), as the
     // PlayStation mapped textures. faceUV picks.
     @location(12) @interpolate(linear) affineUV: vec2f,
+    // x: 0 for a block's face; for a grass blade (vs_blade), 1 plus how far
+    // up the blade, 0 at the root to 1 at the tip. For a blade, y is its
+    // own tint, z how much of it has given way to its sprite, 0..1, and w
+    // which blade it is (bladeDissolved); for a face, y is how much of a
+    // tall-grass sprite has given way to blades, 0..1 (spriteDissolved).
+    @location(13) blade: vec4f,
 };
 
 // The texture coordinates to read with: affine in the PSX look.
@@ -199,6 +205,9 @@ const layerMask = 0x00FFFFFFu;
 fn wrapCell(a: i32, n: i32) -> i32 { return ((a % n) + n) % n; }
 
 const topOfCubeFlag = 256u;
+// Flag bit 2 (Chunk::bake): a plain tall-grass plant's sprite, which gives
+// way to blades near the camera (vs_blade).
+const tallGrassFlag = 4u;
 
 // A texture across span x span blocks: which of its slices this block's face
 // shows. The slices go up the texture array from the bottom row, left to
@@ -230,7 +239,7 @@ fn spannedLayer(entry: u32, orientation: i32, block: vec3i) -> u32 {
 fn biasUp(a: f32) -> f32 { return (a + 0.75) / 1.75; }
 fn biasUp2(a: f32) -> f32 { return ((a + 1.0) / 2.0) / 2.0 + 0.5; }
 
-// How far each flowing-water level (1-7, from the face's shape bits 8-10)
+// How far each flowing-water level (1-7, from the face's shape bits 13-15)
 // lowers the water's surface below a source's, in blocks.
 const waterLevelDrop = 0.11;
 
@@ -292,7 +301,7 @@ fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, waterLevel
 
 // One corner of a face, placed by the camera: what every vertex entry point
 // starts from.
-fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
+fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutput {
     // Water faces carry the flowing water's level in bits 13-15, above every
     // orientation: the corner table has over 5000 rows (the models), so the
     // orientation needs the low 13 bits. The attribute is a signed short, so
@@ -311,7 +320,20 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
 
     let corner = stripToCorner[vertexIndex];
     let facePosition = vec3f(blockPosition);
-    let shape = animatedCorner(orientation, corner, facePosition, waterLevel);
+    var shape = animatedCorner(orientation, corner, facePosition, waterLevel);
+
+    // A tall-grass sprite where blades grow instead: toward the camera it
+    // loses its texels one by one (spriteDissolved) while its tuft's blades
+    // come in one by one (vs_blade, by the same distance), so neither is
+    // seen to shrink or grow. Wholly gone, it is no more than a point. Not
+    // in the sun's shadow maps: there the sprite stays, and its shadow is
+    // the tuft's (the blades cast none).
+    var dissolve = 0.0;
+    if ((flags & tallGrassFlag) != 0u && u.grass.x > 0.0 && !forShadow) {
+        let away = length(vec2f(blockPosition.xz - u.positionInt.xz) - u.positionFloat.xz);
+        dissolve = 1.0 - bladeSpriteShare(away);
+        if (dissolve >= 1.0) { shape = vec3f(0.0, -0.5, 0.0); }
+    }
 
     // Integer difference first, then the fraction: exact however far the
     // world is from the origin.
@@ -356,12 +378,272 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     out.inBlock = shape;
     out.light = light;
     out.colors = colors;
+    out.blade = vec4f(0.0, dissolve, 0.0, 0.0);
     return out;
 }
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOutput {
-    return faceVertex(vertexIndex, face);
+    return faceVertex(vertexIndex, face, false);
+}
+
+// ---- Grass blades -----------------------------------------------------------
+// Real blades of grass near the camera: tufts where tall grass grows (whose
+// sprites give way to them here, faceVertex), and here and there a small
+// clump of short grass on a grass block's bare top. One instance per
+// cell, a block the blades stand in (Renderer's grassCellsInView), packed as:
+//   xyz  the block, in world blocks (the blades stand on its floor, y - 0.5)
+//   w    bits 0-7 the light byte, 8-18 the texture index of the tall
+//        grass's sprite (each blade takes a texel of it), 19 a tuft,
+//        20-21 its band of distance (0 near, 2 far)
+// A cell's blades are one strip, each blade's first and last vertex doubled
+// to join it to the next with triangles of no area. A blade is
+// bladeBandSegments segments, narrowing to a point; where it stands, its
+// height, width, turn, lean and texel come from its cell and number, so it
+// is the same every frame.
+//
+// What makes a field of them read as grass rather than spikes:
+//  - Many blades: bladeTuftCount in a tuft, u.grass.w in a clump, spread
+//    evenly, and as many at every distance.
+//  - Patches: a noise across the world makes the grass taller and greener
+//    here, with more clumps; shorter and drier there, with few (bladeNoise).
+//  - Colour and light as the sprite's, so the two can't be told apart
+//    where one gives way to the other: each blade is one texel of the
+//    sprite's own picture, lit with a sprite face's normal, and its colour
+//    from root to tip follows the picture's rows (bladeAlbedo).
+//  - Wind: gusts of noise rolling downwind, bending a blade more toward its
+//    tip, and a flutter of its own.
+// It is lit by fs_main like a block's face. Toward the edge of u.grass.x
+// the blades thin out a texel-high piece at a time (bladeDissolved) as the
+// sprite's texels come back (faceVertex); a clump, which has no sprite,
+// thins out there too.
+
+@group(2) @binding(0) var<storage, read> grassCells: array<vec4i>;
+
+// A tuft's blades at most, and its blade's segments in each band; a clump's
+// blade's segments (wgpuWorld's grassTuftBlades, grassTuftSegments and
+// grassClumpSegments: keep them alike). u.grass.w is a clump's blades at
+// most.
+const bladeTuftCount = 32.0;
+const bladeTuftSegments = array<u32, 4>(4u, 3u, 2u, 2u);
+const bladeClumpSegments = 3u;
+const bladeHidden = vec4f(0.0, 0.0, 2.0, 1.0); // beyond the far plane: clipped
+
+fn bladeHash(p: vec3i, i: u32) -> vec4f {
+    var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xcb1ab31fu ^ bitcast<u32>(p.z) * 0xd8163841u
+        ^ i * 0x9e3779b9u;
+    var r: vec4f;
+    for (var k = 0; k < 4; k++) {
+        h = (h ^ (h >> 16u)) * 0x7feb352du;
+        h = (h ^ (h >> 15u)) * 0x846ca68bu;
+        h = h ^ (h >> 16u);
+        r[k] = f32(h >> 8u) / 16777216.0;
+    }
+    return r;
+}
+
+// Smooth noise across the world, 0..1: a value at every whole point, eased
+// between them.
+fn bladeLattice(p: vec2i) -> f32 {
+    var h = bitcast<u32>(p.x) * 0x8da6b343u ^ bitcast<u32>(p.y) * 0xd8163841u;
+    h = (h ^ (h >> 16u)) * 0x7feb352du;
+    h = (h ^ (h >> 15u)) * 0x846ca68bu;
+    return f32((h ^ (h >> 16u)) >> 8u) / 16777216.0;
+}
+fn bladeNoise(p: vec2f) -> f32 {
+    let cell = floor(p);
+    let f = p - cell;
+    let e = f * f * (3.0 - 2.0 * f);
+    let c = vec2i(cell);
+    return mix(mix(bladeLattice(c), bladeLattice(c + vec2i(1, 0)), e.x),
+        mix(bladeLattice(c + vec2i(0, 1)), bladeLattice(c + vec2i(1, 1)), e.x), e.y);
+}
+
+// The patches, 0..1 across the world.
+fn bladePatch(world: vec2f) -> f32 {
+    return 0.65 * bladeNoise(world * 0.19) + 0.35 * bladeNoise(world * 0.53 + vec2f(31.7, 11.3));
+}
+
+// Where the blades give way to the tall grass's sprites, toward the edge of
+// the reach: how much of the sprite shows `away` blocks from the camera, 0
+// to 1. The blades show as much less. Every blade is there at every
+// distance short of that: a cell never gains or loses blades as the camera
+// moves, which is seen as grass growing and dying back (Renderer's
+// grassCellsInView draws the same count in every band).
+fn bladeSpriteShare(away: f32) -> f32 {
+    return smoothstep(u.grass.x * 0.62, u.grass.x * 0.95, away);
+}
+
+// A blade giving way to its sprite: whether this piece of it has gone yet.
+// A piece is a texel high (16 to a block, the sprite's own grain), and each
+// has its own turn, the same on every frame: the blade is not seen to
+// shrink or to vanish at once, it thins out as the sprite's texels fill in
+// (spriteDissolved). in.blade.z is how much has gone, in.blade.w the blade.
+fn bladeDissolved(in: VertexOutput) -> bool {
+    if (in.blade.x <= 0.0 || in.blade.z <= 0.0) { return false; }
+    let piece = vec2f(floor((in.inBlock.y + 0.5) * 16.0), floor(in.blade.w * 1024.0));
+    return fract(sin(dot(piece, vec2f(12.9898, 78.233))) * 43758.5453) < in.blade.z;
+}
+
+// A tall-grass sprite giving way to blades: whether this texel of it has
+// gone yet. Each texel has its own turn, the same on every frame.
+fn spriteDissolved(in: VertexOutput) -> bool {
+    if (in.blade.x != 0.0 || in.blade.y <= 0.0) { return false; }
+    let texel = floor(faceUV(in) * 16.0) + vec2f(in.blockPos.xz) * 17.0 + f32(in.blockPos.y) * 5.0;
+    return fract(sin(dot(texel, vec2f(12.9898, 78.233))) * 43758.5453) < in.blade.y;
+}
+
+// A blade's colour: the sprite's picture read up the blade's own column, the
+// row at the blade's height in the block, so a tuft is dark low down and
+// light higher up just where its sprite is, in the same texel-high steps.
+// Where that texel is see-through (the blade stands taller than the picture
+// there), the blade's own texel, which never is (vs_blade).
+fn bladeAlbedo(in: VertexOutput, own: vec4f) -> vec4f {
+    // The picture's v runs up, as a sprite's faces map it (0 at its foot).
+    let row = (floor(clamp(in.inBlock.y + 0.5, 0.0, 0.999) * 16.0) + 0.5) / 16.0;
+    let pick = textureSampleLevel(blockTextures, blockSampler, vec2f(in.uv.x, row), in.layer, 0.0);
+    if (pick.a > 0.5) { return pick; }
+    return own;
+}
+
+@vertex
+fn vs_blade(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = bladeHidden;
+
+    let cell = grassCells[instance];
+    let packed = u32(cell.w);
+    let light = packed & 0xFFu;
+    let textureIndex = (packed >> 8u) & 0x7FFu;
+    let tuft = ((packed >> 19u) & 1u) != 0u;
+    let segments = select(bladeClumpSegments, bladeTuftSegments[(packed >> 20u) & 3u], tuft);
+
+    // Which blade of the cell, and which vertex of its strip.
+    let perBlade = 2u * segments + 3u;
+    let number = vertexIndex / perBlade;
+    let corner = u32(clamp(i32(vertexIndex % perBlade) - 1, 0, i32(2u * segments)));
+
+    let seed = number + select(0u, 7919u, tuft);
+    let r = bladeHash(cell.xyz, seed);
+    let r2 = bladeHash(cell.xyz, seed + 977u);
+    let cellShift = bladeHash(cell.xyz, select(4099u, 5003u, tuft));
+
+    // The patches: lusher grass here, poorer there. For the cell as a whole
+    // (whether it has a clump) and, below, for each blade.
+    let cellLush = smoothstep(0.25, 0.75, bladePatch(vec2f(cell.xz)));
+    // A clump: on some of the bare grass blocks, more of them in the lush
+    // patches; its own place in the block and its own size.
+    let clump = bladeHash(cell.xyz, 6007u);
+    if (!tuft && clump.z > mix(0.12, 0.7, cellLush)) { return out; }
+    let clumpSize = mix(0.6, 1.0, clump.w);
+
+    // Where in the block it stands: the next point of a sequence that fills
+    // its patch evenly however many of them show; about the middle for a
+    // tuft, about the clump's own middle for a clump.
+    let spot = fract(cellShift.xy + f32(number) * vec2f(0.7548776662, 0.5698402910)) - 0.5;
+    let jitter = select((clump.xy - 0.5) * 0.55 + spot * (0.22 + 0.2 * r.x) * clumpSize,
+        spot * (0.7 + 0.25 * r.x), tuft);
+    let cellRelative = vec3f(cell.xyz - u.positionInt.xyz) - u.positionFloat.xyz;
+    let base = cellRelative + vec3f(jitter.x, -0.5, jitter.y);
+    let world = vec2f(cell.xz) + jitter;
+
+    let radius = u.grass.x;
+    let away = length(base.xz);
+    if (radius <= 0.0 || away >= radius) { return out; }
+
+    let lush = smoothstep(0.25, 0.75, bladePatch(world));
+
+    // As many blades at any distance (the density setting's share of them).
+    // How much of each has gone to the sprite, by how far the middle of the
+    // block is, so it changes as one: wholly gone, no blade.
+    let cellAway = length(cellRelative.xz);
+    let gone = bladeSpriteShare(cellAway);
+    let count = u.grass.z * select(u.grass.w * clumpSize, bladeTuftCount, tuft);
+    if (f32(number) >= count || gone >= 1.0) { return out; }
+
+    // One texel of the tall grass's picture, its own: the next of a few
+    // tries that isn't see-through (none: no blade).
+    let layer = textureLayers[textureIndex] & layerMask;
+    let pictureSize = vec2f(textureDimensions(blockTextures).xy);
+    var texel = vec2f(0.0);
+    var found = false;
+    for (var k = 0u; k < 6u && !found; k++) {
+        let at = (floor(fract(r2.xy + f32(k) * vec2f(0.7548776662, 0.5698402910)) * 16.0) + 0.5) / 16.0;
+        if (textureLoad(blockTextures, vec2i(at * pictureSize), i32(layer), 0).a > 0.5) {
+            texel = at;
+            found = true;
+        }
+    }
+    if (!found) { return out; }
+
+    let height = select(mix(0.16, 0.42, r.w) * clumpSize, mix(0.4, 0.85, r.w), tuft) * mix(0.85, 1.0, lush);
+    // Most of a sprite's texel wide (a 16th of a block).
+    let width = select(0.042, 0.055, tuft) * mix(0.8, 1.2, r2.x);
+
+    // Its turn: its own, pulled part of the way to facing the camera so
+    // fewer are seen edge on.
+    let angle = r2.y * 6.2831853;
+    var right = vec3f(cos(angle), 0.0, sin(angle));
+    let toCamera = normalize(vec2f(-base.x, -base.z) + vec2f(0.0001, 0.0));
+    let across = vec3f(-toCamera.y, 0.0, toCamera.x);
+    if (dot(right, across) < 0.0) { right = -right; }
+    right = normalize(mix(right, across, 0.4));
+
+    // Its own lean, and the wind: gusts of noise travelling downwind, and a
+    // flutter of its own.
+    let t = u.animation.x;
+    let leanAngle = r2.z * 6.2831853;
+    let lean = vec3f(cos(leanAngle), 0.0, sin(leanAngle)) * mix(0.08, 0.6, r2.w * r2.w);
+    let windDirection = normalize(vec2f(1.0, 0.35));
+    let gust = 0.7 * bladeNoise(world * 0.09 - windDirection * t * 0.55)
+        + 0.3 * bladeNoise(world * 0.31 - windDirection * t * 1.1 + vec2f(5.2, 9.1));
+    let sway = (0.1 + 1.5 * gust * gust) * u.grass.y * 0.6 + sin(t * (2.2 + r.x * 1.5) + r.y * 6.2831853) * 0.03;
+    let bend = lean + vec3f(windDirection.x, 0.0, windDirection.y) * sway;
+
+    // The strip: a pair of corners per level, then the tip. It keeps its
+    // width low down and narrows toward the tip, as a blade does.
+    let level = min(corner / 2u, segments);
+    let along = f32(level) / f32(segments);
+    var side = select(-1.0, 1.0, (corner & 1u) == 1u);
+    if (level == segments) { side = 0.0; }
+    let taper = 1.0 - along * along;
+    // Bent along its length, a little shorter the more it bends.
+    let rise = height * along * (1.0 - 0.3 * min(dot(bend, bend), 1.0));
+    let relative = base + vec3f(0.0, rise, 0.0) + bend * height * along * along
+        + right * side * width * 0.5 * taper;
+
+    out.position = psxSnap(u.viewProjection * vec4f(relative, 1.0));
+    out.uv = texel;
+    out.affineUV = texel;
+    out.layer = layer;
+    out.normalLayer = textureLayers[textureIndex + 1u] & layerMask;
+    out.materialLayer = textureLayers[textureIndex + 2u] & layerMask;
+    // Lit as the sprite is: its faces' fixed darkening, and the normal of
+    // one of its two crossed planes, the side toward the camera (the side of
+    // a sprite that is seen). With any other normal the sun lights a tuft
+    // and its sprite differently, and the change from one to the other
+    // shows.
+    out.ambientMultiplier = vertexColor[6];
+    out.relative = relative;
+    let plane = select(vec3f(0.70710678, 0.0, 0.70710678), vec3f(0.70710678, 0.0, -0.70710678), r.z < 0.5);
+    out.normal = plane * select(-1.0, 1.0, dot(plane, base) <= 0.0);
+    out.flags = 0u;
+    out.blockPos = cell.xyz;
+    out.inBlock = relative - cellRelative;
+    out.light = light;
+    out.colors = 0u;
+    // Its tint, a little lighter or darker than the next; how much of it
+    // has gone to its sprite; and which blade it is, for bladeDissolved (in
+    // steps, so the fragment stage reads the same number all over it).
+    out.blade = vec4f(1.0 + along, mix(0.93, 1.07, r2.w), gone, (floor(r.y * 1024.0) + 0.5) / 1024.0);
+    return out;
+}
+
+// The blades' depth prepass: only the depth, less the pieces of a blade that
+// have gone to its sprite.
+@fragment
+fn fs_bladeDepth(in: VertexOutput) {
+    if (bladeDissolved(in)) { discard; }
 }
 
 // Milestone 13: the sun's shadow maps (renderShadow, zpass.vert with the
@@ -372,7 +654,7 @@ override shadowCascade: u32 = 0u;
 
 @vertex
 fn vs_shadow(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOutput {
-    var out = faceVertex(vertexIndex, face);
+    var out = faceVertex(vertexIndex, face, true);
     out.position = u.shadowMatrices[shadowCascade] * vec4f(out.relative, 1.0);
     return out;
 }
@@ -381,7 +663,7 @@ fn vs_shadow(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> Vertex
 @fragment
 fn fs_depth(in: VertexOutput) {
     let albedo = textureSample(blockTextures, blockSampler, faceUV(in), in.layer);
-    if (albedo.a <= 0.0) { discard; }
+    if (albedo.a <= 0.0 || spriteDissolved(in)) { discard; }
 }
 
 fn isWater(in: VertexOutput) -> bool {
@@ -622,7 +904,12 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     // The sun's shadow, with the face's own normal (GL's v_normal) and the
     // distance ahead of the camera that picks the cascade.
     let viewDepth = -(u.view * vec4f(in.relative, 1.0)).z;
-    let shadow = sunShadow(in.relative, viewDepth, dot(u.sunDirection.xyz, in.normal), in.position.xy);
+    // A grass blade asks from just above its block: its tuft's sprite is
+    // still in the shadow maps, to shade the ground, and would shade the
+    // blades standing inside it at random.
+    var shadowFrom = in.relative;
+    if (in.blade.x > 0.0) { shadowFrom.y += 0.55 - in.inBlock.y; }
+    let shadow = sunShadow(shadowFrom, viewDepth, dot(u.sunDirection.xyz, in.normal), in.position.xy);
 
     let ambient = computeAmbient(withHeldLight(levels, in.relative, in.normal), in.normal, in.ambientMultiplier,
         (in.flags & 2u) != 0u, ao, shadow);
@@ -984,14 +1271,18 @@ struct GBuffer {
 
 @fragment
 fn fs_main(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> GBuffer {
-    let t = readTexels(in);
+    var t = readTexels(in);
     // GL's alpha test: cut-out leaves, grass and flowers. After the prepass
     // this only matters with the prepass off; with it, Equal has already
     // dropped the cut-out pixels' fragments.
-    if (t.albedo.a <= 0.0) { discard; }
+    if (t.albedo.a <= 0.0 || spriteDissolved(in) || bladeDissolved(in)) { discard; }
+    if (in.blade.x > 0.0) { t.albedo = bladeAlbedo(in, t.albedo); }
 
-    let s = shade(in, t, frontFacing);
-    let lit = reflectSurface(in, s).color;
+    // A blade's normal already faces the camera, whichever way its strip
+    // winds.
+    let s = shade(in, t, frontFacing || in.blade.x > 0.0);
+    var lit = reflectSurface(in, s).color;
+    if (in.blade.x > 0.0) { lit *= in.blade.y; }
     var out: GBuffer;
     out.color = vec4f(applyFog(in, lit), 1.0);
     out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, s.roughness);

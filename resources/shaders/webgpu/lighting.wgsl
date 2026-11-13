@@ -45,6 +45,14 @@ const PI = 3.14159265359;
 // depth stored there, 0 where something nearer the sun covers it.
 @group(0) @binding(12) var shadowSampler: sampler_comparison;
 
+// The bias is in the map's depth, which spans the cascade's box and 500
+// blocks either side of it (Renderer's sunCascadeMatrix): about 1050, 1120
+// and 2000 blocks. So the far cascade's 0.005 is 10 blocks: nothing within
+// 10 blocks of a face shades it there, and a house has no shadows of its
+// own. That is on purpose: its map is about a block to the texel, and with
+// a bias small enough for such shadows a roof's shadow on a wall is a row
+// of block-sized teeth. sunShadow fades the nearer cascade's shadows in
+// instead.
 fn shadowBias(dotLightNormal: f32, cascade: u32) -> f32 {
     if (cascade == 0u) { return max(0.0002, 0.0007 * (1.0 - dotLightNormal)); }
     if (cascade == 1u) { return max(0.0003, 0.0010 * (1.0 - dotLightNormal)); }
@@ -88,17 +96,10 @@ fn vogelDiskSample(index: i32, count: i32, phi: f32) -> vec2f {
     return vec2f(r * cos(theta), r * sin(theta));
 }
 
-// How much of the sun reaches a point, 0-1: GL's shadowCalc2. `relative` is
-// the camera-relative position, `viewDepth` its distance ahead of the
-// camera, which picks the cascade (GL's 16 and 44 blocks), and `fragCoord`
+// How much of the sun reaches a point by one cascade's map, 0-1: GL's
+// shadowCalc2. `relative` is the camera-relative position and `fragCoord`
 // the pixel, which turns the soft disk.
-fn sunShadow(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: vec2f) -> f32 {
-    let mode = u.lightParams.z;
-    if (mode == 0) { return 1.0; }
-
-    var cascade = 2u;
-    if (viewDepth < 16.0) { cascade = 0u; } else if (viewDepth < 44.0) { cascade = 1u; }
-
+fn cascadeShadow(cascade: u32, relative: vec3f, dotLightNormal: f32, fragCoord: vec2f, mode: i32) -> f32 {
     // To the map's texels: x right, y down (render targets are top-first).
     // The depth is already 0..1, the same number as GL's z * 0.5 + 0.5, so
     // GL's biases carry over.
@@ -132,6 +133,36 @@ fn sunShadow(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: ve
         shadow /= f32(sampleCount);
     }
     return pow(clamp(shadow, 0.0, 1.0), 2.2);
+}
+
+// Where each cascade gives way to the next, in blocks ahead of the camera
+// (GL's 16 and 44), and over how many blocks before that the two are mixed.
+const shadowCascadeEnds = vec2f(16.0, 44.0);
+const shadowCascadeBlend = vec2f(3.0, 8.0);
+
+// How much of the sun reaches a point, 0-1. `viewDepth` is its distance
+// ahead of the camera, which picks the cascade. Over the last blocks of a
+// cascade it is mixed with the next: the two differ (a coarser map, a
+// larger bias, so the far one has none of a building's own shadows), and a
+// hard edge between them is a line that sweeps across the world, shadows
+// appearing behind it, as the camera moves.
+fn sunShadow(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: vec2f) -> f32 {
+    let mode = u.lightParams.z;
+    if (mode == 0) { return 1.0; }
+
+    if (viewDepth >= shadowCascadeEnds.y) { return cascadeShadow(2u, relative, dotLightNormal, fragCoord, mode); }
+    var cascade = 1u;
+    var end = shadowCascadeEnds.y;
+    var blend = shadowCascadeBlend.y;
+    if (viewDepth < shadowCascadeEnds.x) {
+        cascade = 0u;
+        end = shadowCascadeEnds.x;
+        blend = shadowCascadeBlend.x;
+    }
+    let shadow = cascadeShadow(cascade, relative, dotLightNormal, fragCoord, mode);
+    let next = smoothstep(end - blend, end, viewDepth);
+    if (next <= 0.0) { return shadow; }
+    return mix(shadow, cascadeShadow(cascade + 1u, relative, dotLightNormal, fragCoord, mode), next);
 }
 
 // ---- The BRDF (defaultShader.frag, same names) ---------------------------

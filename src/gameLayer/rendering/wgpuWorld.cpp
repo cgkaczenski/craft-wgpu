@@ -94,8 +94,9 @@ namespace
 		glm::vec4 indoors;           // x how far indoors the camera is, 0..1 (the whiteout)
 		glm::vec4 heldLight;         // the held light: x its level (0 none), y reach, z bands, w dithered share
 		glm::vec4 wet;               // x how wet the ground is, y how hard it rains now (the puddles' rings)
+		glm::vec4 grass;             // x the blades' reach (0 off), y the wind, z the density, w a clump's blades (vs_blade)
 	};
-	static_assert(sizeof(Uniforms) == 656, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 672, "uniform layout must match world.wgsl");
 
 	// The PSX look's lines down the screen: the PlayStation's usual 240.
 	constexpr float psxLines = 240.f;
@@ -364,6 +365,24 @@ namespace
 		TextureFormat hdrFormat = TextureFormat::RGBA16Float;
 		RenderPipeline prepassPipeline = nullptr;   // depth only, every target masked
 		RenderPipeline solidLessPipeline = nullptr; // the solid pass with the prepass off
+		// Grass blades (chunkFaces.wgsl's vs_blade): drawn in the opaque pass
+		// after the chunks, from setGrassCells' cells.
+		BindGroupLayout grassBindGroupLayout = nullptr;
+		PipelineLayout bladePipelineLayout = nullptr;
+		RenderPipeline bladePipeline = nullptr;        // lit, depth Less, on its own
+		// With the depth prepass on: the blades' depth first, with the
+		// chunks', then lit where the depth is Equal. Blades overlap each
+		// other many times over, and this way a pixel is lit once (and the
+		// ground under them not at all).
+		RenderPipeline bladePrepassPipeline = nullptr;
+		RenderPipeline bladeEqualPipeline = nullptr;
+		Buffer grassCellBuffer = nullptr;
+		uint64_t grassCellCapacity = 0; // in cells
+		BindGroup grassBindGroup = nullptr;
+		uint32_t grassCells = 0;
+		std::vector<glm::ivec4> grassCellsUploaded; // what the buffer holds
+		GrassGroup grassGroupsNow[grassGroups] = {};
+		float grassRadius = 0;          // this frame's reach, 0: no blades
 		Texture gBufferTextures[GBufferSlots] = {};
 		TextureView gBufferViews[GBufferSlots] = {};
 		TextureView depthSampleView = nullptr;      // the depth, for the depth view
@@ -840,10 +859,11 @@ namespace
 			entries[i].buffer.minBindingSize = 0;
 		}
 
-		// 4: the block texture array; 5: its sampler. Fragment stage.
+		// 4: the block texture array; 5: its sampler. Fragment stage; the
+		// textures the vertex stage too (vs_blade picks a blade's texel).
 		entries[4] = entries[0];
 		entries[4].binding = 4;
-		entries[4].visibility = ShaderStage::Fragment;
+		entries[4].visibility = ShaderStage::Fragment | ShaderStage::Vertex;
 		entries[4].buffer.type = BufferBindingType::BindingNotUsed;
 		entries[4].buffer.minBindingSize = 0;
 		entries[4].texture.sampleType = TextureSampleType::Float;
@@ -1123,6 +1143,7 @@ namespace
 		float zBias = 0.f;        // the WGSL `zBias` override (vertex stage)
 		const char *vertexEntry = "vs_main";
 		int shadowCascade = -1;   // the WGSL `shadowCascade` override, -1 to leave it
+		bool faceBuffer = true;   // false: no face arena (vs_blade reads its own storage)
 	};
 
 	RenderPipeline createFacePipeline(ShaderModule module, const FacePipelineDesc &p)
@@ -1169,8 +1190,8 @@ namespace
 		}
 		desc.vertex.constantCount = vertexConstantCount;
 		desc.vertex.constants = vertexConstantCount ? vertexConstants : nullptr;
-		desc.vertex.bufferCount = 1;
-		desc.vertex.buffers = &faceLayout;
+		desc.vertex.bufferCount = p.faceBuffer ? 1 : 0;
+		desc.vertex.buffers = p.faceBuffer ? &faceLayout : nullptr;
 
 		// A strip per instance: 4 vertices make the face's two triangles.
 		// Strips never join across instances.
@@ -1229,13 +1250,25 @@ namespace
 
 	PipelineLayout createPipelineLayout(const char *label, BindGroupLayout *groups, uint32_t count)
 	{
-		WGPUBindGroupLayout layouts[2] = {};
-		for (uint32_t i = 0; i < count; i++) { layouts[i] = groups[i]; }
+		WGPUBindGroupLayout layouts[3] = {};
+		for (uint32_t i = 0; i < count && i < 3; i++) { layouts[i] = groups[i]; }
 		PipelineLayoutDescriptor layoutDesc = Default;
 		layoutDesc.label = StringView(label);
 		layoutDesc.bindGroupLayoutCount = count;
 		layoutDesc.bindGroupLayouts = layouts;
 		return wgpuDevice().createPipelineLayout(layoutDesc);
+	}
+
+	// The grass blades' bind group layout (group 2 of vs_blade): the cells.
+	bool createGrassResources()
+	{
+		BindGroupLayoutEntry entry = emptyEntry(0);
+		entry.visibility = ShaderStage::Vertex;
+		entry.buffer.type = BufferBindingType::ReadOnlyStorage;
+		entry.buffer.hasDynamicOffset = false;
+		entry.buffer.minBindingSize = sizeof(glm::ivec4);
+		w.grassBindGroupLayout = makeLayout("world grass bind group layout", &entry, 1);
+		return w.grassBindGroupLayout != nullptr;
 	}
 
 	bool createPipelines()
@@ -1291,6 +1324,29 @@ namespace
 		opaque.depthWrite = true;
 		w.solidLessPipeline = createFacePipeline(module, opaque);
 
+		// Grass blades: lit as the opaque faces are, after them, GL_LESS on
+		// their own (no prepass), both sides (vs_blade turns each to face the
+		// camera, but a bent tip may still show its back).
+		BindGroupLayout bladeGroups[3] = { w.bindGroupLayout, w.peelBindGroupLayout, w.grassBindGroupLayout };
+		w.bladePipelineLayout = createPipelineLayout("world grass blade pipeline layout", bladeGroups, 3);
+		FacePipelineDesc blades;
+		blades.label = "world grass blades";
+		blades.layout = w.bladePipelineLayout;
+		blades.vertexEntry = "vs_blade";
+		blades.faceBuffer = false;
+		blades.cull = CullMode::None;
+		w.bladePipeline = createFacePipeline(module, blades);
+		blades.label = "world grass blades, depth Equal";
+		blades.depthCompare = CompareFunction::Equal;
+		blades.depthWrite = false;
+		w.bladeEqualPipeline = createFacePipeline(module, blades);
+		blades.label = "world grass blades, depth prepass";
+		blades.depthCompare = CompareFunction::Less;
+		blades.depthWrite = true;
+		blades.fragmentEntry = "fs_bladeDepth";
+		blades.targets = ColorTargets::GBufferMasked;
+		w.bladePrepassPipeline = createFacePipeline(module, blades);
+
 		// Pass 4: water into the peel depth, no color (glColorMask 0).
 		FacePipelineDesc waterDepth;
 		waterDepth.label = "world water depth";
@@ -1338,7 +1394,7 @@ namespace
 		module.release();
 		return w.pipeline && w.waterDepthPipeline && w.peelPipeline && w.finalPeelPipeline
 			&& w.finalPlainPipeline && w.decalPipeline && w.shadowPipelines[0] && w.shadowPipelines[1]
-			&& w.shadowPipelines[2] && !invalid;
+			&& w.shadowPipelines[2] && w.bladePipeline && w.bladeEqualPipeline && w.bladePrepassPipeline && !invalid;
 	}
 
 	// The dropped block cubes and the gizmo lines (entities.wgsl).
@@ -4887,7 +4943,8 @@ namespace
 			&w.bloomBlurPipelines[0], &w.bloomBlurPipelines[1], &w.bloomApplyPipeline, &w.exposurePipeline,
 			&w.lastColorPipeline, &w.hbaoPipeline, &w.hbaoApplyPipeline,
 			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline,
-			&w.weatherDrawPipeline };
+			&w.weatherDrawPipeline,
+			&w.bladePipeline, &w.bladeEqualPipeline, &w.bladePrepassPipeline };
 		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
 		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
 		for (RenderPipeline &pipeline : w.viewPipelines) { onPipeline(pipeline); }
@@ -4898,7 +4955,8 @@ namespace
 			&w.sunRaysPipelineLayout, &w.postPipelineLayout, &w.toneMapPipelineLayout, &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout,
 			&w.hbaoPipelineLayout, &w.hbaoApplyPipelineLayout, &w.rayMaskPipelineLayout, &w.rayBlurPipelineLayout,
 			&w.warpPipelineLayout, &w.precipitationPipelineLayout,
-			&w.weatherComputePipelineLayout, &w.weatherDrawPipelineLayout };
+			&w.weatherComputePipelineLayout, &w.weatherDrawPipelineLayout,
+			&w.bladePipelineLayout };
 		for (PipelineLayout *layout : layouts) { onLayout(*layout); }
 	}
 
@@ -4918,7 +4976,7 @@ namespace
 
 		if (!createLayoutAndUniforms() || !createSkyResources() || !createPostResources() || !createBloomResources()
 			|| !createHbaoResources() || !createRaysAndWarpResources() || !createPrecipitationResources()
-			|| !createWeatherResources()
+			|| !createWeatherResources() || !createGrassResources()
 			|| !createPipelineSet())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
@@ -5194,6 +5252,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	// dithered into the next.
 	uniforms.heldLight = glm::vec4((float)glm::clamp(lighting.heldLight, 0, 15), 12.f, 5.f, 0.45f);
 	w.frameHeldLight = uniforms.heldLight;
+	w.grassRadius = w.grassCells ? std::max(lighting.grassRadius, 0.f) : 0.f;
+	uniforms.grass = glm::vec4(w.grassRadius, glm::clamp(lighting.wind, 0.f, 1.f),
+		glm::clamp(lighting.grassDensity, 0.f, 1.f), grassClumpBlades * glm::clamp(lighting.grassClumps, 0.f, 1.f));
 	uniforms.wet = glm::vec4(glm::clamp(lighting.wetness, 0.f, 1.f), glm::clamp(lighting.rainOnGround, 0.f, 1.f), 0.f, 0.f);
 	w.framePsx = psx;
 	w.frameSurface = glm::vec2((float)width, (float)height);
@@ -5464,6 +5525,25 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		// guard pops before pass.end() (an open group there is a validation
 		// error), hence the braces.
 		RenderPassEncoder pass = beginGBufferPass(encoder, true, "world opaque pass", true);
+		// Grass blades, on the ground the chunks draw. An instance is a
+		// cell; its blades are one strip, each blade's first and last vertex
+		// doubled to join it to the next (vs_blade).
+		const bool blades = w.bladePipeline && w.grassBindGroup && w.grassCells && w.grassRadius > 0.f;
+		auto drawBlades = [&](RenderPipeline pipeline)
+		{
+			pass.setPipeline(pipeline);
+			pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+			pass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
+			pass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
+			for (const GrassGroup &g : w.grassGroupsNow)
+			{
+				if (!g.cells || !g.bladesPerCell) { continue; }
+				pass.draw((2 * g.segments + 3) * g.bladesPerCell, g.cells, 0, g.firstCell);
+			}
+		};
+		// With the prepass the blades' depth goes down with the chunks',
+		// before anything is lit.
+		const bool bladesInPrepass = blades && depthPrepass && w.arena && opaqueCount;
 		if (w.arena && opaqueCount)
 		{
 			if (depthPrepass)
@@ -5472,9 +5552,19 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 				bindFaces(pass, w.prepassPipeline, false);
 				drawRecords(pass, mode, 0, opaqueCount);
 			}
+			if (bladesInPrepass)
+			{
+				DebugGroup group(pass, "grass blades: depth prepass");
+				drawBlades(w.bladePrepassPipeline);
+			}
 			DebugGroup group(pass, depthPrepass ? "chunks: solid (depth Equal)" : "chunks: solid (depth Less)");
 			bindFaces(pass, depthPrepass ? w.pipeline : w.solidLessPipeline, true);
 			drawRecords(pass, mode, 0, opaqueCount);
+		}
+		if (blades)
+		{
+			DebugGroup group(pass, bladesInPrepass ? "grass blades (depth Equal)" : "grass blades (depth Less)");
+			drawBlades(bladesInPrepass ? w.bladeEqualPipeline : w.bladePipeline);
 		}
 
 		// Dropped block items: opaque, so before the transparent passes (GL
@@ -5937,6 +6027,45 @@ void setPrecipitation(const Precipitation &precipitation)
 	w.precipitationPending = true;
 }
 
+void setGrassCells(const std::vector<glm::ivec4> &cells, const GrassGroup groups[grassGroups])
+{
+	if (!w.initialized) { return; }
+	for (int i = 0; i < grassGroups; i++) { w.grassGroupsNow[i] = groups[i]; }
+	// The same cells as last frame (the camera stood still): the buffer
+	// already holds them.
+	if (cells == w.grassCellsUploaded && (cells.empty() || w.grassBindGroup))
+	{
+		w.grassCells = (uint32_t)cells.size();
+		return;
+	}
+	w.grassCellsUploaded = cells;
+	w.grassCells = 0;
+	if (cells.empty()) { return; }
+
+	bool grown = false;
+	if (!ensureBuffer(w.grassCellBuffer, w.grassCellCapacity, cells.size(), sizeof(glm::ivec4),
+		BufferUsage::Storage, "world grass cells", grown)) { w.grassCellsUploaded.clear(); return; }
+	wgpuQueue().writeBuffer(w.grassCellBuffer, 0, cells.data(), cells.size() * sizeof(glm::ivec4));
+
+	if (grown || !w.grassBindGroup)
+	{
+		if (w.grassBindGroup) { w.grassBindGroup.release(); w.grassBindGroup = nullptr; }
+		BindGroupEntry entry = Default;
+		entry.binding = 0;
+		entry.buffer = w.grassCellBuffer;
+		entry.offset = 0;
+		entry.size = w.grassCellCapacity * sizeof(glm::ivec4);
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world grass bind group");
+		groupDesc.layout = w.grassBindGroupLayout;
+		groupDesc.entryCount = 1;
+		groupDesc.entries = &entry;
+		w.grassBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		if (!w.grassBindGroup) { return; }
+	}
+	w.grassCells = (uint32_t)cells.size();
+}
+
 int sunVisibleSamples()
 {
 	return (int)w.sunSamples;
@@ -6239,6 +6368,17 @@ void shutdown()
 	}
 	w.precipitationColumnCapacity = 0;
 	w.precipitationPending = false;
+	// Grass blades.
+	if (w.grassBindGroup) { w.grassBindGroup.release(); w.grassBindGroup = nullptr; }
+	if (w.bladePipeline) { w.bladePipeline.release(); w.bladePipeline = nullptr; }
+	if (w.bladeEqualPipeline) { w.bladeEqualPipeline.release(); w.bladeEqualPipeline = nullptr; }
+	if (w.bladePrepassPipeline) { w.bladePrepassPipeline.release(); w.bladePrepassPipeline = nullptr; }
+	if (w.bladePipelineLayout) { w.bladePipelineLayout.release(); w.bladePipelineLayout = nullptr; }
+	if (w.grassBindGroupLayout) { w.grassBindGroupLayout.release(); w.grassBindGroupLayout = nullptr; }
+	if (w.grassCellBuffer) { w.grassCellBuffer.release(); w.grassCellBuffer = nullptr; }
+	w.grassCellCapacity = 0;
+	w.grassCells = 0;
+	w.grassCellsUploaded.clear();
 	// Weather particles.
 	for (BindGroup *group : { &w.weatherComputeBindGroup, &w.weatherDrawBindGroup })
 	{

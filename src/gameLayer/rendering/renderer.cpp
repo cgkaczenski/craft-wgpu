@@ -1800,6 +1800,186 @@ static int heldTypeOf(ClientEntityManager &entityManager, int currentHeldItemInd
 	return handItem ? handItem->type : 0;
 }
 
+// Grass blades: the cells they grow in (chunkFaces.wgsl's vs_blade has the
+// packing), from the chunks around the camera. A chunk's cells are worked out
+// once and kept until the chunk's faces are uploaded again (its
+// geometryVersion: a block broke, was placed or its light changed) or another
+// chunk takes its place, a few chunks a frame. `version` changes whenever the
+// list does, so the GPU copy is only rewritten then.
+namespace
+{
+	struct GrassChunkCells
+	{
+		int x = 0, z = 0;          // the chunk's position, to notice a reused Chunk
+		unsigned int geometryVersion = 0; // the chunk's, when the cells were worked out
+		bool stale = true;
+		std::vector<glm::ivec4> cells;
+	};
+
+	// The light byte as the faces carry it: sky light high, block light low.
+	int grassCellLight(Block &b) { return merge4bits(b.getSkyLight(), b.getLight()); }
+
+	void findGrassCells(Chunk &chunk, std::vector<glm::ivec4> &cells)
+	{
+		cells.clear();
+		// The tall grass's own pictures, as Chunk::bake picks them by the
+		// ground: the blades take their colours from the same one, so a tuft
+		// is coloured as its sprite is.
+		const int plainSprite = getGpuIdIndexForBlock(BlockTypes::grass, 0);
+		const int yellowSprite = YELLOW_GRASS_TEXTURE_INDEX * 4;
+		const int snowSprite = SNOW_GRASS_TEXTURE_INDEX * 4;
+		for (int x = 0; x < CHUNK_SIZE; x++)
+			for (int z = 0; z < CHUNK_SIZE; z++)
+			{
+				const int worldX = x + chunk.data.x * CHUNK_SIZE;
+				const int worldZ = z + chunk.data.z * CHUNK_SIZE;
+				for (int y = 1; y < CHUNK_HEIGHT - 1; y++)
+				{
+					Block &b = chunk.unsafeGet(x, y, z);
+					const auto type = b.getType();
+					if (type == BlockTypes::grassBlock || type == BlockTypes::yellowGrass)
+					{
+						// A grass top open to the air: it may grow a clump
+						// of short grass (vs_blade decides).
+						Block &above = chunk.unsafeGet(x, y + 1, z);
+						if (above.air())
+						{
+							const int texture = type == BlockTypes::yellowGrass ? yellowSprite : plainSprite;
+							cells.push_back({worldX, y + 1, worldZ, grassCellLight(above) | (texture << 8)});
+						}
+					}
+					else if (type == BlockTypes::grass)
+					{
+						// A tuft where tall grass grows.
+						const auto below = chunk.unsafeGet(x, y - 1, z).getType();
+						const int texture = below == BlockTypes::yellowGrass ? yellowSprite
+							: below == BlockTypes::snow_dirt ? snowSprite : plainSprite;
+						cells.push_back({worldX, y, worldZ, grassCellLight(b) | (texture << 8) | (1 << 19)});
+					}
+				}
+			}
+	}
+
+	void collectGrassCells(ChunkSystem &chunkSystem, glm::ivec3 blockPosition, float radius,
+		std::vector<glm::ivec4> &cells, uint64_t &version)
+	{
+		static std::unordered_map<Chunk *, GrassChunkCells> cache;
+		static std::vector<Chunk *> window, lastWindow;
+
+		const int reach = (int)std::ceil(radius / CHUNK_SIZE);
+		const int centerX = divideChunk(blockPosition.x);
+		const int centerZ = divideChunk(blockPosition.z);
+		window.clear();
+		int budget = 4; // chunks worked out a frame
+		bool changed = false;
+		for (int dz = -reach; dz <= reach; dz++)
+			for (int dx = -reach; dx <= reach; dx++)
+			{
+				Chunk *chunk = chunkSystem.getChunkSafeFromChunkPos(centerX + dx, centerZ + dz);
+				if (!chunk) { continue; }
+				window.push_back(chunk);
+				GrassChunkCells &entry = cache[chunk];
+				if (entry.x != chunk->data.x || entry.z != chunk->data.z
+					|| entry.geometryVersion != chunk->geometryVersion) { entry.stale = true; }
+				// Not seeing the chunk dirty is no proof it didn't change: it
+				// is usually baked again (ChunkSystem::update) before this
+				// runs, hence the version. While it waits to be baked the old
+				// cells stay, matching the faces still drawn.
+				if (chunk->isDirty()) { entry.stale = true; continue; }
+				if (entry.stale && budget > 0)
+				{
+					budget--;
+					entry.x = chunk->data.x;
+					entry.z = chunk->data.z;
+					entry.geometryVersion = chunk->geometryVersion;
+					entry.stale = false;
+					findGrassCells(*chunk, entry.cells);
+					changed = true;
+				}
+			}
+		if (window != lastWindow) { changed = true; lastWindow = window; }
+
+		// Forget the chunks that left the window.
+		for (auto it = cache.begin(); it != cache.end();)
+		{
+			if (std::find(window.begin(), window.end(), it->first) == window.end()) { it = cache.erase(it); }
+			else { ++it; }
+		}
+
+		if (!changed) { return; }
+		version++;
+		cells.clear();
+		for (Chunk *chunk : window)
+		{
+			const GrassChunkCells &entry = cache[chunk];
+			cells.insert(cells.end(), entry.cells.begin(), entry.cells.end());
+		}
+	}
+}
+
+// Grass blades, each frame: the cells in view out of all those around the
+// camera, sorted into wgpuWorld's groups (how far, bare top or tuft). Most
+// cells are behind the camera or out of reach, which is what pays for the
+// blades of those that are drawn. A cell has as many blades in every band:
+// a count that changed with distance showed as grass growing and dying back
+// as the player walked. Only the blades' segments differ by band, too far
+// out to see.
+namespace
+{
+	void grassCellsInView(const std::vector<glm::ivec4> &all, Camera &c, float radius, float density, float clumps,
+		std::vector<glm::ivec4> &cells, wgpuWorld::GrassGroup groups[wgpuWorld::grassGroups])
+	{
+		// Where each band starts; the last is where the blades give way to
+		// the sprites (chunkFaces.wgsl's bladeSpriteShare).
+		const float bandStart[wgpuWorld::grassBands] = {0.f, radius * 0.38f, radius * 0.62f};
+		const glm::mat4 projection = c.getProjectionMatrix();
+		const glm::mat4 viewProjection = projection * c.getViewMatrix();
+		// A cell's blades reach this far from its middle: clip space's
+		// margin, sideways and up.
+		const float reach = 1.6f;
+		const glm::vec2 margin = glm::vec2(std::abs(projection[0][0]), std::abs(projection[1][1])) * reach;
+
+		static std::vector<std::pair<int, glm::ivec4>> seen; // group, cell
+		seen.clear();
+		int counts[wgpuWorld::grassGroups] = {};
+		for (const glm::ivec4 &cell : all)
+		{
+			const int tuft = (cell.w >> 19) & 1;
+			const glm::vec3 relative = glm::vec3(glm::dvec3(cell.x, cell.y - 0.2, cell.z) - c.position);
+			const float away = glm::length(glm::vec2(relative.x, relative.z));
+			if (away > radius + 0.75f || (!tuft && clumps <= 0.f)) { continue; }
+			if (away > 2.5f)
+			{
+				const glm::vec4 clip = viewProjection * glm::vec4(relative, 1.f);
+				if (clip.w < -reach || std::abs(clip.x) > clip.w + margin.x || std::abs(clip.y) > clip.w + margin.y)
+				{
+					continue;
+				}
+			}
+			const int band = away >= bandStart[2] ? 2 : away >= bandStart[1] ? 1 : 0;
+			const int group = band * 2 + tuft;
+			counts[group]++;
+			seen.push_back({group, glm::ivec4(cell.x, cell.y, cell.z, cell.w | (band << 20))});
+		}
+
+		int first[wgpuWorld::grassGroups] = {};
+		for (int g = 0, at = 0; g < wgpuWorld::grassGroups; g++)
+		{
+			first[g] = at;
+			at += counts[g];
+			const int band = g / 2;
+			const int tuft = g & 1;
+			const float most = tuft ? wgpuWorld::grassTuftBlades : wgpuWorld::grassClumpBlades * clumps;
+			groups[g].firstCell = first[g];
+			groups[g].cells = counts[g];
+			groups[g].bladesPerCell = (uint32_t)std::ceil(most * density);
+			groups[g].segments = tuft ? wgpuWorld::grassTuftSegments[band] : wgpuWorld::grassClumpSegments;
+		}
+		cells.resize(seen.size());
+		for (const auto &entry : seen) { cells[first[entry.first]++] = entry.second; }
+	}
+}
+
 void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	ProgramData &programData, BlocksLoader &blocksLoader, ClientEntityManager &entityManager, 
 	ModelsManager &modelsManager, 
@@ -2240,6 +2420,31 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	lighting.dudvTexture = programData.dudv.id;
 	lighting.dudvNormalTexture = programData.dudvNormal.id;
 	lighting.causticsTexture = programData.causticsTexture.id;
+	// Grass blades near the camera (the setting, or OURCRAFT_GRASS=0|1), not
+	// under water.
+	{
+		static const int environmentGrass = []()
+		{
+			const char *env = std::getenv("OURCRAFT_GRASS");
+			return env ? std::atoi(env) : -1;
+		}();
+		const bool blades = environmentGrass >= 0 ? environmentGrass != 0 : getShadingSettings().grassBlades != 0;
+		static std::vector<glm::ivec4> grassCells, grassCellsSeen;
+		static uint64_t grassVersion = 0;
+		wgpuWorld::GrassGroup grassGroups[wgpuWorld::grassGroups] = {};
+		grassCellsSeen.clear();
+		if (blades)
+		{
+			collectGrassCells(chunkSystem, blockPosition, grassRadius, grassCells, grassVersion);
+			grassCellsInView(grassCells, c, grassRadius, glm::clamp(grassDensity, 0.f, 1.f),
+				glm::clamp(grassClumps, 0.f, 1.f), grassCellsSeen, grassGroups);
+		}
+		wgpuWorld::setGrassCells(grassCellsSeen, grassGroups);
+		lighting.grassRadius = blades ? grassRadius : 0.f;
+		lighting.grassDensity = grassDensity;
+		lighting.grassClumps = grassClumps;
+		lighting.wind = 0.35f + 0.65f * glm::clamp(weather.rain, 0.f, 1.f);
+	}
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 

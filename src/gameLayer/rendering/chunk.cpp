@@ -2037,6 +2037,14 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 					0, 0, b.getSkyLight(), b.getLight(), 0);
 			}
 
+			// A plain tall-grass plant: flag bit 2 (the flags byte is the
+			// position y's top byte), so its sprite gives way to grass blades
+			// near the camera (chunkFaces.wgsl's tallGrassFlag).
+			if (b.getType() == BlockTypes::grass)
+			{
+				(*currentVector)[currentVector->size() - 2] |= (1 << 26);
+			}
+
 		}
 
 	};
@@ -2460,6 +2468,7 @@ void Chunk::sendDataToOpenGL(bool updateGeometry,
 		elementCountSize = opaqueGeometry.size() / 4; //todo magic number
 
 		lightsElementCountSize = lights.size();
+		geometryVersion++;
 
 		wgpuWorld::setChunkFaces(this, opaqueGeometry);
 		wgpuWorld::setChunkLights(this, lights);

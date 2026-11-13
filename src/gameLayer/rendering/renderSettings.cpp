@@ -141,6 +141,11 @@ good performance.\n-Fancy: significant performance cost but looks very nice.");
 	programData.ui.menuRenderer.toggleOptions("Screen effects: ", "OFF|ON", &getShadingSettings().screenEffects, true,
 		Colors_White, 0, programData.ui.buttonTexture, Colors_Gray);
 
+	programData.ui.menuRenderer.Text("Grass: real blades near you, swaying in the wind, or the flat look...",
+		Colors_White);
+	programData.ui.menuRenderer.toggleOptions("Grass: ", "FLAT|BLADES", &getShadingSettings().grassBlades, true,
+		Colors_White, 0, programData.ui.buttonTexture, Colors_Gray);
+
 	programData.ui.menuRenderer.Text("The PlayStation look: wobbling vertices, warping textures, 15-bit color...",
 		Colors_White);
 	programData.ui.menuRenderer.toggleOptions("PSX look: ", "OFF|IN SNOW|ALWAYS", &getShadingSettings().psxLook, true,
@@ -828,6 +833,7 @@ void saveShadingSettings()
 	SET_INT(screenEffects);
 	SET_INT(psxLook);
 	SET_INT(debugMenus);
+	SET_INT(grassBlades);
 	SET_VEC3(toneMapLift);
 	SET_VEC3(toneMapGain);
 
@@ -881,6 +887,7 @@ void loadShadingSettings()
 		GET_INT(screenEffects);
 		GET_INT(psxLook);
 		GET_INT(debugMenus);
+		GET_INT(grassBlades);
 
 
 		void *rawData = 0;
@@ -1618,6 +1625,7 @@ void ShadingSettings::normalize()
 	screenEffects = glm::clamp(screenEffects, 0, 1);
 	psxLook = glm::clamp(psxLook, 0, 2);
 	debugMenus = glm::clamp(debugMenus, 0, 1);
+	grassBlades = glm::clamp(grassBlades, 0, 1);
 	glm::vec3 toneMapLift = glm::clamp(toneMapLift ,glm::vec3(0.f), glm::vec3(1));
 	glm::vec3 toneMapGain = glm::clamp(toneMapGain, glm::vec3(0.f), glm::vec3(1));
 
