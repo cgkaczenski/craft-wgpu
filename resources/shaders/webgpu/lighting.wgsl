@@ -156,9 +156,7 @@ const shadowCascadeBlend = vec2f(3.0, 8.0);
 // larger bias, so the far one has none of a building's own shadows), and a
 // hard edge between them is a line that sweeps across the world, shadows
 // appearing behind it, as the camera moves.
-fn sunShadow(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: vec2f) -> f32 {
-    let mode = u.lightParams.z;
-    if (mode == 0) { return 1.0; }
+fn sunShadowMaps(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: vec2f, mode: i32) -> f32 {
 
     if (viewDepth >= shadowCascadeEnds.y) {
         let far = cascadeShadow(2u, relative, dotLightNormal, fragCoord, mode);
@@ -462,9 +460,35 @@ fn sunLight(levels: LightLevels, metallic: f32, roughness: f32, V: vec3f, albedo
     let ambientInt = max(levels.sky, levels.block);
     let decrease = clamp(f32(ambientInt - 10) / 5.0, 0.0, 1.0);
     color *= mix(1.0, 0.7, decrease);
+    // Weaker low down (lowSunStrength), as the shadows fade.
+    color *= mix(0.6, 1.0, lowSunStrength());
     let L = u.sunDirection.xyz;
     if (dot(L, vec3f(0.0, 1.0, 0.0)) <= -0.2) { return vec3f(0.0); }
     return computePointLightSource(L, metallic, roughness, color * caustics, V, albedo, N, F0) * shadow * sqrt(ao);
+}
+
+// How much of the sun's (or moon's) shadows and direct light there is by
+// how high it stands, 0..1: all of them from lowSunFade.y up, none at
+// lowSunFade.x. Near the horizon the direct light is weak (it crosses many
+// times the air) and the sky's light takes over, so shadows grow faint
+// rather than reaching across the world; and a shadow's length grows
+// fastest there: with a twenty-minute day a mountain's swept the ground
+// at tens of blocks a second in the last few degrees. It also hands over
+// from the sun to the moon without a jump.
+const lowSunFade = vec2f(0.052, 0.342); // sin 3 and 20 degrees
+
+fn lowSunStrength() -> f32 {
+    return smoothstep(lowSunFade.x, lowSunFade.y, u.sunDirection.y);
+}
+
+// How much of the sun reaches a point, 0-1 (sunShadowMaps), with the low
+// sun's fade.
+fn sunShadow(relative: vec3f, viewDepth: f32, dotLightNormal: f32, fragCoord: vec2f) -> f32 {
+    let mode = u.lightParams.z;
+    if (mode == 0) { return 1.0; }
+    let strength = lowSunStrength();
+    if (strength <= 0.0) { return 1.0; }
+    return mix(1.0, sunShadowMaps(relative, viewDepth, dotLightNormal, fragCoord, mode), strength);
 }
 
 // The material map: roughness from red, metallic from green, emission blue.
