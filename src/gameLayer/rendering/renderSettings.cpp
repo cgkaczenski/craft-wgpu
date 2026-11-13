@@ -330,6 +330,11 @@ void displaySettingsMenu(ProgramData &programData)
 	displayRenderSettingsMenuButton(programData);
 	
 	displayVolumeMenuButton(programData);
+
+	programData.ui.menuRenderer.Text("The debug windows (client controll, Profiler, Server window). F9 shows or hides them in game (fn+F9 on a Mac).",
+		Colors_White);
+	programData.ui.menuRenderer.toggleOptions("Debug menus: ", "HIDDEN|SHOWN", &getShadingSettings().debugMenus, true,
+		Colors_White, 0, programData.ui.buttonTexture, Colors_Gray);
 }
 
 bool shouldReloadTexturePacks()
@@ -822,6 +827,7 @@ void saveShadingSettings()
 	SET_INT(crtIntensity);
 	SET_INT(screenEffects);
 	SET_INT(psxLook);
+	SET_INT(debugMenus);
 	SET_VEC3(toneMapLift);
 	SET_VEC3(toneMapGain);
 
@@ -874,6 +880,7 @@ void loadShadingSettings()
 		GET_INT(crtIntensity);
 		GET_INT(screenEffects);
 		GET_INT(psxLook);
+		GET_INT(debugMenus);
 
 
 		void *rawData = 0;
@@ -1610,6 +1617,7 @@ void ShadingSettings::normalize()
 	crtIntensity = glm::clamp(crtIntensity, 1, 100);
 	screenEffects = glm::clamp(screenEffects, 0, 1);
 	psxLook = glm::clamp(psxLook, 0, 2);
+	debugMenus = glm::clamp(debugMenus, 0, 1);
 	glm::vec3 toneMapLift = glm::clamp(toneMapLift ,glm::vec3(0.f), glm::vec3(1));
 	glm::vec3 toneMapGain = glm::clamp(toneMapGain, glm::vec3(0.f), glm::vec3(1));
 

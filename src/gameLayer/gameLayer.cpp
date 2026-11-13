@@ -592,7 +592,7 @@ bool gameLogic(float deltaTime)
 
 		#if REMOVE_IMGUI == 0
 
-			if (programData.showImgui)
+			if (getShadingSettings().debugMenus)
 			{
 
 				auto s = getServerSettingsCopy();

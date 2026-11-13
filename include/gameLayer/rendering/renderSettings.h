@@ -89,6 +89,10 @@ struct ShadingSettings
 	// always.
 	int psxLook = 1;
 
+	// The ImGui debug windows (client controll, Profiler, Server window): 0
+	// hidden, 1 shown. F9 flips it in game (fn+F9 on a Mac).
+	int debugMenus = 0;
+
 	glm::vec3 toneMapLift = glm::vec3(0.5);
 	glm::vec3 toneMapGain = glm::vec3(0.5);
 

@@ -665,9 +665,11 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		gameData.interaction = {};
 	}
 
+	// F9 (fn+F9 on a Mac): the ImGui debug windows on and off. Saved with
+	// the render settings, which also have the switch (Settings).
 	if (platform::isKeyReleased(platform::Button::F9))
 	{
-		programData.showImgui = !programData.showImgui;
+		getShadingSettings().debugMenus = !getShadingSettings().debugMenus;
 	}
 
 	if (platform::isKeyReleased(platform::Button::F10))
@@ -2274,7 +2276,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 
 #if REMOVE_IMGUI == 0
 
-	if (programData.showImgui)
+	if (getShadingSettings().debugMenus)
 	{
 		gameData.gameplayFrameProfiler.startSubProfile("imgui");
 
