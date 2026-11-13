@@ -2,6 +2,7 @@
 #include <multyPlayer/enetServerFunction.h>
 #include <glm/gtx/hash.hpp>
 #include <multyPlayer/splitUpdatesLogic.h>
+#include <multyPlayer/fluids.h>
 #include <multyPlayer/tick.h>
 #include <queue>
 #include <platform/platformTools.h>
@@ -76,6 +77,8 @@ void splitUpdatesLogic(float tickDeltaTime, int tickDeltaTimeMs, std::uint64_t c
 	if (1)
 	{
 		std::minstd_rand rng(seed);
+
+		advanceWaterTick();
 
 		::tickDeltaTime = tickDeltaTime;
 		::currentTimer = currentTimer;

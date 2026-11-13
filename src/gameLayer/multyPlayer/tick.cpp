@@ -2,6 +2,7 @@
 #include <glm/gtx/hash.hpp>
 #include <gameplay/entity.h>
 #include <multyPlayer/tick.h>
+#include <multyPlayer/fluids.h>
 #include <chunkSystem.h>
 #include <iostream>
 #include <multyPlayer/enetServerFunction.h>
@@ -657,6 +658,7 @@ void doGameTick(float deltaTime, int deltaTimeMs, std::uint64_t currentTimer,
 									i.t.pos.y, convertedZ}, lastBlock);
 								*b = block;
 								chunk->otherData.dirty = true;
+								wakeWaterAround(chunkCache, i.t.pos);
 
 								{
 									Packet packet;
@@ -849,6 +851,7 @@ void doGameTick(float deltaTime, int deltaTimeMs, std::uint64_t currentTimer,
 										i.t.pos.y, convertedZ}, lastBlock);
 									*b = actualPlacedBLock;
 									chunk->otherData.dirty = true;
+									wakeWaterAround(chunkCache, i.t.pos);
 
 									{
 										Packet packet;
@@ -2225,6 +2228,10 @@ void doGameTick(float deltaTime, int deltaTimeMs, std::uint64_t currentTimer,
 					}
 
 				}
+				else if (type == BlockTypes::water)
+				{
+					randomTickWater(chunkCache, {x + c.first.x * CHUNK_SIZE, y, z + c.first.y * CHUNK_SIZE});
+				}
 				else if (type == BlockTypes::yellowGrass)
 				{
 					auto top = c.second->chunk.safeGet(x, y + 1, z);
@@ -2245,6 +2252,10 @@ void doGameTick(float deltaTime, int deltaTimeMs, std::uint64_t currentTimer,
 
 #pragma endregion
 	if (profiler) { profiler->endSubProfile("Random Tick Update"); }
+
+	if (profiler) { profiler->startSubProfile("Water"); }
+	updateWater(chunkCache, modifiedBlocks);
+	if (profiler) { profiler->endSubProfile("Water"); }
 
 
 	if (profiler) { profiler->startSubProfile("Path Finding"); }

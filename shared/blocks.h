@@ -525,6 +525,31 @@ struct Block
 		return (typeAndFlags >> 11) & 0b0000'1;
 	}
 
+	// Water: flag bits 11-13 hold its level, 0 for a source (all the water
+	// world generation makes) and 1-7 for how far it has flowed from one;
+	// bit 14 marks falling water (water with water above it).
+	unsigned char getWaterLevel()
+	{
+		return (typeAndFlags >> 11) & 0b111;
+	}
+
+	bool getWaterFalling()
+	{
+		return (typeAndFlags >> 14) & 0b1;
+	}
+
+	bool isWaterSource()
+	{
+		return getType() == BlockTypes::water && getWaterLevel() == 0 && !getWaterFalling();
+	}
+
+	void setWaterLevelAndFalling(int level, bool falling)
+	{
+		typeAndFlags &= 0b1000'0111'1111'1111;
+		typeAndFlags |= (BlockType)((level & 0b111) << 11);
+		typeAndFlags |= (BlockType)((falling ? 1 : 0) << 14);
+	}
+
 	bool isDecorativeFurniture()
 	{
 		auto type = getType();

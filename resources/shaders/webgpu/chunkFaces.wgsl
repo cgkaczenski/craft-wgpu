@@ -226,10 +226,15 @@ fn spannedLayer(entry: u32, orientation: i32, block: vec3i) -> u32 {
 fn biasUp(a: f32) -> f32 { return (a + 0.75) / 1.75; }
 fn biasUp2(a: f32) -> f32 { return ((a + 1.0) / 2.0) / 2.0 + 0.5; }
 
+// How far each flowing-water level (1-7, from the face's shape bits 8-10)
+// lowers the water's surface below a source's, in blocks.
+const waterLevelDrop = 0.11;
+
 // defaultShader.vert's calculateVertexPos: a corner of the face within its
 // block, moved by the animation (u.animation.x, GL's u_timeGrass) as GL
-// moves it. `facePosition` is the block's position, as floats.
-fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f) -> vec3f {
+// moves it. `facePosition` is the block's position, as floats. `waterLevel`
+// is the flowing water's level, 0 for a source.
+fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, waterLevel: f32) -> vec3f {
     let t = u.animation.x;
     if (orientation >= 22 && orientation < 36) {
         // Water: its surface corners down 0.08, then two travelling waves.
@@ -242,7 +247,9 @@ fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f) -> vec3f {
             * amplitude;
         let offset2 = sin((1.0 + facePosition.x + shape.x + (shape.z + facePosition.z) * 2.0 - t * speed)
             * frequency) * amplitude;
-        shape.y += mask * (offset + offset2 - 0.08);
+        // Flowing water: its top corners lower by its level.
+        let top = select(0.0, 1.0, shape.y > 0.5);
+        shape.y += mask * (offset + offset2 - 0.08 - top * waterLevel * waterLevelDrop);
         return shape;
     }
     if (orientation >= 10 && orientation < 16) {
@@ -282,7 +289,13 @@ fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f) -> vec3f {
 // One corner of a face, placed by the camera: what every vertex entry point
 // starts from.
 fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
-    let orientation = face.orientationAndTexture.x;
+    // Water faces carry the flowing water's level in bits 8-10.
+    var orientation = face.orientationAndTexture.x;
+    var waterLevel = 0.0;
+    if (orientation >= 256) {
+        waterLevel = f32((orientation >> 8u) & 7);
+        orientation = orientation & 0xFF;
+    }
     let textureIndex = u32(face.orientationAndTexture.y) & 0x07FFu;
     let colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
 
@@ -294,7 +307,7 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
 
     let corner = stripToCorner[vertexIndex];
     let facePosition = vec3f(blockPosition);
-    let shape = animatedCorner(orientation, corner, facePosition);
+    let shape = animatedCorner(orientation, corner, facePosition, waterLevel);
 
     // Integer difference first, then the fraction: exact however far the
     // world is from the origin.
@@ -310,8 +323,8 @@ fn faceVertex(vertexIndex: u32, face: FaceInput) -> VertexOutput {
     if (orientation >= 0 && orientation < 6) { normal = faceNormals[orientation]; }
     else if (orientation >= 22 && orientation < 28) { normal = faceNormals[orientation - 22]; }
     else {
-        let p2 = animatedCorner(orientation, (corner + 1u) % 4u, facePosition);
-        let p3 = animatedCorner(orientation, (corner + 2u) % 4u, facePosition);
+        let p2 = animatedCorner(orientation, (corner + 1u) % 4u, facePosition, waterLevel);
+        let p3 = animatedCorner(orientation, (corner + 2u) % 4u, facePosition, waterLevel);
         normal = normalize(cross(p3 - p2, shape - p2));
     }
 

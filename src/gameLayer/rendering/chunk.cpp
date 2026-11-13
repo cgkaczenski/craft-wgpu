@@ -1790,16 +1790,40 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 				z * 2 + this->data.z * CHUNK_SIZE};
 		}
 
+		// Flowing water's surface: -1 under more water (full height), 0 a
+		// source's or falling water's surface, 1-7 lower by its level.
+		auto waterSurfaceStep = [](Block *w, Block *above)
+		{
+			if (above && above->getType() == BlockTypes::water) { return -1; }
+			if (w->getWaterFalling()) { return 0; }
+			return (int)w->getWaterLevel();
+		};
+
+		const bool blockIsWater = b.getType() == BlockTypes::water;
+		const int ownWaterStep = (blockIsWater && lod == 0) ? waterSurfaceStep(&b, sides[TOP]) : 0;
+		// The shader lowers the water faces' top corners by this (shape bits 8-10).
+		const int waterLevelBits = ownWaterStep > 0 ? (ownWaterStep << 8) : 0;
+
 		for (int index = 0; index < 6; index++)
 		{
 			int i = distances[index].y;
 			auto color = b.getColor();
 
-			bool isWater = b.getType() == BlockTypes::water;
+			bool isWater = blockIsWater;
+
+			// A side face towards lower water: the step between the two
+			// surfaces, which would otherwise be a hole.
+			bool waterStepFace = false;
+			if (isWater && lod == 0 && (i == FRONT || i == BACK || i == LEFT || i == RIGHT)
+				&& sides[i] && sides[i]->getType() == BlockTypes::water)
+			{
+				int upSide = i == FRONT ? UP_FRONT : i == BACK ? UP_BACK : i == LEFT ? UP_LEFT : UP_RIGHT;
+				waterStepFace = ownWaterStep < waterSurfaceStep(sides[i], sides[upSide]);
+			}
 
 			if ((sides[i] != nullptr
 				&& (!(sides[i])->isOpaque() && sides[i]->getType() != b.getType())
-				) ||
+				) || waterStepFace ||
 				(
 				isWater && i == 2 //display water if there is a block on top
 				)
@@ -1811,10 +1835,10 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 			{
 
 				//no faces in between water
-				if (isWater && sides[i] && sides[i]->getType() == BlockTypes::water) { continue; }
+				if (isWater && sides[i] && sides[i]->getType() == BlockTypes::water && !waterStepFace) { continue; }
 
 				//no faces in between same types
-				if (sides[i] && sides[i]->getType() == b.getType()) { continue; }
+				if (sides[i] && sides[i]->getType() == b.getType() && !waterStepFace) { continue; }
 
 
 				unsigned char sunLight = 0;
@@ -1903,6 +1927,7 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 						}
 
 						if (lod == 1) { currentIndex = i + lod1Parts; }
+						else { currentIndex |= waterLevelBits; }
 
 						pushFaceShapeTextureAndColor(*currentVector, currentIndex,
 							getGpuIdIndexForBlock(b.getType(), i), color);
@@ -1913,6 +1938,7 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 						int currentIndex = i + 22;
 
 						if (lod == 1) { currentIndex = i + lod1Parts; }
+						else { currentIndex |= waterLevelBits; }
 
 						pushFaceShapeTextureAndColor(*currentVector, currentIndex,
 							getGpuIdIndexForBlock(b.getType(), i), color);

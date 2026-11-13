@@ -96,6 +96,11 @@ struct SavedChunk
 
 	BlocksWithDataHolder blockData;
 
+	// Water waiting to flow (fluids.cpp): the block's position in the chunk
+	// (packWaterPosition) and the water tick it is due on. Not saved: random
+	// ticks wake unsettled water again after a load.
+	std::unordered_map<std::uint32_t, std::uint64_t> waterUpdates;
+
 	//removes the data for a block with data
 	void removeBlockWithData(glm::ivec3 pos, std::uint16_t blockType);
 
