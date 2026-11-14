@@ -1987,6 +1987,24 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 				pushFlagsLightAndPosition(*currentVector, position, isWater, isInWater,
 					sunLight, torchLight, aoShape);
 
+				// Water's surface where it meets the land: which of the eight
+				// blocks around it, at its own height, are solid, in bits
+				// 8-15 of the position's y (0-255, so free; on other faces
+				// bit 15 is the tuft's). chunkFaces.wgsl's shoreFoam draws
+				// the foam along those sides and round those corners.
+				if (isWater && i == TOP && lod == 0)
+				{
+					static const int around[8] = {FRONT, BACK, LEFT, RIGHT,
+						FRONTLEFT, FRONTRIGHT, BACKLEFT, BACKRIGHT};
+					int shore = 0;
+					for (int n = 0; n < 8; n++)
+					{
+						Block *side = sides[around[n]];
+						if (side && side->getType() != BlockTypes::water && side->isColidable()) { shore |= 1 << n; }
+					}
+					(*currentVector)[currentVector->size() - 2] |= shore << 8;
+				}
+
 			}
 		}
 	};

@@ -333,10 +333,22 @@ namespace wgpuWorld
 		// water's textures (wgpu2d ids): waterDUDV, its normal map, caustics.
 		float animationTime = 0;
 		float waterMove = 0;
+		// The waves' clock: seconds, wrapped every waveTimePeriod so the
+		// float stays exact; every wave's rate is a whole number of turns in
+		// that time (chunkFaces.wgsl's waveRate), so the wrap does not show.
+		float waveTime = 0;
+		// The rings on the water (waterRipples), two vectors each: its
+		// middle from the camera and its age in seconds; then its
+		// strength, its life in seconds, its first radius in blocks and 1
+		// for a splash.
+		glm::vec4 ripples[64] = {};
+		int rippleCount = 0;
 		uint32_t dudvTexture = 0;
 		uint32_t dudvNormalTexture = 0;
 		uint32_t causticsTexture = 0;
 	};
+
+	constexpr double waveTimePeriod = 1024.0;
 
 	// Records the world's opaque pass for this frame and prepares the
 	// transparent ones (renderTransparent records them): clears the

@@ -96,8 +96,11 @@ namespace
 		glm::vec4 wet;               // x how wet the ground is, y how hard it rains now (the puddles' rings)
 		glm::vec4 grass;             // x the blades' reach (0 off), y the wind, z the density, w a clump's blades (vs_blade)
 		glm::vec4 horizonFog;        // x where the world has gone into the sky, y where the fog starts (blocks)
+		glm::vec4 skyZenith;         // rgb the sky straight up, as sky.wgsl draws it (the water mirrors it)
+		glm::vec4 skyHorizon;        // rgb what the sky gains toward the horizon
+		glm::vec4 ripples[64];       // the rings on the water, two each (Lighting's ripples); animation.w how many
 	};
-	static_assert(sizeof(Uniforms) == 688, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 1744, "uniform layout must match world.wgsl");
 
 	// The PSX look's lines down the screen: the PlayStation's usual 240.
 	constexpr float psxLines = 240.f;
@@ -4735,19 +4738,10 @@ namespace
 		return w.skyBakePipeline && w.skyPipeline && w.sunPipeline && w.sunRaysPipeline && !invalid;
 	}
 
-	// GL's three skies (SkyBoxLoaderAndDrawer::createSkyTextures), baked
-	// into their cubemaps when first needed and again when the day sky's
-	// settings change (the ImGui "Sky" colors). Only the day sky takes
-	// them; twilight and night are fixed. GL's bake also convolves and
-	// prefilters each sky for image-based lighting; nothing reads those
-	// (only the physicallyAccurateReflections path would, and a constant
-	// turns it off), so they are not made.
-	void bakeSkies(CommandEncoder encoder, const Lighting &lighting)
+	// The three skies' settings: the day sky's from the "Sky" colors, twilight
+	// and night fixed.
+	void skyBakeParams(const Lighting &lighting, SkyBakeParams params[SkyKinds])
 	{
-		if (w.skyBaked && w.bakedDayColor == lighting.daySkyColor && w.bakedDayHorizon == lighting.daySkyHorizon
-			&& w.bakedDayG == lighting.daySkyG) { return; }
-
-		SkyBakeParams params[SkyKinds];
 		params[DaySky].lightPos = glm::vec4(0, -1, 0, 0);
 		params[DaySky].color1 = glm::vec4(lighting.daySkyColor, 0);
 		params[DaySky].color2 = glm::vec4(lighting.daySkyHorizon, 0);
@@ -4763,6 +4757,54 @@ namespace
 		params[NightSky].color2 = glm::vec4(glm::vec3(4, 8, 10) / 255.f * 0.2f, 0);
 		params[NightSky].groundColor = glm::vec4(1, 1, 1, 0.850f);
 		params[NightSky].flags = glm::uvec4(0);
+	}
+
+	// The sky as sky.wgsl draws it this frame, as two colours: straight up,
+	// and what it gains toward the horizon (sky.wgsl's scatter depends only
+	// on how high a direction points: zenith + horizon * (1 - height)^16).
+	// The three skies by the time of day's weights, then the weather's grey
+	// (overcastSky, which is linear in the colour). For the water, which
+	// mirrors the sky in directions the screen does not show.
+	void skyColours(const Lighting &lighting, glm::vec3 &zenith, glm::vec3 &horizon)
+	{
+		SkyBakeParams params[SkyKinds];
+		skyBakeParams(lighting, params);
+		zenith = glm::vec3(0.f);
+		horizon = glm::vec3(0.f);
+		for (int k = 0; k < SkyKinds; k++)
+		{
+			const float g = params[k].groundColor.w;
+			const float g2 = g * g;
+			const float miePhase = 1.5f * ((1.f - g2) / (2.f + g2)) / std::pow(1.f + g2, 1.5f);
+			const float cosSunEarth = 1.f - std::abs(glm::normalize(glm::vec3(params[k].lightPos)).y);
+			const float weight = lighting.skyWeights[k] * 1.2f;
+			zenith += weight * (glm::vec3(params[k].color1) + miePhase * glm::vec3(params[k].color2));
+			horizon += weight * (cosSunEarth + 1.f) * glm::vec3(params[k].color2);
+		}
+		const float overcast = glm::clamp(lighting.overcast, 0.f, 1.f);
+		const glm::vec3 grey = glm::vec3(0.94f, 0.97f, 1.f) * (1.f - glm::clamp(lighting.skyDarken, -3.f, 1.f));
+		auto clouded = [&](glm::vec3 c)
+		{
+			return glm::mix(c, grey * ((c.r + c.g + c.b) / 3.f), overcast);
+		};
+		zenith = clouded(zenith);
+		horizon = clouded(horizon);
+	}
+
+	// GL's three skies (SkyBoxLoaderAndDrawer::createSkyTextures), baked
+	// into their cubemaps when first needed and again when the day sky's
+	// settings change (the ImGui "Sky" colors). Only the day sky takes
+	// them; twilight and night are fixed. GL's bake also convolves and
+	// prefilters each sky for image-based lighting; nothing reads those
+	// (only the physicallyAccurateReflections path would, and a constant
+	// turns it off), so they are not made.
+	void bakeSkies(CommandEncoder encoder, const Lighting &lighting)
+	{
+		if (w.skyBaked && w.bakedDayColor == lighting.daySkyColor && w.bakedDayHorizon == lighting.daySkyHorizon
+			&& w.bakedDayG == lighting.daySkyG) { return; }
+
+		SkyBakeParams params[SkyKinds];
+		skyBakeParams(lighting, params);
 		wgpuQueue().writeBuffer(w.skyBakeBuffer, 0, params, sizeof(params));
 
 		// Eighteen small passes, a face each: the face's view is the
@@ -5249,7 +5291,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.projection = projection;
 	uniforms.underWaterColor = glm::vec4(lighting.underWaterColor, lighting.underwaterDarkenStrength);
 	uniforms.underWaterParams = glm::vec4(lighting.underwaterDarkenDistance, lighting.fogGradientUnderWater, 0.f, 0.f);
-	uniforms.animation = glm::vec4(lighting.animationTime, lighting.waterMove, 0.f, 0.f);
+	const int rippleCount = glm::clamp(lighting.rippleCount, 0, 32);
+	uniforms.animation = glm::vec4(lighting.animationTime, lighting.waterMove, lighting.waveTime, (float)rippleCount);
+	for (int i = 0; i < 64; i++) { uniforms.ripples[i] = i < rippleCount * 2 ? lighting.ripples[i] : glm::vec4(0.f); }
 	// The weather's fog, and the PSX look on a grid of psxLines
 	// lines, as wide as the screen's aspect makes it. Indoors the grid goes
 	// to three times as fine, the textures stop warping halfway in, and the
@@ -5294,6 +5338,12 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		const float end = std::max(std::min(lighting.fogReach, lighting.fogDistance), 1.f);
 		uniforms.horizonFog = glm::vec4(end, end * std::clamp(lighting.horizonFogStart, 0.f, 1.f),
 			std::max(lighting.weatherFogEnd, 4.f), 0.f);
+	}
+	{
+		glm::vec3 zenith, horizon;
+		skyColours(lighting, zenith, horizon);
+		uniforms.skyZenith = glm::vec4(zenith, 0.f);
+		uniforms.skyHorizon = glm::vec4(horizon, 0.f);
 	}
 	wgpuQueue().writeBuffer(w.uniformBuffer, 0, &uniforms, sizeof(uniforms));
 

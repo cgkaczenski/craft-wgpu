@@ -59,11 +59,15 @@
 // fboMain but its bloom), so the AO and the next frame's reflections see
 // the water's surface, not the lake bed.
 //
-// Animation (18-parity): defaultShader.vert's grass and leaf sway and water
-// waves, in animatedCorner, which every vertex entry point goes through (the
+// Animation (18-parity): defaultShader.vert's grass and leaf sway, in
+// animatedCorner, which every vertex entry point goes through (the
 // prepass, the solid and transparent passes and the shadow maps move alike);
-// and defaultShader.frag's moving water textures: the water's normal, the
-// distortion of what is under it and the caustics on what lies in it.
+// and defaultShader.frag's moving water textures: the caustics on what lies
+// in water, and the normal of water's sides.
+//
+// Water (no longer GL's): its surface moves and tilts by a sum of waves
+// (waterWaves), and its colour is a mirror of the sky and the world by
+// Fresnel's share over what is under it, dimmed by depth (waterColour).
 //
 // Conventions (docs/roadmap.md): positions camera-relative, depth 0..1.
 
@@ -132,7 +136,8 @@ struct VertexOutput {
     @location(3) relative: vec3f,
     @location(4) @interpolate(flat) normal: vec3f,
     // Flag bits: 0 water, 1 in water, 4-7 the AO shape; 8 the top of a cube
-    // (not in the face's data: faceVertex sets it), where puddles lie.
+    // (not in the face's data: faceVertex sets it), where puddles lie; 16-23
+    // on water's surface, the solid blocks around it (shoreFoam).
     @location(5) @interpolate(flat) flags: u32,
     // The block's position and the point within it (GL's fragmentPositionI
     // and fragmentPositionF), for the point lights.
@@ -253,6 +258,98 @@ fn biasUp2(a: f32) -> f32 { return ((a + 1.0) / 2.0) / 2.0 + 0.5; }
 // lowers the water's surface below a source's, in blocks.
 const waterLevelDrop = 0.11;
 
+// ---- The water's waves ----------------------------------------------------
+// The surface as a sum of travelling waves, each a sine sharpened into a
+// crest (exp(sin x - 1): narrow tops, wide flat troughs), from 26 blocks
+// long to a quarter of a block (after the fbm water of Garrett Gunnell's
+// Water repository, itself after GPU Gems' sum of sines). Each wave pushes
+// the ones after it along its own direction, toward its crest, which gathers
+// the small waves on the fronts of the large ones.
+//
+// The waves' vectors are whole numbers of turns across 1024 blocks and their
+// rates whole numbers of turns in 1024 seconds, so the sea is the same
+// every 1024 blocks and seconds: positions and the clock (u.animation.z)
+// are wrapped to that and the floats stay exact however far from the origin
+// or long the game has run. The rates are deep water's (the square root of
+// g times the wave number, longer waves faster), slowed to three quarters.
+//
+// The long waves are low (blocks' shores are a block high) and the short
+// ones as steep as waves get. The first waveVertexCount move the surface's
+// corners (animatedCorner); all of them tilt its normal (fs_blend).
+const waveCount = 12;
+const waveVertexCount = 4;
+const waveTile = 1024.0;
+const waveVector = array<vec2f, 12>(
+    vec2f(0.2208932, 0.1043107),
+    vec2f(0.1902136, 0.3190680),
+    vec2f(0.5706409, -0.0184078),
+    vec2f(0.1533981, 0.8590292),
+    vec2f(1.2333206, -0.5215535),
+    vec2f(1.3805827, 1.4848934),
+    vec2f(2.1659809, -2.1659809),
+    vec2f(-1.2026409, 4.4976317),
+    vec2f(6.8722339, -1.2149128),
+    vec2f(-7.4060592, 7.4060592),
+    vec2f(5.3750687, -14.7630311),
+    vec2f(-23.1815177, 2.0309906),
+);
+const waveNumber = array<f32, 12>(0.244284, 0.371464, 0.570938, 0.872618, 1.339066, 2.027540, 3.063160,
+    4.655646, 6.978797, 10.473749, 15.711093, 23.270318);
+const waveRate = array<f32, 12>(1.1596895, 1.4296701, 1.7732818, 2.1966605, 2.7182140, 3.3440781, 4.1110685,
+    5.0682725, 6.2034183, 7.6024088, 9.3081954, 11.3330501);
+const waveAmplitude = array<f32, 12>(0.049123, 0.050000, 0.050000, 0.050000, 0.050000, 0.050000, 0.050000,
+    0.036515, 0.024359, 0.013796, 0.007818, 0.004486);
+// exp(sin x - 1) on average, taken off so the waves leave the water's level
+// where it was.
+const waveMean = 0.4658;
+// How far a wave pushes the ones after it, in its own heights.
+const waveDrag = 1.6;
+
+// The wind raises them (u.grass.y: 0.35 in clear weather, 1 in a storm).
+fn waveStrength() -> f32 {
+    return mix(0.85, 1.9, clamp((u.grass.y - 0.35) / 0.65, 0.0, 1.0));
+}
+
+struct Waves {
+    height: f32,   // above the still surface, in blocks
+    slope: vec2f,  // the height's change along x and z
+    lost: f32,     // the slopes' variance of the waves too small to show
+};
+
+// The first `count` waves at `p` (a world xz, wrapped to waveTile).
+// `footprint` is how much of the world a pixel covers there, in blocks: a
+// wave less than four pixels long fades out (it would only flicker) and its
+// tilt goes into `lost`, which the surface takes as roughness, so far water
+// keeps the sun's glitter as a wide sheen.
+fn waterWaves(p: vec2f, count: i32, footprint: f32) -> Waves {
+    var w: Waves;
+    w.height = 0.0;
+    w.slope = vec2f(0.0);
+    w.lost = 0.0;
+    let strength = waveStrength();
+    var q = p;
+    for (var i = 0; i < count; i++) {
+        let k = waveVector[i];
+        let number = waveNumber[i];
+        let amplitude = waveAmplitude[i] * strength;
+        let shown = 1.0 - smoothstep(0.25, 0.5, footprint * number / (2.0 * PI));
+        let x = dot(k, q) - waveRate[i] * u.animation.z;
+        let crest = exp(sin(x) - 1.0);
+        let change = amplitude * crest * cos(x); // of the height, per radian
+        w.height += amplitude * (crest - waveMean) * shown;
+        w.slope += k * change * shown;
+        let tilt = amplitude * number * 0.3;
+        w.lost += tilt * tilt * (1.0 - shown * shown);
+        q -= k / number * change * waveDrag;
+    }
+    return w;
+}
+
+// A world xz wrapped to the waves' tile.
+fn waveCoordinate(p: vec2f) -> vec2f {
+    return p - waveTile * floor(p / waveTile);
+}
+
 // defaultShader.vert's calculateVertexPos: a corner of the face within its
 // block, moved by the animation (u.animation.x, GL's u_timeGrass) as GL
 // moves it. `facePosition` is the block's position, as floats. `waterLevel`
@@ -260,19 +357,14 @@ const waterLevelDrop = 0.11;
 fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, waterLevel: f32) -> vec3f {
     let t = u.animation.x;
     if (orientation >= 22 && orientation < 36) {
-        // Water: its surface corners down 0.08, then two travelling waves.
+        // Water: its surface corners down 0.08, then the long waves
+        // (GL moved them by two sines).
         var shape = cornerShape(orientation, corner);
         let mask = waterMask[u32(orientation - 22) * 4u + corner];
-        let speed = 3.1;
-        let frequency = 0.5;
-        let amplitude = 0.034;
-        let offset = biasUp(cos((facePosition.x + shape.x + shape.z + facePosition.z - t * speed) * frequency))
-            * amplitude;
-        let offset2 = sin((1.0 + facePosition.x + shape.x + (shape.z + facePosition.z) * 2.0 - t * speed)
-            * frequency) * amplitude;
+        let waves = waterWaves(waveCoordinate(facePosition.xz + shape.xz), waveVertexCount, 0.0);
         // Flowing water: its top corners lower by its level.
         let top = select(0.0, 1.0, shape.y > 0.5);
-        shape.y += mask * (offset + offset2 - 0.08 - top * waterLevel * waterLevelDrop);
+        shape.y += mask * (waves.height - 0.08 - top * waterLevel * waterLevelDrop);
         return shape;
     }
     if (orientation >= 10 && orientation < 16) {
@@ -323,11 +415,15 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     let colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
 
     // The light and flag bytes ride in y's high bits.
-    // y is 0-255; bit 15 is a flag (tuftAboveFlag).
-    let blockPosition = vec3i(face.position.x, face.position.y & 0x7FFF, face.position.z);
+    // y is 0-255. Above it, bit 15 is a flag (tuftAboveFlag); on water's
+    // surface bits 8-15 are its shore (shoreFoam), handed on in the flags'
+    // bits 16-23.
+    let blockPosition = vec3i(face.position.x, face.position.y & 0xFF, face.position.z);
     let light = u32(face.position.y >> 16) & 0xFFu;
-    let flags = (u32(face.position.y >> 24) & 0xFFu) | select(0u, tuftAboveFlag, (face.position.y & 0x8000) != 0);
-    let water = (flags & 1u) != 0u;
+    let water = (u32(face.position.y >> 24) & 1u) != 0u;
+    let aboveY = (u32(face.position.y) >> 8u) & 0xFFu;
+    let flags = (u32(face.position.y >> 24) & 0xFFu)
+        | select(select(0u, tuftAboveFlag, (aboveY & 0x80u) != 0u), aboveY << 16u, water);
 
     let corner = stripToCorner[vertexIndex];
     let facePosition = vec3f(blockPosition);
@@ -799,11 +895,6 @@ fn dudvCoords(base: WaterCoord, speed: f32) -> WaterCoord {
     return scaledCoord(base, base.p + vec2f(m, m / 2.0), vec2f(1.0 / 20.0));
 }
 
-fn dudvCoords2(base: WaterCoord, speed: f32) -> WaterCoord {
-    let m = u.animation.y * speed;
-    return scaledCoord(base, base.p + vec2f(m + 3.0, m / 2.0 + 5.0), vec2f(0.1, -0.1));
-}
-
 fn dudvCoords3(base: WaterCoord, speed: f32) -> WaterCoord {
     let m = u.animation.y * speed;
     return scaledCoord(base, base.p - vec2f(m, m / 3.0), vec2f(0.1, -0.1));
@@ -854,6 +945,7 @@ struct Texels {
     material: vec3f,
     ao: f32,
     water: WaterCoord, // the base of the water's texture coordinates
+    footprint: f32,    // how much of the world the pixel covers, in blocks (waterWaves)
 };
 
 fn readTexels(in: VertexOutput) -> Texels {
@@ -866,6 +958,7 @@ fn readTexels(in: VertexOutput) -> Texels {
     t.water.p = vec2f(-f32(in.blockPos.z), -f32(in.blockPos.x)) + uv;
     t.water.dx = dpdx(t.water.p);
     t.water.dy = dpdy(t.water.p);
+    t.footprint = max(length(dpdx(in.relative)), length(dpdy(in.relative)));
     return t;
 }
 
@@ -919,11 +1012,46 @@ const puddlesFrom = 0.3;
 const ringCell = 12;
 const ringReach = 7.0;
 
+struct Rings {
+    slope: vec2f,  // the rings' tilt of the surface, along x and z
+    crest: f32,    // a ring's crest (above 0) or the trough beside it (below), -1..1
+};
+
+// The rings the rain makes at a point `local` texels into its cell of
+// ringCell texels, from that cell's drop and its eight neighbours'. Each
+// cell has its own pace; each drop of a cell lands somewhere else in it,
+// and the lighter the rain (u.wet.y), the more of them are skipped.
+fn rainRings(cell: vec2i, local: vec2f) -> Rings {
+    var r: Rings;
+    r.slope = vec2f(0.0);
+    r.crest = 0.0;
+    let rain = u.wet.y;
+    for (var j = -1; j <= 1; j++) {
+        for (var i = -1; i <= 1; i++) {
+            let c = cell + vec2i(i, j);
+            let pace = groundHash(c, 3);
+            let clock = u.animation.x / (0.8 + 0.9 * pace.x) + pace.y * 7.0;
+            let drop = groundHash(c, 4 + i32(floor(clock)));
+            if (drop.z > rain * 0.85) { continue; }
+            let t = fract(clock);
+            let away = local - (vec2f(f32(i), f32(j)) + drop.xy) * f32(ringCell);
+            let distance = length(away);
+            // A crest with a trough either side of it, flattening out as
+            // it spreads.
+            let across = (distance - t * ringReach) / 1.3;
+            let ring = exp(-across * across * 0.5) * (1.0 - t);
+            r.crest += cos(across * 2.2) * ring;
+            r.slope += away / max(distance, 0.001) * sin(across * 2.2) * ring;
+        }
+    }
+    return r;
+}
+
 struct WetGround {
     amount: f32,   // how wet the face is, 0..1
     puddle: f32,   // how much of a puddle this texel is, 0..1
-    slope: vec2f,  // the rings' tilt of the puddle's surface, along x and z
-    crest: f32,    // a ring's crest (above 0) or the trough beside it (below), -1..1
+    slope: vec2f,  // the rings' tilt of the puddle's surface (rainRings)
+    crest: f32,    // a ring's crest or trough (rainRings)
 };
 
 fn groundWet(in: VertexOutput, levels: LightLevels, water: bool) -> WetGround {
@@ -952,31 +1080,11 @@ fn groundWet(in: VertexOutput, levels: LightLevels, water: bool) -> WetGround {
     if (depth <= 0.0) { return g; }
     g.puddle = smoothstep(0.0, 0.025, depth);
 
-    // The rings, from this cell's drop and its eight neighbours'. Each cell
-    // has its own pace; each drop of a cell lands somewhere else in it, and
-    // the lighter the rain, the more of them are skipped.
-    let rain = u.wet.y;
-    if (rain <= 0.0) { return g; }
+    if (u.wet.y <= 0.0) { return g; }
     let cell = groundCell(texel, ringCell);
-    let local = vec2f(texel - cell * ringCell) + 0.5;
-    for (var j = -1; j <= 1; j++) {
-        for (var i = -1; i <= 1; i++) {
-            let c = cell + vec2i(i, j);
-            let pace = groundHash(c, 3);
-            let clock = u.animation.x / (0.8 + 0.9 * pace.x) + pace.y * 7.0;
-            let drop = groundHash(c, 4 + i32(floor(clock)));
-            if (drop.z > rain * 0.85) { continue; }
-            let t = fract(clock);
-            let away = local - (vec2f(f32(i), f32(j)) + drop.xy) * f32(ringCell);
-            let distance = length(away);
-            // A crest with a trough either side of it, flattening out as
-            // it spreads.
-            let across = (distance - t * ringReach) / 1.3;
-            let ring = exp(-across * across * 0.5) * (1.0 - t);
-            g.crest += cos(across * 2.2) * ring;
-            g.slope += away / max(distance, 0.001) * sin(across * 2.2) * ring;
-        }
-    }
+    let rings = rainRings(cell, vec2f(texel - cell * ringCell) + 0.5);
+    g.slope = rings.slope;
+    g.crest = rings.crest;
     return g;
 }
 
@@ -996,6 +1104,20 @@ fn sunFacing(in: VertexOutput) -> vec3f {
     return in.normal;
 }
 
+// Water's surface between its waves, and its reflectance looking straight
+// at it (an index of refraction of 1.33).
+const waterRoughness = 0.11;
+const waterF0 = 0.02;
+
+// Milestone 18: with the camera under water, a colour darkens toward the
+// underwater colour with distance (GL's computeFogUnderWater).
+fn underWaterFog(color: vec3f, distance: f32) -> vec3f {
+    if (u.fogParams.z == 0.0) { return color; }
+    let fog = pow(exp(-pow(distance / u.underWaterParams.x, u.underWaterParams.y)), 4.0);
+    let strength = u.underWaterColor.w;
+    return mix(u.underWaterColor.rgb, color, vec3f(fog * strength + (1.0 - strength)));
+}
+
 // A face lit: what fs_main and fs_blend both start from.
 struct Shaded {
     color: vec3f,   // linear light
@@ -1007,6 +1129,14 @@ struct Shaded {
     F0: vec3f,      // the reflectance at normal incidence
     puddle: f32,    // how much of a puddle it is, 0..1 (groundWet)
     crest: f32,     // a puddle's ring's crest (above 0) or trough (below)
+    // For water (waterColour): the ambient light, how much of the sun
+    // reaches it, the waves' height there and the surface's tilt from its
+    // face, in the world.
+    ambient: vec3f,
+    shadow: f32,
+    waveHeight: f32,
+    tilt: vec3f,
+    ripple: f32,    // how much foam the rings on it make (surfaceRipples)
 };
 
 // defaultShader.frag's lit path (u_shaders on), fog aside.
@@ -1032,9 +1162,11 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     var m = material(t.material);
     var albedo = toLinear(t.albedo.rgb);
     if (water) {
-        // Water has its own color, smooth and not metal.
-        albedo = u.waterColor.rgb;
-        m.roughness = 0.09;
+        // Water mirrors and lets light through; it has no surface colour of
+        // its own (waterColour adds what the water under it sends back), so
+        // the lights below leave only their glints. Smooth, not metal.
+        albedo = vec3f(0.0);
+        m.roughness = waterRoughness;
         m.metallic = 0.0;
     }
     albedo = paintAlbedo(albedo, in.colors);
@@ -1074,6 +1206,46 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     var normalTexel = t.normalMap;
     if (water) { normalTexel = waterNormalTexel(t.water); }
     var N = applyNormalMap(in.normal, normalTexel, frontFacing);
+    // Water's surface (a face that looks up) tilts by its waves instead;
+    // the ones too small for this pixel roughen it.
+    var waveHeight = 0.0;
+    var ringCrest = 0.0;
+    var rippleFoam = 0.0;
+    if (water && in.normal.y > 0.5) {
+        let waves = waterWaves(vec2f(in.blockPos.xz & vec2i(1023)) + in.inBlock.xz, waveCount, t.footprint);
+        waveHeight = waves.height;
+        var slope = waves.slope;
+        // The rain's rings, as on the puddles but smooth (the puddles' are
+        // made of texels): under the open sky, and near enough to show (a
+        // ring is about a quarter of a block from crest to crest).
+        let ringsShown = 1.0 - smoothstep(0.25, 0.5, t.footprint / 0.23);
+        if (u.wet.y > 0.0 && levels.skyUnchanged >= 15 && ringsShown > 0.0) {
+            let within = (in.inBlock.xz + 0.5) * 16.0;
+            let texel = in.blockPos.xz * 16 + vec2i(floor(within));
+            let cell = groundCell(texel, ringCell);
+            let rings = rainRings(cell, vec2f(texel - cell * ringCell) + fract(within));
+            slope -= rings.slope * 0.8 * ringsShown;
+            ringCrest = rings.crest * ringsShown;
+        }
+        // The rings round what meets the surface.
+        if (u.animation.w > 0.0) {
+            let ripples = surfaceRipples(in, t.footprint);
+            slope += ripples.slope;
+            rippleFoam = ripples.foam;
+        }
+        N = normalize(in.normal - vec3f(slope.x, 0.0, slope.y) * in.normal.y);
+        if (!frontFacing) { N = -N; }
+        // GGX's alpha is the roughness squared, and twice the slopes'
+        // variance is alpha squared.
+        let alpha = waterRoughness * waterRoughness;
+        m.roughness = clamp(sqrt(sqrt(alpha * alpha + 2.0 * waves.lost)), waterRoughness, 0.6);
+    }
+    // A wave's far side can face away from the eye; the eye sees the near
+    // side of the next one instead. Turned just into view.
+    if (water) {
+        let facing = dot(N, -normalize(in.relative));
+        if (facing < 0.03) { N = normalize(N - normalize(in.relative) * (0.03 - facing)); }
+    }
     if (wet.puddle > 0.0) {
         let surface = normalize(in.normal + vec3f(wet.slope.x, 0.0, wet.slope.y) * 0.35);
         N = normalize(mix(N, surface, wet.puddle));
@@ -1090,7 +1262,7 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
 
     let V = -normalize(in.relative);
     var F0 = mix(vec3f(0.04), albedo, m.metallic);
-    if (water) { F0 = vec3f(0.021, 0.021, 0.05); }
+    if (water) { F0 = vec3f(waterF0); }
     F0 = mix(F0, vec3f(0.02), wet.puddle);
 
     var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0, caustics);
@@ -1105,11 +1277,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     // color with distance (GL's computeFogUnderWater), before the
     // reflections and the water's own mix, as in GL.
     var lit = color + albedo * ambient;
-    if (u.fogParams.z != 0.0) {
-        let fog = pow(exp(-pow(length(in.relative) / u.underWaterParams.x, u.underWaterParams.y)), 4.0);
-        let strength = u.underWaterColor.w;
-        lit = mix(u.underWaterColor.rgb, lit, vec3f(fog * strength + (1.0 - strength)));
-    }
+    // (Water's is done on its whole colour, in waterColour.)
+    if (!water) { lit = underWaterFog(lit, length(in.relative)); }
     s.alpha = 1.0 - (1.0 - t.albedo.a) * s.dotNV;
     // GL's ambient without its physically accurate reflections (switched
     // off by a constant): the albedo in the ambient light.
@@ -1121,7 +1290,12 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     if (causticsPower > 1.2) { s.bloom += max(sun, vec3f(4.0)) * 0.0008; }
     s.F0 = F0;
     s.puddle = wet.puddle;
-    s.crest = wet.crest;
+    s.crest = wet.crest + ringCrest;
+    s.ambient = ambient;
+    s.shadow = shadow;
+    s.waveHeight = waveHeight;
+    s.tilt = N - select(-in.normal, in.normal, frontFacing);
+    s.ripple = rippleFoam;
     return s;
 }
 
@@ -1245,6 +1419,9 @@ fn computeJitter(wp: vec3f, viewNormal: vec3f, roughness: f32) -> vec3f {
 struct Reflection {
     color: vec3f,
     found: bool,
+    // 1 where the ray landed well inside the screen, down to 0 at its edge
+    // (for water, which fades to the sky there rather than cutting to it).
+    amount: f32,
 };
 
 // GL's SSR(): the color last frame had where the reflected ray lands, or
@@ -1253,6 +1430,7 @@ fn ssr(viewPos: vec3f, N: vec3f, roughness: f32, wp: vec3f, viewDir: vec3f, view
     var r: Reflection;
     r.color = vec3f(0.0);
     r.found = false;
+    r.amount = 0.0;
     let reflected = normalize(reflect(normalize(viewPos), viewSpaceNormal));
     if (reflected.z > 0.0) { return r; }
     let jitter = computeJitter(wp, viewSpaceNormal, roughness);
@@ -1263,6 +1441,8 @@ fn ssr(viewPos: vec3f, N: vec3f, roughness: f32, wp: vec3f, viewDir: vec3f, view
     if (screenEdgeFactor * -reflected.z <= 0.001) { return r; }
     r.color = textureSampleLevel(lastFrameColor, lastFrameSampler, lastUv(march.coord), 0.0).rgb;
     r.found = true;
+    let inside = min(march.coord, vec2f(1.0) - march.coord);
+    r.amount = smoothstep(0.0, 0.08, min(inside.x, inside.y));
     return r;
 }
 
@@ -1289,6 +1469,7 @@ fn skyToward(direction: vec3f) -> vec3f {
 fn reflectPuddle(in: VertexOutput, s: Shaded) -> Reflection {
     var r: Reflection;
     r.found = false;
+    r.amount = 0.0;
     let V = -normalize(in.relative);
     var mirrored = skyToward(reflect(-V, s.normal));
     if (u.lightParams.w != 0) {
@@ -1309,29 +1490,23 @@ fn reflectPuddle(in: VertexOutput, s: Shaded) -> Reflection {
 // defaultShader.frag's "ssr" block, with the SSR setting on, on faces
 // smoother than 0.45. GL reads the face's view position from last frame's
 // positions at the pixel; this uses the face's own, which is the same
-// while the camera is still and right while it moves. Water takes the
-// reflection whole (its mix with what is under it comes after); anything
-// else mixes it in by its fresnel and roughness. The ray steps by the
-// face's own normal for water (GL's v_normal), the mapped one otherwise.
+// while the camera is still and right while it moves. The reflection is
+// mixed in by the face's fresnel and roughness. (Water has its own:
+// waterColour.)
 fn reflectSurface(in: VertexOutput, s: Shaded) -> Reflection {
     if (s.puddle > 0.0) { return reflectPuddle(in, s); }
     var r: Reflection;
     r.color = s.color;
     r.found = false;
+    r.amount = 0.0;
     if (u.lightParams.w == 0 || s.roughness >= 0.45) { return r; }
-    let water = isWater(in);
     let viewPos = (u.view * vec4f(in.relative, 1.0)).xyz;
     let viewSpaceNormal = normalize((u.view * vec4f(s.normal, 0.0)).xyz);
-    var stepNormal = s.normal;
-    if (water) { stepNormal = in.normal; }
     let V = -normalize(in.relative);
-    let found = ssr(viewPos, stepNormal, s.roughness * s.roughness, in.relative, V, viewSpaceNormal);
+    let found = ssr(viewPos, s.normal, s.roughness * s.roughness, in.relative, V, viewSpaceNormal);
     if (!found.found) { return r; }
     r.found = true;
-    if (water) {
-        r.color = found.color;
-        return r;
-    }
+    r.amount = found.amount;
     let fresnel = fresnelSchlickRoughness(s.dotNV, s.F0, s.roughness);
     r.color = mix(mix(found.color, s.color, fresnel), s.color, pow(s.roughness, 0.5));
     return r;
@@ -1390,6 +1565,276 @@ fn applyFog(in: VertexOutput, color: vec3f) -> vec3f {
     let sky = textureLoad(skyColor, vec2i(in.position.xy), 0).rgb;
     let fogged = mix(sky, color, computeFog(length(in.relative), f32(in.blockPos.y) + in.inBlock.y));
     return applyWeatherFog(fogged, in.relative, in.normal, lightLevels(in.light).skyUnchanged);
+}
+
+// ---- Foam ---------------------------------------------------------------------
+// Foam is drawn the way a PlayStation would: white or not at all, a cell at
+// a time, on a grid of foamCells cells to a block that lies on the water.
+// How much foam there is at a place (0..1) is how many of the cells there
+// are white, by an ordered dither: thick foam is solid, thinner a
+// checkerboard, thinner still a scatter of single cells. The grid is the
+// world's, so the pattern stays on the water as the camera turns. Too far
+// away to tell the cells apart, the foam is blended by its amount instead.
+//
+// Two things make foam: the shore (shoreFoam) and whatever meets the surface
+// (surfaceRipples).
+
+// Twice the block textures' texels: a shore's band is a third of a block
+// wide, and needs the cells to fade out over.
+const foamCells = 32;
+
+// The patches the foam breaks up in, 0..1: two noises a tenth and a
+// twentieth of a block across, drifting apart, on a grid 64 to a block
+// (groundNoise takes whole numbers). Too far to tell them apart, an even
+// half.
+fn foamPatches(in: VertexOutput, footprint: f32) -> f32 {
+    let fine = in.blockPos.xz * 64 + vec2i(floor((in.inBlock.xz + 0.5) * 64.0));
+    let drift = i32(floor(u.animation.x * 7.0));
+    let patches = 0.55 * groundNoise(fine + vec2i(drift, drift / 2), 7, 21)
+        + 0.45 * groundNoise(fine - vec2i(drift / 2, drift), 3, 22);
+    return mix(patches, 0.5, smoothstep(0.02, 0.08, footprint));
+}
+
+// How much of the pixel is foam, 0..1, where there is `amount` of it.
+fn foamShown(in: VertexOutput, amount: f32, footprint: f32) -> f32 {
+    let cell = in.blockPos.xz * foamCells + vec2i(floor((in.inBlock.xz + 0.5) * f32(foamCells)));
+    let dithered = select(0.0, 1.0, amount > bayer4(cell));
+    let far = smoothstep(0.7 / f32(foamCells), 1.6 / f32(foamCells), footprint);
+    return mix(dithered, clamp(amount, 0.0, 1.0), far);
+}
+
+// Where water's surface meets a solid block the waves break into foam: a
+// band along that side of the water's block, and round a block that only
+// touches its corner. Chunk::bake says which of the eight blocks around are
+// solid (flag bits 16-23: +z, -z, -x, +x, then the corners -x+z, +x+z, -x-z,
+// +x-z). The band is whole against the land and thins from there out, in
+// patches that drift; it reaches further while the swell is high there and
+// draws back as it falls.
+
+// How far from the land the foam reaches, in blocks, with the swell low and
+// high.
+const foamReach = vec2f(0.28, 0.6);
+
+// How much foam the shore makes at a pixel of water's surface, 0..1.
+fn shoreFoam(in: VertexOutput, waveHeight: f32, footprint: f32) -> f32 {
+    let shore = (in.flags >> 16u) & 0xFFu;
+    if (shore == 0u || in.normal.y <= 0.5) { return 0.0; }
+
+    // How far the pixel is from the nearest land: from each solid side's
+    // edge, and from each solid corner's point.
+    let p = in.inBlock.xz;
+    var away = 10.0;
+    if ((shore & 1u) != 0u) { away = min(away, 0.5 - p.y); }
+    if ((shore & 2u) != 0u) { away = min(away, 0.5 + p.y); }
+    if ((shore & 4u) != 0u) { away = min(away, 0.5 + p.x); }
+    if ((shore & 8u) != 0u) { away = min(away, 0.5 - p.x); }
+    if ((shore & 16u) != 0u) { away = min(away, length(vec2f(0.5 + p.x, 0.5 - p.y))); }
+    if ((shore & 32u) != 0u) { away = min(away, length(vec2f(0.5 - p.x, 0.5 - p.y))); }
+    if ((shore & 64u) != 0u) { away = min(away, length(vec2f(0.5 + p.x, 0.5 + p.y))); }
+    if ((shore & 128u) != 0u) { away = min(away, length(vec2f(0.5 - p.x, 0.5 + p.y))); }
+
+    let swell = clamp(0.5 + waveHeight / (0.12 * waveStrength()), 0.0, 1.0);
+    let reach = mix(foamReach.x, foamReach.y, swell);
+    if (away >= reach) { return 0.0; }
+
+    let inward = 1.0 - away / reach; // 1 at the land, 0 where the band ends
+    return clamp(inward * 1.35 - 0.12 + (foamPatches(in, footprint) - 0.5) * 0.5, 0.0, 1.0);
+}
+
+// The rings where something meets the surface (u.ripples; waterRipples.cpp
+// makes them: a splash going in or coming out, a wake's ring every half
+// block behind what moves along the surface). Each is a low ridge of water
+// spreading from its middle, slowing and widening as it goes, with a
+// smaller one following inside it; a splash also churns its middle for a
+// moment. The ridges carry foam, less as they age, and tilt the surface.
+struct Ripples {
+    foam: f32,    // how much foam, 0..1 and over
+    slope: vec2f, // the surface's tilt, along x and z
+};
+
+fn surfaceRipples(in: VertexOutput, footprint: f32) -> Ripples {
+    var r: Ripples;
+    r.foam = 0.0;
+    r.slope = vec2f(0.0);
+    let count = i32(u.animation.w);
+    for (var i = 0; i < count; i++) {
+        let place = u.ripples[i * 2];
+        let kind = u.ripples[i * 2 + 1];
+        let offset = in.relative - place.xyz;
+        // Only on the water it is on: not a pool a block up or down.
+        if (abs(offset.y) > 0.7) { continue; }
+        let age = place.w;
+        let radius = kind.z + 1.5 * pow(age, 0.85);
+        let width = 0.07 + 0.06 * age;
+        let away = length(offset.xz);
+        if (away > radius + width * 3.0) { continue; }
+        let left = 1.0 - clamp(age / kind.y, 0.0, 1.0);
+        let fade = left * left * kind.x;
+
+        let across = (away - radius) / width;
+        let ridge = exp(-across * across);
+        let across2 = (away - radius * 0.55) / width;
+        let ridge2 = 0.5 * exp(-across2 * across2);
+        var foam = 1.3 * ridge + ridge2;
+        if (kind.w > 0.5) {
+            foam += 1.2 * clamp(1.0 - age / 0.7, 0.0, 1.0)
+                * (1.0 - smoothstep(kind.z * 0.5, kind.z * 1.3 + 0.6 * age, away));
+        }
+        r.foam += foam * fade;
+        // A ridge 0.03 of a block high at full strength: its height's
+        // change outward.
+        r.slope += offset.xz / max(away, 0.001) * (-2.0 * (across * ridge + across2 * ridge2)) * (0.03 * fade / width);
+    }
+    // Ragged, as the shore's foam is; and none where there would only be a
+    // cell here and there (so thin, the dither's cells stand in rows).
+    if (r.foam > 0.0) { r.foam = max(r.foam * (0.55 + 0.9 * foamPatches(in, footprint)) - 0.16, 0.0) * 1.3; }
+    return r;
+}
+
+// ---- Water's colour ---------------------------------------------------------
+// What a pixel of water sends to the eye, after the "PBR" water of Garrett
+// Gunnell's Water repository (its FFTWater.shader) and the references it
+// lists:
+//
+//   the mirror   The share Fresnel gives (2% looking straight down, nearly
+//                all of it along the surface; less on rough water, whose
+//                slopes face every way): what the reflected ray lands on
+//                (the SSR setting) or else the sky that way.
+//   through it   The rest: what is under the water (the peel), shifted as
+//                the waves bend the light, and dimmed by the water it
+//                crosses, red first, then green, then blue (Beer-Lambert:
+//                exp(-absorption * distance)). What it takes away it gives
+//                back as its own colour, in the light there is (the waterColor
+//                setting: the colour of deep water by day).
+//   the sun      Its glints (shade's lights, on the waves' normal), and its
+//                light coming through the crests of waves toward the eye.
+//   the foam     At the shore and round what meets the surface (shoreFoam,
+//                surfaceRipples): white in the light there is, dithered
+//                (foamShown), over all of the above.
+//
+// From under water the surface is a window straight up (Snell's window) and
+// a mirror of the deep beyond 49 degrees from it, where no light from above
+// can get in (total internal reflection).
+
+// How much each block of water takes of red, green and blue.
+const waterAbsorption = vec3f(0.26, 0.075, 0.06);
+
+// Fresnel's share for a surface as rough as `alpha` (GGX's), seen at
+// `cosine` from its normal (the fit Gunnell's shader uses: rough water
+// mirrors less at grazing angles than Schlick's smooth surface).
+fn waterFresnel(cosine: f32, alpha: f32) -> f32 {
+    let grazing = pow(max(1.0 - cosine, 0.0), 5.0 * exp(-2.69 * alpha)) / (1.0 + 22.7 * pow(alpha, 1.5));
+    return clamp(waterF0 + (1.0 - waterF0) * grazing, 0.0, 1.0);
+}
+
+fn waterColour(in: VertexOutput, s: Shaded, t: Texels, frontFacing: bool) -> vec4f {
+    let pixel = vec2i(in.position.xy);
+    let V = -normalize(in.relative);
+    let distance = length(in.relative);
+    let N = s.normal;
+    let cosine = clamp(s.dotNV, 0.0, 1.0);
+    let alpha = s.roughness * s.roughness;
+    let levels = lightLevels(in.light);
+    // How much of the sky is over this water, by the baked sky light: none
+    // in a cave.
+    let open = clamp(f32(levels.skyUnchanged - 3) / 9.0, 0.0, 1.0);
+    // Seen from inside the water (the back of a face).
+    let inside = !frontFacing;
+
+    // The mirror's share.
+    var fresnel = waterFresnel(cosine, alpha);
+    if (inside) {
+        // Out of water into air the light bends away from the normal, and
+        // past the critical angle none gets through.
+        let sine2 = 1.33 * 1.33 * (1.0 - cosine * cosine);
+        fresnel = 1.0;
+        if (sine2 < 1.0) { fresnel = mix(waterFresnel(sqrt(1.0 - sine2), alpha), 1.0, smoothstep(0.9, 1.0, sine2)); }
+    } else {
+        // A rain ring's crest catches more of the sky and its trough less,
+        // as on the puddles: what shows the rings under an even grey sky.
+        fresnel = clamp(fresnel + clamp(s.crest, -1.0, 1.0) * 0.25, 0.0, 1.0);
+    }
+
+    // What it mirrors: the sky that way (a ray thrown downward by a wave's
+    // far side would meet the next wave and go up after all), dark where no
+    // sky is; from inside, the deep. Then what the ray lands on.
+    var toward = reflect(-V, N);
+    toward.y = abs(toward.y);
+    var mirrored = mix(s.ambient * 0.25, skyColourToward(toward), open);
+    if (inside) { mirrored = u.underWaterColor.rgb * mix(0.3, 1.0, open); }
+    if (u.lightParams.w != 0) {
+        let viewPos = (u.view * vec4f(in.relative, 1.0)).xyz;
+        let viewSpaceNormal = normalize((u.view * vec4f(N, 0.0)).xyz);
+        let found = ssr(viewPos, select(-in.normal, in.normal, frontFacing), waterRoughness * waterRoughness,
+            in.relative, V, viewSpaceNormal);
+        if (found.found) { mirrored = mix(mirrored, found.color, found.amount); }
+    }
+
+    // How much water the eye's ray crosses under this pixel: the peel's
+    // depth less the surface's, along the ray.
+    let surfaceDepth = linearizeDepth(in.position.z);
+    let alongRay = distance / max(surfaceDepth, 0.001);
+    var thickness = max(linearizeDepth(textureLoad(peelDepth, pixel, 0)) - surfaceDepth, 0.0) * alongRay;
+
+    // The water's own light: its colour in the ambient light and some of the
+    // sun's; and the sun through the waves, brightest in the crests when
+    // looking toward it.
+    let L = u.sunDirection.xyz;
+    var sun = u.sunLightColor.rgb * s.shadow * open * mix(0.6, 1.0, lowSunStrength());
+    if (L.y <= -0.2) { sun = vec3f(0.0); }
+    let body = u.waterColor.rgb * (s.ambient + sun * 0.3 * max(L.y, 0.0));
+    let crest = clamp(s.waveHeight / (0.06 * waveStrength()), 0.0, 1.0);
+    let through = 1.4 * crest * pow(clamp(dot(L, -V), 0.0, 1.0), 4.0) * pow(0.5 - 0.5 * dot(L, N), 3.0)
+        + 0.12 * cosine * cosine * max(L.y, 0.0);
+    let glow = u.waterColor.rgb * vec3f(1.0, 1.5, 1.2) * sun * through;
+
+    var color: vec3f;
+    var opacity = 1.0;
+    if (passMode == 1u) {
+        // What is under the water, where the waves' tilt bends the ray to:
+        // a fifth of the tilt (a quarter, 1 - 1/1.33, would be the whole of
+        // it) over the water it crosses, as seen from this far. Where that lands on something in front of
+        // the water, the straight lookup is kept.
+        let size = vec2f(textureDimensions(peelColor));
+        let bend = (u.view * vec4f(s.tilt, 0.0)).xy * 0.2 * min(thickness, 6.0) / max(distance, 0.5);
+        let shift = bend * vec2f(u.projection[0][0], -u.projection[1][1]) * 0.5;
+        let bentUv = in.position.xy / size + shift;
+        let bentPixel = clamp(vec2i(bentUv * size), vec2i(0), vec2i(size) - 1);
+        let bentDepth = linearizeDepth(textureLoad(peelDepth, bentPixel, 0));
+        var under = textureLoad(peelColor, pixel, 0).rgb;
+        if (bentDepth >= surfaceDepth + 0.1) {
+            under = textureSampleLevel(peelColor, lastFrameSampler, bentUv, 0.0).rgb;
+            thickness = (bentDepth - surfaceDepth) * alongRay;
+        }
+        if (inside) {
+            // Looking out: air beyond the surface, nothing for it to dim.
+            color = mix(under, mirrored, fresnel);
+        } else {
+            let kept = exp(-waterAbsorption * thickness);
+            color = mix(under * kept + body * (vec3f(1.0) - kept) + glow, mirrored, fresnel);
+        }
+    } else {
+        // No peel: the water's own colour and the mirror, blended over what
+        // is behind by how much of it the water hides.
+        let kept = exp(-waterAbsorption * thickness);
+        let hidden = 1.0 - dot(kept, vec3f(1.0 / 3.0));
+        color = mix(body + glow, mirrored, fresnel);
+        opacity = clamp(fresnel + (1.0 - fresnel) * hidden, 0.0, 1.0);
+        if (inside) { opacity = max(fresnel, 0.15); color = mirrored; }
+    }
+    color += s.color;
+    // The foam, from above: matt and white, so it takes the ambient light
+    // and the sun as the ground does, and hides the mirror and the glints.
+    if (!inside) {
+        let amount = max(shoreFoam(in, s.waveHeight, t.footprint), s.ripple);
+        if (amount > 0.0) {
+            let foam = foamShown(in, amount, t.footprint);
+            let lit = vec3f(0.86, 0.9, 0.94) * (s.ambient * 1.15 + sun * 0.6 * max(L.y, 0.0));
+            color = mix(color, lit, foam);
+            opacity = max(opacity, foam);
+        }
+    }
+    return vec4f(applyFog(in, underWaterFog(color, distance)), opacity);
 }
 
 // fboMain's targets, in defaultShader.frag's order, GL's fifth (the
@@ -1471,48 +1916,12 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> Blend
     if (t.albedo.a <= 0.0) { discard; }
 
     let s = shade(in, t, frontFacing);
-    let reflection = reflectSurface(in, s);
 
     // Glass and ice: lit, with GL's alpha (more opaque at grazing angles).
-    if (!isWater(in)) { return blendOutput(in, s, vec4f(applyFog(in, reflection.color), s.alpha)); }
-
-    // Water: the lit surface mixed, by the view angle, with what is under it.
-    let mixFactor = clamp(pow(1.0 - clamp(s.dotNV, 0.0, 1.0), 2.0) * 0.8 + 0.1, 0.0, 1.0);
-
-    let lastDepth = linearizeDepth(textureLoad(peelDepth, pixel, 0));
-    let currentDepth = linearizeDepth(in.position.z);
-    let waterDepth = lastDepth - currentDepth;
-
-    if (passMode == 1u) {
-        // What is under the water, its lookup wobbled by the moving dudv
-        // map (18-parity), darkening with depth. GL's distortion is in its
-        // coordinates (v up), so v's part goes the other way here. Where the
-        // wobbled point lands on something in front of the water, the
-        // straight lookup is kept.
-        var dudv = waterRead(dudvTexture, dudvCoords(t.water, waterSpeed), vec2f(0.0)).rg;
-        dudv += waterRead(dudvTexture, dudvCoords2(t.water, dudv.x), vec2f(0.0)).rg * 0.01;
-        let distortion = (dudv * 2.0 - 1.0) * 0.009;
-        let size = vec2f(textureDimensions(peelColor));
-        let distortedUv = in.position.xy / size + vec2f(distortion.x, -distortion.y);
-        let distortedPixel = clamp(vec2i(distortedUv * size), vec2i(0), vec2i(size) - 1);
-        let distortDepth = linearizeDepth(textureLoad(peelDepth, distortedPixel, 0));
-
-        var under = textureLoad(peelColor, pixel, 0).rgb;
-        var finalDepth = waterDepth;
-        if (distortDepth >= currentDepth + 0.1) {
-            under = textureSampleLevel(peelColor, lastFrameSampler, distortedUv, 0.0).rgb;
-            finalDepth = distortDepth - currentDepth;
-        }
-        under = mix(under, u.waterColor.rgb * 0.7, 0.6 * clamp(pow(finalDepth / 18.0, 2.0), 0.0, 1.0));
-        return blendOutput(in, s, vec4f(applyFog(in, mix(under, reflection.color, mixFactor)), 1.0));
+    if (!isWater(in)) {
+        return blendOutput(in, s, vec4f(applyFog(in, reflectSurface(in, s).color), s.alpha));
     }
-
-    // No peel: the water itself is see-through, more so looking down; less
-    // darkened where it reflects.
-    let darken = select(0.4, 0.2, reflection.found);
-    let depthMix = darken * clamp(pow(waterDepth / 18.0, 2.0), 0.0, 1.0);
-    return blendOutput(in, s, vec4f(applyFog(in, mix(reflection.color, u.waterColor.rgb * 0.7, depthMix)),
-        pow(mixFactor, 0.7)));
+    return blendOutput(in, s, waterColour(in, s, t, frontFacing));
 }
 
 // The crack (decal.frag): frame planes.z of the strip, opaque where drawn.

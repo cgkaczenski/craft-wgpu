@@ -50,8 +50,9 @@ struct Uniforms {
     underWaterColor: vec4f,
     underWaterParams: vec4f,
     // 18-parity: x seconds since start (GL's u_timeGrass, on Windows wall
-    // time), for the grass, leaves and waves; y GL's u_waterMove (0..20),
-    // for the water's textures.
+    // time), for the grass and leaves; y GL's u_waterMove (0..20), for the
+    // water's textures; z the waves' clock, seconds wrapped every 1024
+    // (chunkFaces.wgsl's waterWaves); w how many rings `ripples` holds.
     animation: vec4f,
     // The weather's fog (snow's whiteout, rain's grey): rgb its colour
     // (linear), w how much (0..1); horizonFog.z is where it is whole.
@@ -81,6 +82,16 @@ struct Uniforms {
     // (Renderer's horizon fog). z where the weather's fog is whole
     // (weatherFogAmount), in blocks.
     horizonFog: vec4f,
+    // The sky as sky.wgsl draws it this frame, the weather's grey in: rgb
+    // straight up, and rgb what it gains toward the horizon (skyToward).
+    skyZenith: vec4f,
+    skyHorizon: vec4f,
+    // The rings on the water where something meets its surface
+    // (waterRipples.cpp; chunkFaces.wgsl's surfaceRipples), two vectors
+    // each: xyz its middle, from the camera, w its age in seconds; then x
+    // its strength, y its life in seconds, z its first radius in blocks, w 1
+    // for a splash.
+    ripples: array<vec4f, 64>,
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -143,6 +154,16 @@ fn applyWeatherFog(color: vec3f, relative: vec3f, normal: vec3f, skyUnchanged: i
         fog = max(fog, vec3f(255.0, 237.0, 214.0) / 255.0 * lit * vec3f(0.86, 0.89, 0.94));
     }
     return mix(color, fog, amount);
+}
+
+// The sky's colour in a direction, as sky.wgsl draws it (its scatter depends
+// only on how high the direction points), the weather's fog in. Without the
+// sun and the moon, which are drawn over it.
+fn skyColourToward(direction: vec3f) -> vec3f {
+    let low = 1.0 - max(direction.y, 0.0);
+    let low4 = low * low * low * low;
+    let sky = u.skyZenith.rgb + u.skyHorizon.rgb * (low4 * low4 * low4 * low4);
+    return mix(sky, u.weatherFog.rgb, u.weatherFog.w);
 }
 
 // The PSX look's wobble: the PlayStation drew vertices at whole pixels, so

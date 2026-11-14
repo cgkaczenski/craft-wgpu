@@ -2,6 +2,7 @@
 #include <rendering/postModifiers.h>
 #include "rendering/renderer.h"
 #include "rendering/wgpuWorld.h"
+#include <rendering/waterRipples.h>
 #include <ctime>
 #include <chrono>
 #include "blocks.h"
@@ -2520,8 +2521,44 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	{
 		static const auto animationStart = std::chrono::steady_clock::now();
 		lighting.animationTime = std::chrono::duration<float>(std::chrono::steady_clock::now() - animationStart).count();
+		const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - animationStart).count();
+		lighting.waveTime = (float)std::fmod(seconds, wgpuWorld::waveTimePeriod);
 	}
 	lighting.waterMove = waterTimer;
+	// The rings on the water (waterRipples): where the player, the other
+	// players, the animals and monsters and the dropped items are, then the
+	// rings there are, from the camera.
+	{
+		waterRipples::beginFrame(deltaTime);
+		auto &player = entityManager.localPlayer.entity;
+		waterRipples::touch(0, player.position, player.getColliderSize().y, chunkSystem, deltaTime);
+		auto track = [&](auto &entities, std::uint64_t kind)
+		{
+			for (auto &e : entities)
+			{
+				waterRipples::touch((kind << 56) ^ e.first, e.second.getRubberBandPosition(),
+					e.second.entityBuffered.getColliderSize().y, chunkSystem, deltaTime);
+			}
+		};
+		track(entityManager.players, 1);
+		track(entityManager.droppedItems, 2);
+		track(entityManager.zombies, 3);
+		track(entityManager.pigs, 4);
+		track(entityManager.cats, 5);
+		track(entityManager.goblins, 6);
+		waterRipples::endFrame();
+
+		lighting.rippleCount = 0;
+		for (const auto &ring : waterRipples::rings())
+		{
+			if (lighting.rippleCount >= waterRipples::maxRings) { break; }
+			const glm::vec3 relative = glm::vec3(ring.position - c.position);
+			lighting.ripples[lighting.rippleCount * 2] = glm::vec4(relative, ring.age);
+			lighting.ripples[lighting.rippleCount * 2 + 1] = glm::vec4(ring.strength, ring.life, ring.size,
+				ring.splash ? 1.f : 0.f);
+			lighting.rippleCount++;
+		}
+	}
 	lighting.dudvTexture = programData.dudv.id;
 	lighting.dudvNormalTexture = programData.dudvNormal.id;
 	lighting.causticsTexture = programData.causticsTexture.id;
