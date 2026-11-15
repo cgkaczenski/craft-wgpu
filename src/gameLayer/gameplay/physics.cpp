@@ -681,6 +681,55 @@ void updateForces(glm::dvec3 &pos, glm::vec3 &velocity, glm::vec3 &acceleration,
 	acceleration = {};
 }
 
+float waterSubmersion(glm::dvec3 base, float height,
+	decltype(chunkGetterSignature) *chunkGetter, double *surface)
+{
+	auto waterAt = [&](int x, int y, int z) -> int
+	{
+		if (y < 0 || y >= CHUNK_HEIGHT) { return -1; }
+		auto c = chunkGetter(fromBlockPosToChunkPos(x, z));
+		if (!c) { return -1; }
+		const auto inChunk = fromBlockPosToBlockPosInChunk({x, y, z});
+		auto &b = c->unsafeGet(inChunk.x, inChunk.y, inChunk.z);
+		if (b.getType() != BlockTypes::water) { return -1; }
+		return b.getWaterFalling() ? 0 : (int)b.getWaterLevel();
+	};
+
+	double level = 0;
+	if (height <= 0 || !waterSurfaceAround(base, height, waterAt, level)) { return 0; }
+	if (surface) { *surface = level; }
+	return glm::clamp((float)((level - base.y) / height), 0.f, 1.f);
+}
+
+float applyBuoyancy(glm::dvec3 base, MotionState &forces, glm::vec3 colliderSize,
+	decltype(chunkGetterSignature) *chunkGetter, float deltaTime, PhysicalSettings physicalSettings)
+{
+	if (physicalSettings.density <= 0) { return 0; }
+	const float under = waterSubmersion(base, colliderSize.y, chunkGetter);
+	if (under <= 0) { return 0; }
+
+	// The weight of the water moved aside, by the body's own weight.
+	const float gravity = -GRAVITY * physicalSettings.gravityModifier;
+	forces.acceleration.y += gravity * under / physicalSettings.density;
+
+	// The drag: against the velocity, and never so much in one step that it
+	// would turn the body round.
+	const float drag = std::min(physicalSettings.waterDrag * under, 0.9f / std::max(deltaTime, 0.0001f));
+	forces.acceleration -= forces.velocity * drag;
+	return under;
+}
+
+float applyBuoyancyAndClimb(glm::dvec3 base, MotionState &forces, glm::vec3 colliderSize,
+	decltype(chunkGetterSignature) *chunkGetter, float deltaTime, PhysicalSettings physicalSettings)
+{
+	const float under = applyBuoyancy(base, forces, colliderSize, chunkGetter, deltaTime, physicalSettings);
+	if (under > 0 && !forces.colidesBottom() && (forces.colidesFrontBack() || forces.colidesLeftRight()))
+	{
+		forces.acceleration.y += (SWIM_UP + SWIM_OUT) * glm::min(1.f, under / 0.25f);
+	}
+	return under;
+}
+
 void applyImpulse(MotionState &force, glm::vec3 impulse, float mass)
 {
 	force.velocity += impulse * mass;

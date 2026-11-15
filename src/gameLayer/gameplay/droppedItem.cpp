@@ -3,14 +3,25 @@
 #include <multyPlayer/enetServerFunction.h>
 
 
+// A dropped item floats, a little more than half of it under the surface,
+// and bobs a few times before it lies still there.
+PhysicalSettings droppedItemPhysicalSettings()
+{
+	PhysicalSettings ps;
+	ps.gravityModifier = 0.5f;
+	ps.sideFriction = 1.f;
+	ps.density = 0.55f;
+	ps.waterDrag = 5.f;
+	return ps;
+}
+
 void DroppedItem::update(float deltaTime, decltype(chunkGetterSignature) *chunkGetter)
 {
 
 
 	//THIS IS SHARED CODE!!!!
-	PhysicalSettings ps;
-	ps.gravityModifier = 0.5f;
-	ps.sideFriction = 1.f;
+	PhysicalSettings ps = droppedItemPhysicalSettings();
+	applyBuoyancy(position, forces, getMaxColliderSize(), chunkGetter, deltaTime, ps);
 	updateForces(deltaTime, true, ps);
 	resolveConstrainsAndUpdatePositions(chunkGetter, deltaTime, getMaxColliderSize(), ps);
 
@@ -118,7 +129,11 @@ bool DroppedItemServer::update(float deltaTime, decltype(chunkGetterSignature) *
 	{
 		
 
-		if (glm::distance(getPosition(), p.second->playerData.getPosition()) < 1.f)
+		// From the player's body, feet to chest, not the feet alone: a
+		// swimmer's feet are a block and more under what floats beside them.
+		glm::dvec3 reachFrom = p.second->playerData.getPosition();
+		reachFrom.y = glm::clamp(getPosition().y, reachFrom.y, reachFrom.y + 1.3);
+		if (glm::distance(getPosition(), reachFrom) < 1.f)
 		{
 
 			auto client = p.second;
@@ -148,9 +163,8 @@ bool DroppedItemServer::update(float deltaTime, decltype(chunkGetterSignature) *
 		serverChunkStorer, yourEID);
 	
 	//THIS IS SHARED CODE!!!!
-	PhysicalSettings ps;
-	ps.gravityModifier = 0.5f;
-	ps.sideFriction = 1.f;
+	PhysicalSettings ps = droppedItemPhysicalSettings();
+	applyBuoyancy(entity.position, entity.forces, getMaxColliderSize(), chunkGetter, deltaTime, ps);
 	entity.updateForces(deltaTime, true, ps);
 	entity.resolveConstrainsAndUpdatePositions(chunkGetter, deltaTime, getMaxColliderSize(), ps);
 

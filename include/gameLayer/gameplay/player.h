@@ -66,6 +66,11 @@ struct OtherPlayerSettings
 };
 
 //this is the player struct when playing locally
+// How the water takes a player (Player::update's buoyancy). One swims up
+// with the jump key, harder against a bank to climb out, and down with the
+// sneak key (physics.h's SWIM_UP, SWIM_OUT and SWIM_DOWN).
+PhysicalSettings playerPhysicalSettings();
+
 struct LocalPlayer
 {
 	PlayerInventory inventory;

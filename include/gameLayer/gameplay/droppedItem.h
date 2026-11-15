@@ -5,6 +5,9 @@
 #include <unordered_set>
 
 
+// How a dropped item moves, on the server and the client alike.
+PhysicalSettings droppedItemPhysicalSettings();
+
 struct DroppedItem: public PhysicalEntity
 {
 	unsigned short type = 0;

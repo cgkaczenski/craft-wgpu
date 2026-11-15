@@ -3,6 +3,7 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <chunk.h>
+#include <cmath>
 
 
 
@@ -19,6 +20,13 @@ struct PhysicalSettings
 
 	float gravityModifier = 1;
 	float sideFriction = 0;
+
+	// Buoyancy (applyBuoyancy). The body's density by water's: under 1 it
+	// floats, with that share of its height under the surface; over 1 it
+	// sinks, slower than in air. 0: water does nothing to it.
+	float density = 0;
+	// How fast water slows it, per second, wholly under.
+	float waterDrag = 0;
 
 };
 
@@ -84,6 +92,75 @@ void updateForces(glm::dvec3 &pos, MotionState &forces, float deltaTime, bool ap
 void updateForces(glm::dvec3 &pos, glm::vec3 &velocity, glm::vec3 &acceleration, float deltaTime, bool applyGravity, PhysicalSettings physicalSettings = {});
 
 void applyImpulse(MotionState &force, glm::vec3 impulse, float mass = 1.f);
+
+
+// ---- Water -----------------------------------------------------------------
+// Still water's surface is this far above its block's position (a block's
+// top is half a block above it, and the surface sits 0.08 under that), and
+// flowing water's is lower by this much for each of its levels: the numbers
+// chunkFaces.wgsl draws it by. The waves are not in it: they are drawn, and
+// what floats rides them when drawn (waterWaves.h), but the physics runs on
+// the server too, which has no waves.
+constexpr double WATER_SURFACE_IN_BLOCK = 0.5 - 0.08;
+constexpr double WATER_LEVEL_DROP = 0.11;
+
+// The surface of the water a body is in: `base` the middle of its bottom,
+// `height` how tall it is. `waterAt(x, y, z)` says what a block is: -1 not
+// water, else flowing water's level (0 for a source or falling water).
+// False if no part of the body is in water.
+template<class WaterAt>
+bool waterSurfaceAround(glm::dvec3 base, float height, WaterAt &&waterAt, double &surface)
+{
+	const int x = (int)std::floor(base.x + 0.5);
+	const int z = (int)std::floor(base.z + 0.5);
+	const int from = (int)std::floor(base.y + 0.5);
+	const int to = (int)std::floor(base.y + height + 0.5);
+	for (int y = from; y <= to; y++)
+	{
+		int level = waterAt(x, y, z);
+		if (level < 0) { continue; }
+		// Up to the top of this water.
+		int top = y;
+		for (int i = 0; i < 32; i++)
+		{
+			const int above = waterAt(x, top + 1, z);
+			if (above < 0) { break; }
+			top++;
+			level = above;
+		}
+		surface = top + WATER_SURFACE_IN_BLOCK - level * WATER_LEVEL_DROP;
+		return true;
+	}
+	return false;
+}
+
+// How much of a body's height is under water, 0..1 (and the surface, if
+// asked for).
+float waterSubmersion(glm::dvec3 base, float height,
+	decltype(chunkGetterSignature) *chunkGetter, double *surface = nullptr);
+
+// Archimedes: a body in water is pushed up by the weight of the water it
+// moves aside. Here that is gravity times the share of the body under the
+// surface, over its density (so a body of density 0.5 comes to rest half
+// under), added to its acceleration; and the water's drag against its
+// velocity. Call before updateForces. Returns the share under water.
+float applyBuoyancy(glm::dvec3 base, MotionState &forces, glm::vec3 colliderSize,
+	decltype(chunkGetterSignature) *chunkGetter, float deltaTime, PhysicalSettings physicalSettings);
+
+// How hard a swimmer swims, as accelerations in blocks a second squared: up,
+// the extra against a bank that is enough to climb out onto it, and down.
+// The player's are on the jump and sneak keys (gamePlayLogic.cpp).
+constexpr float SWIM_UP = 12.f;
+constexpr float SWIM_OUT = 26.f;
+constexpr float SWIM_DOWN = 24.f;
+
+// Buoyancy for an animal or a monster, which has no keys to press: it
+// floats as anything does, and when the water has carried it against a bank
+// (it touched a block sideways on its last step) it swims up hard enough to
+// climb out, as the player does holding the jump key there. On the ground
+// its own jump takes it up a block; afloat it has no ground to jump from.
+float applyBuoyancyAndClimb(glm::dvec3 base, MotionState &forces, glm::vec3 colliderSize,
+	decltype(chunkGetterSignature) *chunkGetter, float deltaTime, PhysicalSettings physicalSettings);
 
 
 //others are already supposed to be colliding

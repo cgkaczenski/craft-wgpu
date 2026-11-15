@@ -932,10 +932,11 @@ or blur the SSR result.
 and for water: `chunkFaces.wgsl`'s `ssrRayMarch`, `ssrBinarySearch` and
 `reflectSurface`, reading _last frame's_ positions and colour (the 3D
 outline's 17b has the march and the history). Other faces mix the
-reflection in by Fresnel and roughness; water takes it whole and then mixes
-with what is under the surface by a Fresnel term. The environment maps a
-fallback would read are not built (the 3D outline's 12 and 14 say why), so
-a missed ray keeps the surface's own colour.
+reflection in by Fresnel and roughness, and a missed ray keeps the
+surface's own colour: the environment maps a fallback would read are not
+built (the 3D outline's 12 and 14 say why). Water has a fallback all the
+same, the sky itself worked out from two colours (`skyColourToward`), and
+its own Fresnel; section 17 walks through it.
 
 **Read:** David Lettier's
 [Screen Space Reflection](https://lettier.github.io/3d-game-shaders-for-beginners/screen-space-reflection.html)
@@ -1035,7 +1036,7 @@ Shorter, because each is a variation on a block above.
 | Depth of field | Blurs what is nearer or farther than the focus distance | A blur radius per pixel from depth, then a disc blur (4) | No | Catlike Coding's [Depth of Field](https://catlikecoding.com/unity/tutorials/advanced-rendering/depth-of-field/), GPU Gems' [survey](https://developer.nvidia.com/gpugems/gpugems/part-iv-image-processing/chapter-23-depth-field-survey-techniques) |
 | Motion blur | Smears what moves fast | Motion vectors, a directional blur (4) | No | GPU Gems 3's [chapter 27](https://developer.nvidia.com/gpugems/gpugems3/part-iv-image-effects/chapter-27-motion-blur-post-processing-effect), Lettier's [Motion Blur](https://lettier.github.io/3d-game-shaders-for-beginners/motion-blur.html) |
 | Chromatic aberration | Colour fringes toward the screen's edges | The red, green and blue channels read at slightly different coordinates | In `crt.wgsl` (fringing) and the water's caustics | Lettier's [Chromatic Aberration](https://lettier.github.io/3d-game-shaders-for-beginners/chromatic-aberration.html) |
-| Refraction and distortion | Bends what is behind glass, water, heat or a raindrop | Reading the scene at an offset coordinate | The underwater warp, water's dudv, the drops on the lens | Catlike Coding's [Looking Through Water](https://catlikecoding.com/unity/tutorials/flow/looking-through-water/) |
+| Refraction and distortion | Bends what is behind glass, water, heat or a raindrop | Reading the scene at an offset coordinate | The underwater warp, what is under the water shifted by its waves' tilt (17), the drops on the lens | Catlike Coding's [Looking Through Water](https://catlikecoding.com/unity/tutorials/flow/looking-through-water/) |
 | Lens flare | Ghosts and streaks from a bright light | Sprites along the line through the screen centre, or a flipped and blurred bright pass | The sun's flare (the 3D outline's 18b) | John Chapman's [Pseudo Lens Flare](https://john-chapman.github.io/2017/11/05/pseudo-lens-flare.html) |
 | Auto exposure | Adapts brightness over time, as an eye does | The image's average or histogram, read back | Yes (the 3D outline's 16a) | Catlike Coding's [HDR](https://catlikecoding.com/unity/tutorials/custom-srp/hdr/) |
 | Ambient occlusion | Darkens creases and contact points | Depth and normals sampled around each pixel | `hbao.wgsl` | LearnOpenGL's [SSAO](https://learnopengl.com/Advanced-Lighting/SSAO) |
@@ -1138,6 +1139,204 @@ fog lit and unlit and with the PSX look on, and down a pit by day.
 
 ---
 
+## 17. Worked example: the water
+
+A second effect built from the blocks above, and one that reaches out of the
+shaders: what floats has to know where the surface is. The sea, the rivers
+and the ponds are one surface that moves in waves, mirrors the sky, shows
+its bed through water that takes the light's red first, foams at the shore
+and round whatever goes into it, and holds up what is lighter than it.
+
+The code is `chunkFaces.wgsl` (`waterWaves`, `waterColour`, `shoreFoam`,
+`surfaceRipples`, `foamShown`), `waterRipples.cpp` (the rings),
+`waterWaves.cpp` (the waves again, on the CPU) and `physics.cpp`'s
+`applyBuoyancy`.
+
+**The shape: which waves (12, 15).** Three candidates:
+
+- Scrolling normal maps, which is what GL had: two reads of a texture
+  sliding past each other. The surface stays flat, the pattern repeats
+  every few blocks, and nothing in it is a wave that goes anywhere.
+- **A sum of waves.** Chosen. Each wave is a sine along its own direction,
+  moving at its own rate; add a dozen of different lengths and directions
+  and the sum looks like water. The slope of a sum is the sum of the
+  slopes, so the normal comes from the same loop, exactly, with no
+  texture.
+- A Fourier transform (Tessendorf's ocean). The same idea with thousands
+  of waves, their heights taken from a measured spectrum of the sea and
+  summed by an inverse FFT in compute passes each frame. It gives seas
+  that never repeat and whitecaps nearly for free. It also wants a dense
+  mesh to show its displacement, and this water has one vertex at each
+  corner of a block, so most of it would reach only the normals.
+
+Each choice inside the sum was a decision too:
+
+- **The wave's profile.** `exp(sin(x) - 1)`, not `sin(x)`: narrow crests and
+  wide flat troughs, which is the shape water has. Its average is taken
+  off so the waves leave the water's level where it was.
+- **Each wave pushes the next.** After a wave is added, the point the next
+  one is worked out at moves a little toward that wave's crest. Small waves
+  bunch up on the fronts of large ones, and twelve waves stop looking like
+  twelve.
+- **How fast.** Deep water's own rule: the rate is the square root of
+  gravity times the wave number, so long waves outrun short ones. Slowed to
+  three quarters, which reads as calm.
+- **How tall.** The long waves are low (a shore is one block high, and a
+  wave half a block tall would drown it); the short ones are as steep as
+  waves get. The first four move the surface's corners, all twelve tilt its
+  normal.
+- **No precision problem far from home.** Every wave fits a whole number
+  of times into 1024 blocks and turns a whole number of times in 1024
+  seconds, so positions and the clock wrap there and the floats stay exact.
+  This is the grid of waves an FFT uses, by hand.
+- **Waves too small to draw.** A wave shorter than four pixels only
+  flickers. It fades out, and its tilt is added to the surface's
+  _roughness_ instead: the variance of the slopes that were lost is, up to
+  a factor, the roughness squared. So distant water keeps the sun as a
+  wide glitter path instead of noise. The same idea as a mip level (9),
+  applied to a normal.
+- **Wind.** The rain's wind raises every wave, calm to storm.
+
+**The colour (13, 6).** Water has no colour of its own to light. A pixel of
+it is three things added:
+
+- **The mirror.** Fresnel's share: 2% looking straight down, nearly all of
+  it along the surface, and less on rough water, whose slopes face every
+  way. What it shows is the SSR's hit, or else the sky. The sky needed no
+  cubemap: this game's sky depends only on how high a direction points, so
+  two colours from the CPU, straight up and what the horizon adds, give it
+  in any direction (`skyColourToward`).
+- **What is under it.** The rest of the light, read from the frame behind
+  the water at a coordinate shifted by the waves' tilt (refraction), and
+  dimmed by the water it crossed: `exp(-absorption * distance)` for each of
+  red, green and blue, with red taken fastest. That is Beer and Lambert's
+  law, the same curve as fog (6). What the water takes it gives back as its
+  own colour, in the light there is, so deep water is the `waterColor`
+  setting by day and dark at night.
+- **The sun.** Its glints, from the ordinary specular term on the waves'
+  normal, and a little of its light through the crests when looking toward
+  it.
+
+From below, the surface is a window straight up and a mirror beyond 49
+degrees from it. Light going from water to air bends away from the normal,
+and past that angle none gets out (total internal reflection). One branch
+on the angle.
+
+**Foam at the shore (3).** Engines usually find the shore by depth: where
+the bed is close under the surface, draw foam. Blocks defeat that, because
+a bank is a wall and the bed beside it is a whole block down. So the mesher
+says where the land is: each water top carries eight bits, one for each
+block round it that is solid (`Chunk::bake`), and the shader measures the
+distance to the nearest of those edges and corners.
+
+How the foam is drawn went through three versions:
+
+- Blended white with a noisy edge. It read as more sand.
+- Thin lines running in toward the shore. Only the blocks next to land
+  know where land is, so the lines showed up as stray dashes. Removed.
+- **Dithered.** A cell of foam is white or it is not there, by a 4×4 Bayer
+  threshold on a grid fixed to the world: solid against the land, then a
+  checkerboard, then single cells. The same choices as the torch's light
+  (16), with one difference: 32 cells to a block, not 16, because a band a
+  third of a block wide needs the cells to fade out over. Too far away to
+  tell cells apart, it blends by amount instead.
+
+**Rings where something meets the surface (11).** The split section 11
+describes: the state lives on the CPU and the shader is stateless.
+`waterRipples.cpp` watches each body (the player, the animals, the dropped
+items) and asks one thing of it each frame, whether it is above the water,
+across the surface, or under. Going from one to another is a splash; moving
+while across it drops a ring every half block, which is a wake; staying in
+it drops a faint ring now and then. A ring is five numbers (where, how old,
+how strong, how long it lasts, how big it starts), 32 of them in the
+uniforms. The shader turns each into a low ridge spreading from its middle,
+which tilts the normal and carries foam, through the same dither.
+
+**What floats: buoyancy.** Archimedes: a body in water is pushed up by the
+weight of the water it moves aside. For a box, per unit of its own mass,
+that is
+
+```
+push up = gravity × (share of its height under water) ÷ density
+```
+
+with density counted against water's. A body rests where the push equals
+gravity, so _the share under water is its density_: a dropped item at 0.55
+floats a little more than half under, the player at 0.68 floats with 1.22
+of 1.8 blocks under and the eyes a quarter block clear. Zombies and goblins
+float as the player does, a pig at 0.72, a cat at 0.65. Over 1 it sinks,
+slower than it falls in air.
+
+Push it down and it comes back up: the force grows with depth, which makes
+it a spring, and a spring alone bobs for ever. The water's drag (against
+the velocity, more the deeper in) is what settles it. Both are a few lines
+in `applyBuoyancy`, added to the acceleration before the usual step.
+
+The hard part is the one Acerola's _Do Video Games Fake Buoyancy?_ is
+about: **the body is on the CPU and the water is on the GPU.** The ways out:
+
+| Way | How | Cost |
+| --- | --- | --- |
+| Read the water back | Ask the GPU for the height texture under the body, a few frames later | Always late, so forces arrive late and overshoot |
+| Work it out again | Run the same wave formula on the CPU | Exact, but only for water simple enough to run twice |
+| Fake it | Set the body's place and lean from a plane fitted to a few surface points, smoothed by a spring | Cheapest and easy to direct; cannot capsize or sink |
+
+A sum of twelve waves can be worked out again, which is one more reason it
+was chosen over the FFT: `waterWaves.cpp` has the same four vertex waves,
+from the same tables, and nothing is read back.
+
+Then the choices:
+
+- **The physics floats on still water; the drawing rides the waves.** The
+  physics runs on the server too, and the server has no wave clock and no
+  wind. If the force followed the waves, server and client would disagree
+  about where every floating thing is. So the force uses the flat surface,
+  and the renderer lifts what is floating by the drawn surface's height
+  there (`floatingLift`). It is the table's third row in a small way: the
+  place comes from the surface, the physics only from still water.
+- **The drawn surface, not the formula.** A water face is flat between its
+  four corners, so the lift is the four corners' heights blended across
+  the block, which is where the pixels are.
+- **One sample, not a grid.** The video cuts the body into small boxes and
+  samples under each, so one side can ride higher and tip it. Here a
+  dropped item is 0.4 of a block and the waves that move the surface are 7
+  to 26 blocks long: the tilt across it would be a degree or two. One
+  sample and no lean. A boat would need the grid, or the fitted plane.
+- **Swimming.** Floating took away walking on the sea bed, so the player
+  needed a way down and a way out: the sneak key dives, the jump key swims
+  up, and held against a bank it pushes hard enough to climb onto it.
+- **Animals and monsters have no keys.** On the ground they jump up a
+  block that is in their way; afloat there is no ground to jump from. So
+  one that the water has carried against a bank swims up as hard as the
+  player does there (`applyBuoyancyAndClimb`), and walks out.
+- **Picking up.** A swimmer's feet are more than a block below what floats
+  beside them, so reach is measured from the body, feet to chest.
+
+Checked in scripted screenshots and by the position readout: the sea by
+day, at sunrise toward the sun, at night and in rain; a river; the surface
+from below; shore foam near and far; a wake while wading; a jump into
+water; an apple thrown in, which floats where it used to sink; the player
+rising from the bed to rest at the surface, diving and coming back,
+swimming to a bank and climbing out onto it; standing on the bed in water
+one block deep; and goblins spawned on the sea, which float and come
+ashore. Not checked: pigs, cats and zombies on their own (the same code),
+flowing water, and a fall from height into deep water.
+
+**Read:** GPU Gems'
+[Effective Water Simulation from Physical Models](https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-1-effective-water-simulation-physical-models),
+the sum of sines · Acerola's [Water](https://github.com/GarrettGunnell/Water):
+`Water.shader` for the summed waves, `FFTWater.shader` for the lighting,
+`Buoyancy.cs` for the grid of boxes and the fitted plane · Tessendorf's
+[Simulating Ocean Water](https://people.computing.clemson.edu/~jtessen/reports/papers_files/coursenotes2004.pdf)
+for the FFT · the
+[Atlas water talk](https://gpuopen.com/gdc-presentations/2019/gdc-2019-agtd6-interactive-water-simulation-in-atlas.pdf)
+for a shipped ocean and its floating ships · Catlike Coding's
+[Waves](https://catlikecoding.com/unity/tutorials/flow/waves/) and
+[Looking Through Water](https://catlikecoding.com/unity/tutorials/flow/looking-through-water/)
+· [Everything has Fresnel](http://filmicworlds.com/blog/everything-has-fresnel/)
+
+---
+
 ## Exercises, smallest first
 
 Not a plan (the plans are [`roadmap.md`](roadmap.md) and
@@ -1159,6 +1358,13 @@ reload (the 3D outline's 20), so each is edit, save, look.
    screen and overlay in turn (8).
 6. **Vary a block face** by a hash of its block position: mirror the
    texture coordinate on half the blocks, and see where seams appear (12).
+7. **Count the waves.** Set `waveCount` to 4, then 1, in `chunkFaces.wgsl`
+   and see how few it takes before the water reads as a pattern (17).
+8. **One colour of water.** Give `waterAbsorption` the same number for red,
+   green and blue, and watch the shallows lose their turquoise (17).
+9. **Sink it.** Set the dropped item's density above 1 in
+   `droppedItemPhysicalSettings` and throw one in; then set its water drag
+   to 0 and watch it bob without settling (17).
 
 ---
 

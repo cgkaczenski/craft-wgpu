@@ -51,8 +51,19 @@ glm::vec3 Player::getColliderSize()
 	return getMaxColliderSize();
 }
 
+// A player floats with head and shoulders out of the water (the eyes, 1.5
+// up, stay over the waves), and the water slows a fall into it.
+PhysicalSettings playerPhysicalSettings()
+{
+	PhysicalSettings ps;
+	ps.density = 0.68f;
+	ps.waterDrag = 5.f;
+	return ps;
+}
+
 void Player::update(float deltaTime, decltype(chunkGetterSignature) *chunkGetter)
 {
+	if (!fly) { applyBuoyancy(position, forces, getColliderSize(), chunkGetter, deltaTime, playerPhysicalSettings()); }
 	updateForces(deltaTime, !fly);
 
 	resolveConstrainsAndUpdatePositions(chunkGetter, deltaTime, getColliderSize());

@@ -15,7 +15,12 @@
 void Goblin::update(float deltaTime, decltype(chunkGetterSignature) *chunkGetter)
 {
 
-	updateForces(deltaTime, true);
+	// Floats as a player does, head and shoulders out of the water.
+	PhysicalSettings ps;
+	ps.density = 0.68f;
+	ps.waterDrag = 5.f;
+	applyBuoyancyAndClimb(position, forces, getColliderSize(), chunkGetter, deltaTime, ps);
+	updateForces(deltaTime, true, ps);
 
 	resolveConstrainsAndUpdatePositions(chunkGetter, deltaTime, getColliderSize());
 

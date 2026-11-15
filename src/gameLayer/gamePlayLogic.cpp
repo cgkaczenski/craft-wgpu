@@ -801,6 +801,34 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				{
 					gameData.entityManager.localPlayer.entity.jump();
 				}
+
+				// Swimming: in water the jump key, held, swims up (harder
+				// against a bank, enough to climb out onto it) and the
+				// sneak key dives. Player::update's buoyancy does the rest.
+				auto &swimmer = gameData.entityManager.localPlayer.entity;
+				auto waterAt = [&](int x, int y, int z) -> int
+				{
+					Block *b = gameData.chunkSystem.getBlockSafe(x, y, z);
+					if (!b || b->getType() != BlockTypes::water) { return -1; }
+					return b->getWaterFalling() ? 0 : (int)b->getWaterLevel();
+				};
+				const float bodyHeight = swimmer.getColliderSize().y;
+				double surface = 0;
+				if (waterSurfaceAround(swimmer.position, bodyHeight, waterAt, surface))
+				{
+					const float under = glm::clamp((float)((surface - swimmer.position.y) / bodyHeight), 0.f, 1.f);
+					if (platform::isKeyHeld(platform::Button::Space)
+						|| platform::getControllerButtons().buttons[platform::ControllerButtons::Rthumb].held)
+					{
+						const bool againstBank = swimmer.forces.colidesFrontBack() || swimmer.forces.colidesLeftRight();
+						swimmer.forces.acceleration.y += (SWIM_UP + (againstBank ? SWIM_OUT : 0.f))
+							* glm::min(1.f, under / 0.25f);
+					}
+					if (platform::isKeyHeld(platform::Button::LeftShift))
+					{
+						swimmer.forces.acceleration.y -= SWIM_DOWN * under;
+					}
+				}
 			}
 
 			//apply controller move

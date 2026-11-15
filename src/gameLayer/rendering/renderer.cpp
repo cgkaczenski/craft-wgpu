@@ -3,6 +3,8 @@
 #include "rendering/renderer.h"
 #include "rendering/wgpuWorld.h"
 #include <rendering/waterRipples.h>
+#include <rendering/waterWaves.h>
+#include <gameplay/physics.h>
 #include <ctime>
 #include <chrono>
 #include "blocks.h"
@@ -2035,6 +2037,29 @@ static float horizonFogReady(ChunkSystem &chunkSystem, glm::dvec3 camera)
 	return nearest;
 }
 
+// This frame's waves (renderFromBakedData sets them): their clock and wind.
+static float frameWaveTime = 0;
+static float frameWaveWind = 0.35f;
+
+// How far the waves lift a dropped item above where the physics has it
+// (floating on the still surface): the drawn surface's height there, while
+// the surface crosses the item; nothing for one in the air or sunk.
+static float floatingLift(ChunkSystem &chunkSystem, glm::dvec3 position, float height)
+{
+	auto waterAt = [&](int x, int y, int z) -> int
+	{
+		Block *b = chunkSystem.getBlockSafe(x, y, z);
+		if (!b || b->getType() != BlockTypes::water) { return -1; }
+		return b->getWaterFalling() ? 0 : (int)b->getWaterLevel();
+	};
+	double surface = 0;
+	if (!waterSurfaceAround(position, height, waterAt, surface)) { return 0.f; }
+	const float under = (float)((surface - position.y) / height);
+	const float floating = glm::smoothstep(0.f, 0.2f, under) * (1.f - glm::smoothstep(0.8f, 1.f, under));
+	if (floating <= 0.f) { return 0.f; }
+	return floating * waterWaves::height(position.x, position.z, frameWaveTime, frameWaveWind);
+}
+
 void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	ProgramData &programData, BlocksLoader &blocksLoader, ClientEntityManager &entityManager, 
 	ModelsManager &modelsManager, 
@@ -2048,6 +2073,14 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 {
 	shadingSettings.exposure = adaptiveExposure.currentExposure
 		+ getShadingSettings().exposure;
+
+	// The water's waves this frame: their clock and the wind that raises
+	// them, the same for the water (lighting.waveTime, lighting.wind) and
+	// for what floats on it (floatingLift).
+	const float waveTime = waterWaves::time();
+	const float waveWind = 0.35f + 0.65f * glm::clamp(weather.rain, 0.f, 1.f);
+	frameWaveTime = waveTime;
+	frameWaveWind = waveWind;
 
 	if (dayTime > 1.f)
 		{ dayTime -= (int)dayTime; }
@@ -2244,7 +2277,8 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		glm::vec3 entityFloat = {};
 		glm::ivec3 entityInt = {};
 		decomposePosition(e.second.getRubberBandPosition(), entityFloat, entityInt);
-		entityFloat += glm::vec3(0, 0.2, 0);
+		entityFloat += glm::vec3(0, 0.2f + floatingLift(chunkSystem, e.second.getRubberBandPosition(),
+			e.second.entityBuffered.getColliderSize().y), 0);
 
 		// The light where it lies, as baked; entities.wgsl lights the cube as
 		// a block face is lit, time of day and weather included.
@@ -2521,9 +2555,8 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 	{
 		static const auto animationStart = std::chrono::steady_clock::now();
 		lighting.animationTime = std::chrono::duration<float>(std::chrono::steady_clock::now() - animationStart).count();
-		const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - animationStart).count();
-		lighting.waveTime = (float)std::fmod(seconds, wgpuWorld::waveTimePeriod);
 	}
+	lighting.waveTime = waveTime;
 	lighting.waterMove = waterTimer;
 	// The rings on the water (waterRipples): where the player, the other
 	// players, the animals and monsters and the dropped items are, then the
@@ -2585,7 +2618,7 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		lighting.grassRadius = blades ? grassRadius : 0.f;
 		lighting.grassDensity = grassDensity;
 		lighting.grassClumps = grassClumps;
-		lighting.wind = 0.35f + 0.65f * glm::clamp(weather.rain, 0.f, 1.f);
+		lighting.wind = waveWind;
 	}
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
@@ -3393,8 +3426,10 @@ void Renderer::renderEntities(
 			if (isBlock(e.second.entityBuffered.type)) { continue; }
 			if (!e.second.entityBuffered.type) { continue; }
 
-			renderOneItem(e.second.entityBuffered.type, e.second.getRubberBandPosition(),
-				lightAt(from3DPointToBlock(e.second.getRubberBandPosition() + glm::dvec3(0, 0.2, 0))));
+			const glm::dvec3 place = e.second.getRubberBandPosition();
+			renderOneItem(e.second.entityBuffered.type,
+				place + glm::dvec3(0, floatingLift(chunkSystem, place, e.second.entityBuffered.getColliderSize().y), 0),
+				lightAt(from3DPointToBlock(place + glm::dvec3(0, 0.2, 0))));
 
 		}
 

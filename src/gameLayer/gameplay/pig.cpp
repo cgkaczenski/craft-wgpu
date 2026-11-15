@@ -9,8 +9,12 @@
 
 void Pig::update(float deltaTime, decltype(chunkGetterSignature) *chunkGetter)
 {
+	// A pig floats with its back and head out of the water.
 	PhysicalSettings ps;
 	ps.gravityModifier = 0.9;
+	ps.density = 0.72f;
+	ps.waterDrag = 5.f;
+	applyBuoyancyAndClimb(position, forces, getColliderSize(), chunkGetter, deltaTime, ps);
 	updateForces(deltaTime, true, ps);
 
 	resolveConstrainsAndUpdatePositions(chunkGetter, deltaTime, getColliderSize());

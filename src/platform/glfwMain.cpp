@@ -232,7 +232,8 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // camera in game; the game re-centres the cursor at half the framebuffer
 // size each frame, so the offset from there is the turn), key@E, key@Space,
 // key@LShift or key@F9 (pressed, then released the same way), hold@W,N (held
-// for N frames: walking; hold@Mouse,N holds the left button; hold@LCtrl,N
+// for N frames: walking; hold@Mouse,N holds the left button and
+// hold@RMouse,N the right; hold@LCtrl,N
 // with a key@F2 inside it is Ctrl+F2) and quit (closes the window, so
 // shutdown runs). Feeds the callbacks below; the mouse position is overridden from
 // the first click on, without moving the real cursor.
@@ -257,13 +258,14 @@ static void playScriptedInput(GLFWwindow *window)
 	if (!script) { return; }
 
 	static long long frameIndex = 0;
-	static std::vector<std::pair<int, int>> releases; // frame, key (-1 = left mouse)
+	static std::vector<std::pair<int, int>> releases; // frame, key (-1 = left mouse, -2 = right)
 	++frameIndex;
 
 	for (auto it = releases.begin(); it != releases.end();)
 	{
 		if (it->first != frameIndex) { ++it; continue; }
-		if (it->second < 0) { mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, 0); }
+		if (it->second == -2) { mouseCallback(window, GLFW_MOUSE_BUTTON_RIGHT, GLFW_RELEASE, 0); }
+		else if (it->second < 0) { mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, 0); }
 		else { keyCallback(window, it->second, 0, GLFW_RELEASE, 0); }
 		it = releases.erase(it);
 	}
@@ -323,6 +325,14 @@ static void playScriptedInput(GLFWwindow *window)
 			mouseCallback(window, GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
 			releases.push_back({frame + frames, -1});
 			std::cout << "input: frame " << frame << " hold Mouse for " << frames << " frames\n";
+		}
+		else if (int frames = 0; std::sscanf(step.c_str(), "%d:hold@%15[A-Za-z0-9],%d", &frame, name, &frames) == 3
+			&& frame == frameIndex && std::string(name) == "RMouse" && frames > 0)
+		{
+			// The right button: using what is held (placing a block, a spawn egg).
+			mouseCallback(window, GLFW_MOUSE_BUTTON_RIGHT, GLFW_PRESS, 0);
+			releases.push_back({frame + frames, -2});
+			std::cout << "input: frame " << frame << " hold RMouse for " << frames << " frames\n";
 		}
 		else if (int frames = 0; std::sscanf(step.c_str(), "%d:hold@%15[A-Za-z0-9],%d", &frame, name, &frames) == 3
 			&& frame == frameIndex && scriptedKey(name) >= 0 && frames > 0)
