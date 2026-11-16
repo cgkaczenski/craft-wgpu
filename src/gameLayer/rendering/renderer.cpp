@@ -3,6 +3,7 @@
 #include "rendering/renderer.h"
 #include "rendering/wgpuWorld.h"
 #include <rendering/waterRipples.h>
+#include <rendering/snowCover.h>
 #include <rendering/waterWaves.h>
 #include <gameplay/physics.h>
 #include <ctime>
@@ -2581,6 +2582,28 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		track(entityManager.goblins, 6);
 		waterRipples::endFrame();
 
+		// The snow on the ground (snowCover): how deep it lies, and the
+		// same bodies' tracks in it. What has fallen stays white a while
+		// after the snowfall.
+		snowCover::beginFrame(deltaTime, c.position, chunkSystem, weather.rain, weather.snow);
+		snowCover::touch(0, player.position, player.getColliderSize());
+		auto trackInSnow = [&](auto &entities, std::uint64_t kind)
+		{
+			for (auto &e : entities)
+			{
+				snowCover::touch((kind << 56) ^ e.first, e.second.getRubberBandPosition(),
+					e.second.entityBuffered.getColliderSize());
+			}
+		};
+		trackInSnow(entityManager.players, 1);
+		trackInSnow(entityManager.droppedItems, 2);
+		trackInSnow(entityManager.zombies, 3);
+		trackInSnow(entityManager.pigs, 4);
+		trackInSnow(entityManager.cats, 5);
+		trackInSnow(entityManager.goblins, 6);
+		snowCover::endFrame();
+		lighting.snow = std::max(lighting.snow, snowCover::lying());
+
 		lighting.rippleCount = 0;
 		for (const auto &ring : waterRipples::rings())
 		{
@@ -2696,6 +2719,20 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 				}
 		}
 		wgpuWorld::setPrecipitation(precipitation);
+	}
+	{
+		const snowCover::Layer layer = snowCover::layer();
+		wgpuWorld::SnowLayer snow;
+		snow.draw = layer.any;
+		snow.corner = layer.corner;
+		snow.columnsAcross = snowCover::columnsAcross;
+		snow.columns = layer.columns;
+		snow.reach = (float)snowCover::radius;
+		snow.trail = layer.trail;
+		snow.trailSize = snowCover::trailSize;
+		snow.trailBlocks = snowCover::trailBlocks;
+		snow.changedRows = layer.changedRows;
+		wgpuWorld::setSnow(snow);
 	}
 
 	// The world's transparent passes come after the entities.

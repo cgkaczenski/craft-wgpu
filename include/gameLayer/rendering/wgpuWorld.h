@@ -135,6 +135,29 @@ namespace wgpuWorld
 	};
 	void setPrecipitation(const Precipitation &precipitation);
 
+	// The snow that lies on the ground round the camera (snowCover; drawn by
+	// snow.wgsl in renderTransparent, before anything transparent). Call
+	// before it, each frame.
+	struct SnowLayer
+	{
+		bool draw = false;             // some column has snow
+		glm::ivec2 corner = {};        // world block x, z of column (0, 0)
+		int columnsAcross = 0;         // columns per side; the mesh leaves the outer ring out
+		// Per column, x fastest: x the world y of the top face, y the snow's
+		// depth in blocks, z the light above it (sky light << 4 | block light).
+		const std::vector<glm::vec4> *columns = nullptr;
+		int cellsPerBlock = 8;         // the mesh's
+		float reach = 24;              // blocks from the camera to where the snow has thinned to nothing
+		// The tracks: trailSize squared bytes, x fastest, spanning
+		// trailBlocks blocks and wrapping; and the rows changed since the
+		// last call (first, count).
+		const uint8_t *trail = nullptr;
+		int trailSize = 0;
+		int trailBlocks = 0;
+		std::vector<glm::ivec2> changedRows;
+	};
+	void setSnow(const SnowLayer &snow);
+
 	// Grass blades: the cells in view they grow in this frame
 	// (chunkFaces.wgsl's vs_blade has the packing: xyz the block they stand
 	// in, w the light, the tall grass's texture, whether it is a tuft and

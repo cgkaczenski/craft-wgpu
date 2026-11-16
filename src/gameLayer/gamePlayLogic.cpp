@@ -1,5 +1,6 @@
 #include <gameplay/impact.h>
 #include <rendering/debris.h>
+#include <rendering/snowCover.h>
 #include <rendering/postModifiers.h>
 #include "gamePlayLogic.h"
 #include "rendering/camera.h"
@@ -246,6 +247,7 @@ bool initGameplay(ProgramData &programData, const char *c) //GAME STUFF!
 	}
 
 	gameData.clearData();
+	snowCover::reset(); // another world: no snow or tracks from the last
 	//threadPoolForChunkBaking.setThreadsNumber(2, bakeWorkerThread);
 	gameData.c.position = glm::vec3(0, 65, 0);
 

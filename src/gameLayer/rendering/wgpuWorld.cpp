@@ -142,6 +142,14 @@ namespace
 	};
 	static_assert(sizeof(PrecipitationUniforms) == 128, "must match precipitation.wgsl");
 
+	// The snow on the ground: snow.wgsl's SnowUniforms.
+	struct SnowUniforms
+	{
+		glm::ivec4 corner; // xy column (0, 0)'s world block, z columns per side, w cells to a block
+		glm::vec4 params;  // x where the snow has thinned to nothing, y the tracks' blocks, z their texels
+	};
+	static_assert(sizeof(SnowUniforms) == 32, "must match snow.wgsl");
+
 	// Weather particles: weather.wgsl's WeatherUniforms.
 	struct WeatherUniforms
 	{
@@ -616,6 +624,22 @@ namespace
 		BindGroup precipitationBindGroup = nullptr;
 		bool precipitationPending = false;
 		uint32_t precipitationColumns = 0;
+		// The snow on the ground (snow.wgsl), from setSnow, drawn by
+		// renderTransparent before anything transparent.
+		BindGroupLayout snowBindGroupLayout = nullptr;
+		PipelineLayout snowPipelineLayout = nullptr;
+		RenderPipeline snowPipeline = nullptr;
+		Buffer snowUniformBuffer = nullptr;
+		Buffer snowColumnBuffer = nullptr;
+		uint64_t snowColumnCapacity = 0;   // in columns
+		Texture snowTrailTexture = nullptr;
+		TextureView snowTrailView = nullptr;
+		int snowTrailSize = 0;
+		Sampler snowSampler = nullptr;
+		BindGroup snowBindGroup = nullptr;
+		bool snowPending = false;
+		uint32_t snowRows = 0;             // strips
+		uint32_t snowStripVertices = 0;
 		// Weather particles (weather.wgsl): the pool, simulated and drawn by
 		// recordPrecipitation when setPrecipitation asks for particles.
 		BindGroupLayout weatherComputeBindGroupLayout = nullptr;
@@ -4473,6 +4497,112 @@ namespace
 		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "precipitation", "Precipitation pass: rain or snow");
 	}
 
+	// ---- The snow on the ground (snow.wgsl) -------------------------------
+
+	bool createSnowResources()
+	{
+		ErrorScope scope("world snow resources");
+		w.snowUniformBuffer = makeUniformBuffer("world snow uniforms", sizeof(SnowUniforms));
+		BindGroupLayoutEntry entries[4] = { uniformEntry(0, sizeof(SnowUniforms)), emptyEntry(1),
+			textureEntry(2, TextureSampleType::Float), samplerEntry(3) };
+		entries[0].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+		entries[1].visibility = ShaderStage::Vertex;
+		entries[1].buffer.type = BufferBindingType::ReadOnlyStorage;
+		entries[1].buffer.hasDynamicOffset = false;
+		entries[1].buffer.minBindingSize = sizeof(glm::vec4);
+		entries[2].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+		entries[3].visibility = ShaderStage::Vertex | ShaderStage::Fragment;
+		w.snowBindGroupLayout = makeLayout("world snow bind group layout", entries, 4);
+
+		SamplerDescriptor samplerDesc = Default;
+		samplerDesc.label = StringView("world snow tracks sampler");
+		samplerDesc.addressModeU = AddressMode::Repeat;
+		samplerDesc.addressModeV = AddressMode::Repeat;
+		samplerDesc.addressModeW = AddressMode::Repeat;
+		samplerDesc.magFilter = FilterMode::Linear;
+		samplerDesc.minFilter = FilterMode::Linear;
+		samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
+		samplerDesc.lodMinClamp = 0.0f;
+		samplerDesc.lodMaxClamp = 0.0f;
+		samplerDesc.compare = CompareFunction::Undefined;
+		samplerDesc.maxAnisotropy = 1;
+		w.snowSampler = wgpuDevice().createSampler(samplerDesc);
+		if (!w.snowUniformBuffer || !w.snowBindGroupLayout || !w.snowSampler) { return false; }
+		return !scope.failed();
+	}
+
+	// Into the G-buffer whole, as the entities: color, position, normal,
+	// depth tested and written. Both faces (it is only ever seen from above).
+	bool createSnow()
+	{
+		ShaderModule module = wgpuCreateShaderModuleFromFile(RESOURCES_PATH "shaders/webgpu/snow.wgsl");
+		if (!module) { return false; }
+		ErrorScope scope("world snow");
+
+		BindGroupLayout groups[2] = { w.bindGroupLayout, w.snowBindGroupLayout };
+		w.snowPipelineLayout = createPipelineLayout("world snow pipeline layout", groups, 2);
+
+		ColorTargetState targets[GBufferSlots];
+		const uint32_t targetCount = colorTargets(ColorTargets::GBuffer, nullptr, targets);
+
+		DepthStencilState depth = Default;
+		depth.format = depthFormat;
+		depth.depthWriteEnabled = OptionalBool::True;
+		depth.depthCompare = CompareFunction::Less;
+		depth.stencilFront.compare = CompareFunction::Always;
+		depth.stencilFront.failOp = StencilOperation::Keep;
+		depth.stencilFront.depthFailOp = StencilOperation::Keep;
+		depth.stencilFront.passOp = StencilOperation::Keep;
+		depth.stencilBack = depth.stencilFront;
+		depth.stencilReadMask = 0;
+		depth.stencilWriteMask = 0;
+
+		RenderPipelineDescriptor desc = Default;
+		desc.label = StringView("world snow");
+		desc.layout = w.snowPipelineLayout;
+		desc.vertex.module = module;
+		desc.vertex.entryPoint = StringView("vs_snow");
+		desc.vertex.bufferCount = 0;
+		desc.vertex.buffers = nullptr;
+		desc.primitive.topology = PrimitiveTopology::TriangleStrip;
+		desc.primitive.stripIndexFormat = IndexFormat::Undefined;
+		desc.primitive.frontFace = FrontFace::CCW;
+		desc.primitive.cullMode = CullMode::None;
+		desc.depthStencil = &depth;
+		desc.multisample.count = 1;
+		desc.multisample.mask = 0xFFFFFFFFu;
+		desc.multisample.alphaToCoverageEnabled = false;
+		FragmentState fragment = Default;
+		fragment.module = module;
+		fragment.entryPoint = StringView("fs_snow");
+		fragment.targetCount = targetCount;
+		fragment.targets = targets;
+		desc.fragment = &fragment;
+		w.snowPipeline = wgpuDevice().createRenderPipeline(desc);
+
+		const bool invalid = scope.failed();
+		module.release();
+		return w.snowPipeline && w.snowPipelineLayout && !invalid;
+	}
+
+	// Into this frame's encoder, after the entities and before anything
+	// transparent: the snow setSnow left, seen from render's camera.
+	void recordSnow(CommandEncoder encoder)
+	{
+		if (!w.snowPending) { return; }
+		w.snowPending = false;
+		if (!w.snowPipeline || !w.snowBindGroup || !w.bindGroup || !w.depthView || !w.frameRendered || !encoder) { return; }
+
+		RenderPassEncoder pass = beginGBufferPass(encoder, false, "world snow pass");
+		pass.setPipeline(w.snowPipeline);
+		pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+		pass.setBindGroup(1, w.snowBindGroup, 0, nullptr);
+		pass.draw(w.snowStripVertices, w.snowRows, 0, 0);
+		pass.end();
+		pass.release();
+		dumpTexture(encoder, w.gBufferTextures[GColor], DumpKind::Scene, "snow", "Snow pass: the snow on the ground");
+	}
+
 	// ---- Weather particles (weather.wgsl) ---------------------------------
 
 	// The uniforms, the pool and the two bind group layouts: the simulation's
@@ -4980,7 +5110,7 @@ namespace
 	{
 		return createPipelines() && createEntityPipelines() && createViewPipelines() && createSky()
 			&& createPost() && createBloom() && createHbao() && createRaysAndWarp() && createPrecipitation()
-			&& createWeather();
+			&& createWeather() && createSnow();
 	}
 
 	// Every handle createPipelineSet assigns, for a reload to move aside,
@@ -4999,7 +5129,7 @@ namespace
 			&w.bloomBlurPipelines[0], &w.bloomBlurPipelines[1], &w.bloomApplyPipeline, &w.exposurePipeline,
 			&w.lastColorPipeline, &w.hbaoPipeline, &w.hbaoApplyPipeline,
 			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline,
-			&w.weatherDrawPipeline,
+			&w.weatherDrawPipeline, &w.snowPipeline,
 			&w.bladePipeline, &w.bladeEqualPipeline, &w.bladePrepassPipeline, &w.bladeShadowPipeline };
 		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
 		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
@@ -5011,7 +5141,7 @@ namespace
 			&w.sunRaysPipelineLayout, &w.postPipelineLayout, &w.toneMapPipelineLayout, &w.bloomPipelineLayout, &w.bloomApplyPipelineLayout,
 			&w.hbaoPipelineLayout, &w.hbaoApplyPipelineLayout, &w.rayMaskPipelineLayout, &w.rayBlurPipelineLayout,
 			&w.warpPipelineLayout, &w.precipitationPipelineLayout,
-			&w.weatherComputePipelineLayout, &w.weatherDrawPipelineLayout,
+			&w.weatherComputePipelineLayout, &w.weatherDrawPipelineLayout, &w.snowPipelineLayout,
 			&w.bladePipelineLayout };
 		for (PipelineLayout *layout : layouts) { onLayout(*layout); }
 	}
@@ -5032,7 +5162,7 @@ namespace
 
 		if (!createLayoutAndUniforms() || !createSkyResources() || !createPostResources() || !createBloomResources()
 			|| !createHbaoResources() || !createRaysAndWarpResources() || !createPrecipitationResources()
-			|| !createWeatherResources() || !createGrassResources()
+			|| !createWeatherResources() || !createGrassResources() || !createSnowResources()
 			|| !createPipelineSet())
 		{
 			std::cerr << "WebGPU world: could not create the chunk face pipeline\n";
@@ -5921,6 +6051,7 @@ void renderTransparent()
 {
 	// The sun and moon first: GL draws them after the entities and before
 	// the transparent geometry, so glass and water show them.
+	recordSnow(wgpuFrameEncoder());
 	drawSunAndMoon();
 	if (!w.pendingTransparent) { recordPrecipitation(wgpuFrameEncoder()); compositeFrame(); return; }
 	w.pendingTransparent = false;
@@ -6138,6 +6269,98 @@ void setPrecipitation(const Precipitation &precipitation)
 
 	w.precipitationColumns = count;
 	w.precipitationPending = true;
+}
+
+void setSnow(const SnowLayer &snow)
+{
+	w.snowPending = false;
+	if (!w.initialized || !snow.trail || snow.trailSize <= 0) { return; }
+
+	// The tracks' picture, and the rows of it that changed (all of them the
+	// first time), whether or not there is snow to draw this frame.
+	bool remade = false;
+	if (!w.snowTrailTexture || w.snowTrailSize != snow.trailSize)
+	{
+		if (w.snowTrailView) { w.snowTrailView.release(); w.snowTrailView = nullptr; }
+		if (w.snowTrailTexture) { w.snowTrailTexture.release(); w.snowTrailTexture = nullptr; }
+		w.snowTrailTexture = createTarget("world snow tracks", TextureFormat::R8Unorm,
+			TextureUsage::TextureBinding | TextureUsage::CopyDst, snow.trailSize, snow.trailSize);
+		if (!w.snowTrailTexture) { return; }
+		w.snowTrailView = createTargetView(w.snowTrailTexture, "world snow tracks view", TextureFormat::R8Unorm,
+			TextureAspect::All, TextureUsage::TextureBinding);
+		if (!w.snowTrailView) { return; }
+		w.snowTrailSize = snow.trailSize;
+		remade = true;
+	}
+	auto writeRows = [&](int first, int count)
+	{
+		TexelCopyTextureInfo destination = Default;
+		destination.texture = w.snowTrailTexture;
+		destination.mipLevel = 0;
+		destination.origin = { 0, (uint32_t)first, 0 };
+		destination.aspect = TextureAspect::All;
+		TexelCopyBufferLayout layout = Default;
+		layout.offset = 0;
+		layout.bytesPerRow = (uint32_t)snow.trailSize;
+		layout.rowsPerImage = (uint32_t)count;
+		Extent3D size = { (uint32_t)snow.trailSize, (uint32_t)count, 1 };
+		wgpuQueue().writeTexture(destination, snow.trail + (size_t)first * snow.trailSize,
+			(size_t)count * snow.trailSize, layout, size);
+	};
+	if (remade) { writeRows(0, snow.trailSize); }
+	else
+	{
+		for (const glm::ivec2 &rows : snow.changedRows)
+		{
+			if (rows.x < 0 || rows.y <= 0 || rows.x + rows.y > snow.trailSize) { continue; }
+			writeRows(rows.x, rows.y);
+		}
+	}
+
+	if (!snow.draw || !snow.columns || snow.columnsAcross < 3 || snow.cellsPerBlock <= 0) { return; }
+	const uint32_t count = (uint32_t)(snow.columnsAcross * snow.columnsAcross);
+	if (snow.columns->size() < count) { return; }
+
+	bool grown = false;
+	if (!ensureBuffer(w.snowColumnBuffer, w.snowColumnCapacity, count, sizeof(glm::vec4),
+		BufferUsage::Storage, "world snow columns", grown)) { return; }
+	wgpuQueue().writeBuffer(w.snowColumnBuffer, 0, snow.columns->data(), count * sizeof(glm::vec4));
+
+	if (grown || remade || !w.snowBindGroup)
+	{
+		if (w.snowBindGroup) { w.snowBindGroup.release(); w.snowBindGroup = nullptr; }
+		BindGroupEntry entries[4] = { Default, Default, Default, Default };
+		entries[0].binding = 0;
+		entries[0].buffer = w.snowUniformBuffer;
+		entries[0].offset = 0;
+		entries[0].size = sizeof(SnowUniforms);
+		entries[1].binding = 1;
+		entries[1].buffer = w.snowColumnBuffer;
+		entries[1].offset = 0;
+		entries[1].size = w.snowColumnCapacity * sizeof(glm::vec4);
+		entries[2].binding = 2;
+		entries[2].textureView = w.snowTrailView;
+		entries[3].binding = 3;
+		entries[3].sampler = w.snowSampler;
+		BindGroupDescriptor groupDesc = Default;
+		groupDesc.label = StringView("world snow bind group");
+		groupDesc.layout = w.snowBindGroupLayout;
+		groupDesc.entryCount = 4;
+		groupDesc.entries = entries;
+		w.snowBindGroup = wgpuDevice().createBindGroup(groupDesc);
+		if (!w.snowBindGroup) { return; }
+	}
+
+	SnowUniforms uniforms;
+	uniforms.corner = glm::ivec4(snow.corner, snow.columnsAcross, snow.cellsPerBlock);
+	uniforms.params = glm::vec4(snow.reach, (float)snow.trailBlocks, (float)snow.trailSize, 0.f);
+	wgpuQueue().writeBuffer(w.snowUniformBuffer, 0, &uniforms, sizeof(uniforms));
+
+	// A strip a row of cells, over the columns inside the map's rim.
+	const uint32_t across = (uint32_t)((snow.columnsAcross - 2) * snow.cellsPerBlock);
+	w.snowStripVertices = across * 2;
+	w.snowRows = across - 1;
+	w.snowPending = true;
 }
 
 void setGrassCells(const std::vector<glm::ivec4> &cells, const GrassGroup groups[grassGroups])
@@ -6468,6 +6691,18 @@ void shutdown()
 		if (*layout) { layout->release(); *layout = nullptr; }
 	}
 	for (Buffer *buffer : { &w.rayUniformBuffer, &w.warpUniformBuffer, &w.sunCountBuffer, &w.sunReadBuffer })
+	{
+		if (*buffer) { buffer->release(); *buffer = nullptr; }
+	}
+	// The snow on the ground.
+	if (w.snowBindGroup) { w.snowBindGroup.release(); w.snowBindGroup = nullptr; }
+	if (w.snowPipeline) { w.snowPipeline.release(); w.snowPipeline = nullptr; }
+	if (w.snowPipelineLayout) { w.snowPipelineLayout.release(); w.snowPipelineLayout = nullptr; }
+	if (w.snowBindGroupLayout) { w.snowBindGroupLayout.release(); w.snowBindGroupLayout = nullptr; }
+	if (w.snowTrailView) { w.snowTrailView.release(); w.snowTrailView = nullptr; }
+	if (w.snowTrailTexture) { w.snowTrailTexture.release(); w.snowTrailTexture = nullptr; }
+	if (w.snowSampler) { w.snowSampler.release(); w.snowSampler = nullptr; }
+	for (Buffer *buffer : { &w.snowUniformBuffer, &w.snowColumnBuffer })
 	{
 		if (*buffer) { buffer->release(); *buffer = nullptr; }
 	}
