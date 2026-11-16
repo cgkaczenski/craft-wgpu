@@ -231,7 +231,7 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // release on the next), move@x,y (the mouse moves there, no button: turns the
 // camera in game; the game re-centres the cursor at half the framebuffer
 // size each frame, so the offset from there is the turn), key@E, key@Space,
-// key@LShift or key@F9 (pressed, then released the same way), hold@W,N (held
+// key@LShift, key@Escape or key@F9 (pressed, then released the same way), hold@W,N (held
 // for N frames: walking; hold@Mouse,N holds the left button and
 // hold@RMouse,N the right; hold@LCtrl,N
 // with a key@F2 inside it is Ctrl+F2) and quit (closes the window, so
@@ -240,7 +240,7 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 static glm::ivec2 scriptedMouse = {0, 0};
 static bool scriptedMouseActive = false; // set by the first click@ or move@ (coordinates may be negative)
 
-// A key named in a script: one letter or digit, Space, LShift or LCtrl. -1 if unknown.
+// A key named in a script: one letter or digit, Space, LShift, LCtrl or Escape. -1 if unknown.
 static int scriptedKey(const char *name)
 {
 	const std::string n = name;
@@ -249,6 +249,7 @@ static int scriptedKey(const char *name)
 	if (n == "Space") { return GLFW_KEY_SPACE; }
 	if (n == "LCtrl") { return GLFW_KEY_LEFT_CONTROL; }
 	if (n == "LShift") { return GLFW_KEY_LEFT_SHIFT; }
+	if (n == "Escape") { return GLFW_KEY_ESCAPE; }
 	return -1;
 }
 

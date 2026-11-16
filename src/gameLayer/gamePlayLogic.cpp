@@ -1844,6 +1844,15 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 #pragma endregion
 
 
+	// Escape hides the map late in the frame, after the map has queued its
+	// chunk textures for the 2D renderer; releasing them then makes the
+	// frame's flush bind freed textures (a wgpu abort). So the textures are
+	// released here, at the start of the next frame.
+	if (!gameData.isInsideMapView && !gameData.mapEngine.mapChunks.empty())
+	{
+		gameData.mapEngine.close();
+	}
+
 	if (!stopMainInput || gameData.isInsideMapView)
 	{
 		if (platform::isKeyReleased(platform::Button::M))
@@ -3680,8 +3689,8 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	{
 		if (platform::isKeyReleased(platform::Button::Escape))
 		{
+			// The textures are released next frame (see the M key above).
 			gameData.isInsideMapView = false;
-			gameData.mapEngine.close();
 		}
 	}
 	else if (gameData.isInsideChat)
