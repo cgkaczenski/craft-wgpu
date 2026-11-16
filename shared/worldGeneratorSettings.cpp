@@ -269,8 +269,58 @@ float truncateTo4Decimals(float number)
 //TODO optimize get noise set lol
 int WorldGenerator::getRegionHeightAndBlendingsForChunk(int chunkX, int chunkZ,
 	float values[16 * 16], float borderingFactor[16 * 16], float &vegetationMaster,
-	float tightBorders[16 * 16], float &xValue, float &zValue, float &biomeTypeRandomValue)
+	float tightBorders[16 * 16], float &xValue, float &zValue, float &biomeTypeRandomValue,
+	float *plainsAround)
 {
+	// How much of the land around each column is plains: the levels of the
+	// nine by nine chunks around this one (as getRezultValues below gives
+	// them: the regions' spline, and plains near the world's middle), and
+	// for each column the share of a square 64 blocks each way that lies in
+	// plains chunks. A chunk's level is one number, so the share is a sum of
+	// rectangles, not of columns.
+	if (plainsAround)
+	{
+		constexpr int reach = 4;             // chunks each way
+		constexpr int side = reach * 2 + 1;
+		constexpr int window = 64;           // blocks each way
+		float *levels = regionsHeightNoise->GetNoiseSet(chunkX - reach, 0, chunkZ - reach, side, 1, side, 1);
+		float *centreX = regionsX->GetNoiseSet(chunkX - reach, 0, chunkZ - reach, side, 1, side);
+		float *centreZ = regionsZ->GetNoiseSet(chunkX - reach, 0, chunkZ - reach, side, 1, side);
+		bool plains[side * side] = {};
+		// (A noise set is laid out x, then y, then z: index x * side + z.)
+		for (int i = 0; i < side * side; i++)
+		{
+			float level = std::floor(regionsHeightSplines.applySpline((levels[i] + 1) / 2.f) * 6);
+			if (level == 6) { level = 5; }
+			const int cx = (int)(truncateTo4Decimals(centreX[i]) * (1.f / regionsX->GetFrequency()) * (1.f / regionsX->GetAxisScaleX()));
+			const int cz = (int)(truncateTo4Decimals(centreZ[i]) * (1.f / regionsZ->GetFrequency()) * (1.f / regionsZ->GetAxisScaleZ()));
+			plains[i] = (int)level == PLAINS_HEIGHT_INDEX || glm::length(glm::vec2{cx, cz}) < 16;
+		}
+		for (int x = 0; x < 16; x++)
+			for (int z = 0; z < 16; z++)
+			{
+				int area = 0;
+				for (int cx = 0; cx < side; cx++)
+				{
+					// The chunk's span along x, in this chunk's blocks.
+					const int from = (cx - reach) * 16;
+					const int overX = std::min(x + window, from + 16) - std::max(x - window, from);
+					if (overX <= 0) { continue; }
+					for (int cz = 0; cz < side; cz++)
+					{
+						if (!plains[cx * side + cz]) { continue; }
+						const int fromZ = (cz - reach) * 16;
+						const int overZ = std::min(z + window, fromZ + 16) - std::max(z - window, fromZ);
+						if (overZ > 0) { area += overX * overZ; }
+					}
+				}
+				plainsAround[z + x * 16] = area / float(4 * window * window);
+			}
+		FastNoiseSIMD::FreeNoiseSet(levels);
+		FastNoiseSIMD::FreeNoiseSet(centreX);
+		FastNoiseSIMD::FreeNoiseSet(centreZ);
+	}
+
 	float *rezult
 		= regionsHeightNoise->GetNoiseSet(chunkX-1, 0, chunkZ-1,
 		3, (1), 3, 1);

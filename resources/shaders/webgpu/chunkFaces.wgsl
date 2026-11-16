@@ -9,6 +9,7 @@
 //              cube faces, 6-9 grass, 10-15 leaves, 22-35 water, then
 //              models; bits 13-15 flowing water's level (water faces only)
 //   bytes 2-3  texture index (short): low 11 bits the texture, high 5 colors
+//              (on water, which way it runs: waterFlowWaves)
 //   bytes 4-15 block position (ivec3, world blocks); y packs light in bits
 //              16-23 and flags in 24-31 (flag bit 0: water)
 //
@@ -254,9 +255,33 @@ fn spannedLayer(entry: u32, orientation: i32, block: vec3i) -> u32 {
 fn biasUp(a: f32) -> f32 { return (a + 0.75) / 1.75; }
 fn biasUp2(a: f32) -> f32 { return ((a + 1.0) / 2.0) / 2.0 + 0.5; }
 
-// How far each flowing-water level (1-7, from the face's shape bits 13-15)
-// lowers the water's surface below a source's, in blocks.
+// How far each flowing-water level (1-7) lowers the water's surface below a
+// source's, in blocks.
 const waterLevelDrop = 0.11;
+
+// How far a corner of water's surface lies below a source's surface. Each
+// corner's height is the average of the water around it (Chunk::bake's
+// waterCorners), 4 bits a corner (corner x + 2 z): 0-14 half levels down,
+// 15 up at the block's top (water stands over a block beside it). `corner`
+// is in the block, about its middle (-0.5 to 0.5).
+fn waterCornerDrop(surface: u32, corner: vec3f) -> f32 {
+    let k = select(0u, 1u, corner.x > 0.0) + select(0u, 2u, corner.z > 0.0);
+    let code = (surface >> (4u * k)) & 0xFu;
+    if (code == 15u) { return -0.08; }
+    return f32(code) * waterLevelDrop * 0.5;
+}
+
+// The tilt of water's surface from its corners: its normal, waves aside.
+fn waterSurfaceNormal(surface: u32) -> vec3f {
+    let d0 = waterCornerDrop(surface, vec3f(-0.5, 0.5, -0.5));
+    let d1 = waterCornerDrop(surface, vec3f(0.5, 0.5, -0.5));
+    let d2 = waterCornerDrop(surface, vec3f(-0.5, 0.5, 0.5));
+    let d3 = waterCornerDrop(surface, vec3f(0.5, 0.5, 0.5));
+    // Heights are minus the drops: rising along x and z by these.
+    let riseX = ((d0 + d2) - (d1 + d3)) * 0.5;
+    let riseZ = ((d0 + d1) - (d2 + d3)) * 0.5;
+    return normalize(vec3f(-riseX, 1.0, -riseZ));
+}
 
 // ---- The water's waves ----------------------------------------------------
 // The surface as a sum of travelling waves, each a sine sharpened into a
@@ -345,6 +370,93 @@ fn waterWaves(p: vec2f, count: i32, footprint: f32) -> Waves {
     return w;
 }
 
+// ---- Running water ---------------------------------------------------------
+// Water that runs (down the slope of its surface) says which way in its
+// face's colour bits (Chunk::bake): 1-8 one of eight directions, and 9 on
+// a side where it falls (water over it, or an edge it pours over).
+
+const waterFalling = 9u;
+
+// The direction of a flow code 1-8, along x and z (each -1, 0 or 1).
+fn flowDirection(code: u32) -> vec2i {
+    let cell = i32(select(code, code - 1u, code <= 4u));
+    return vec2i(cell % 3 - 1, cell / 3 - 1);
+}
+
+// The waves of running water at `p` (a world xz, wrapped to waveTile): three
+// short, steep waves that travel the way it runs, each a little to one side
+// of it, over the still water's own (which are halved there). Their vectors
+// are whole numbers of turns across the waves' tile whichever of the eight
+// ways they are turned, and their rates whole turns in its time, as the
+// others' are. Returns the surface's slope.
+const flowWaveTurns = array<vec2i, 3>(vec2i(700, 90), vec2i(1100, -170), vec2i(1750, 260));
+const flowWaveRates = array<f32, 3>(1600.0, 2304.0, 3392.0);
+const flowWaveAmplitude = array<f32, 3>(0.030, 0.018, 0.010);
+
+fn waterFlowWaves(p: vec2f, code: u32, footprint: f32) -> vec2f {
+    let d = flowDirection(code);
+    // Running along a diagonal the vectors come out longer by the square
+    // root of two (they are still whole numbers); the rates go up to match
+    // (by 45/32, which keeps them whole) and the heights down.
+    let diagonal = d.x != 0 && d.y != 0;
+    let stretch = select(1.0, 1.40625, diagonal);
+    var slope = vec2f(0.0);
+    for (var i = 0; i < 3; i++) {
+        let turns = flowWaveTurns[i];
+        let k = vec2f(vec2i(turns.x * d.x - turns.y * d.y, turns.x * d.y + turns.y * d.x)) * (2.0 * PI / waveTile);
+        let number = length(k);
+        let shown = 1.0 - smoothstep(0.25, 0.5, footprint * number / (2.0 * PI));
+        let amplitude = flowWaveAmplitude[i] / stretch;
+        let x = dot(k, p) - flowWaveRates[i] * stretch * (2.0 * PI / waveTile) * u.animation.z;
+        slope += k * (amplitude * exp(sin(x) - 1.0) * cos(x) * shown);
+    }
+    return slope;
+}
+
+// A fall: on a side of water, streaks of foam running down it. How much
+// foam at a pixel, 0..1, and the cell of the foam's grid it is in (the
+// grid lies on the face: along it and up it).
+struct FallFoam {
+    amount: f32,
+    cell: vec2i,
+};
+
+fn fallFoam(in: VertexOutput, footprint: f32) -> FallFoam {
+    var f: FallFoam;
+    // Along the face: z on a face that looks along x, else x.
+    let alongX = abs(in.normal.x) < 0.5;
+    let along = select(f32(in.blockPos.z & 1023) + in.inBlock.z, f32(in.blockPos.x & 1023) + in.inBlock.x, alongX);
+    let up = f32(in.blockPos.y) + in.inBlock.y;
+    f.cell = vec2i(floor(vec2f(along + 0.5, up + 0.5) * f32(foamCells)));
+    // The streaks: a noise six cells wide and twenty-four tall, falling
+    // three blocks a second, with a finer one over it. (The clock wraps
+    // every 1024 seconds; 1024 * 3 * 32 cells is a whole number.)
+    let fallen = i32(floor(u.animation.z * 3.0 * f32(foamCells)));
+    let streak = vec2i(f.cell.x * 4, f.cell.y + fallen);
+    let noise = 0.65 * groundNoise(streak, 24, 31) + 0.35 * groundNoise(vec2i(streak.x * 2, streak.y), 11, 32);
+    f.amount = 0.85 * smoothstep(0.5, 0.82, mix(noise, 0.55, smoothstep(0.02, 0.08, footprint)));
+    return f;
+}
+
+// Running water's surface: streaks of foam drawn out the way it runs (its
+// flow code 1-8), a few cells across and many long, carried downstream a
+// block and a half a second. On the surface's own grid of foam cells
+// (foamCell), so it dithers as the rest of the foam does; along and across
+// are whole numbers of cells whichever of the eight ways it runs. How much
+// foam at a pixel, 0..1. (The clock wraps every 1024 seconds; 1024 * 1.5 *
+// 32 cells is a whole number.)
+fn flowFoam(in: VertexOutput, footprint: f32) -> f32 {
+    let d = flowDirection(in.colors);
+    let cell = foamCell(in);
+    let along = cell.x * d.x + cell.y * d.y;
+    let across = cell.y * d.x - cell.x * d.y;
+    let carried = i32(floor(u.animation.z * 1.5 * f32(foamCells)));
+    // Six cells across, thirty-six long, with a finer one over it.
+    let streak = vec2i(across * 6, along - carried);
+    let noise = 0.65 * groundNoise(streak, 36, 33) + 0.35 * groundNoise(vec2i(streak.x * 2, streak.y), 15, 34);
+    return 0.75 * smoothstep(0.54, 0.8, mix(noise, 0.5, smoothstep(0.02, 0.08, footprint)));
+}
+
 // A world xz wrapped to the waves' tile.
 fn waveCoordinate(p: vec2f) -> vec2f {
     return p - waveTile * floor(p / waveTile);
@@ -352,9 +464,9 @@ fn waveCoordinate(p: vec2f) -> vec2f {
 
 // defaultShader.vert's calculateVertexPos: a corner of the face within its
 // block, moved by the animation (u.animation.x, GL's u_timeGrass) as GL
-// moves it. `facePosition` is the block's position, as floats. `waterLevel`
-// is the flowing water's level, 0 for a source.
-fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, waterLevel: f32) -> vec3f {
+// moves it. `facePosition` is the block's position, as floats. `surface`
+// is water's surface, its corners' heights (waterCornerDrop), 0 for a source.
+fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, surface: u32) -> vec3f {
     let t = u.animation.x;
     if (orientation >= 22 && orientation < 36) {
         // Water: its surface corners down 0.08, then the long waves
@@ -362,9 +474,10 @@ fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, waterLevel
         var shape = cornerShape(orientation, corner);
         let mask = waterMask[u32(orientation - 22) * 4u + corner];
         let waves = waterWaves(waveCoordinate(facePosition.xz + shape.xz), waveVertexCount, 0.0);
-        // Flowing water: its top corners lower by its level.
-        let top = select(0.0, 1.0, shape.y > 0.5);
-        shape.y += mask * (waves.height - 0.08 - top * waterLevel * waterLevelDrop);
+        // Flowing water: its top corners lower, each as the water around it.
+        // (The corners are about the block's middle: its top is at 0.5.)
+        let top = select(0.0, 1.0, shape.y > 0.0);
+        shape.y += mask * (waves.height - 0.08 - top * waterCornerDrop(surface, shape));
         return shape;
     }
     if (orientation >= 10 && orientation < 16) {
@@ -404,15 +517,25 @@ fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, waterLevel
 // One corner of a face, placed by the camera: what every vertex entry point
 // starts from.
 fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutput {
-    // Water faces carry the flowing water's level in bits 13-15, above every
-    // orientation: the corner table has over 5000 rows (the models), so the
-    // orientation needs the low 13 bits. The attribute is a signed short, so
-    // a level of 4 or more arrives negative: read its 16 bits unsigned.
+    // The orientation: the corner table has over 5000 rows (the models), so
+    // the low 13 bits. The attribute is a signed short: read its 16 bits
+    // unsigned.
+    let water = (u32(face.position.y >> 24) & 1u) != 0u;
     let orientationBits = u32(face.orientationAndTexture.x) & 0xFFFFu;
-    let waterLevel = f32(orientationBits >> 13u);
-    let orientation = i32(orientationBits & 0x1FFFu);
+    var orientation = i32(orientationBits & 0x1FFFu);
     let textureIndex = u32(face.orientationAndTexture.y) & 0x07FFu;
-    let colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
+    var colors = (u32(face.orientationAndTexture.y) & 0xF800u) >> 11u;
+    // Water's orientations are all under 128, and its surface's corners
+    // (waterCornerDrop) ride above them: shape bits 7-15 hold the low 9
+    // bits, the flag byte's bits 2-7 the next 6 and the colour's top bit
+    // (its flow code needs 4) the last.
+    var surface = 0u;
+    if (water) {
+        orientation = i32(orientationBits & 0x7Fu);
+        surface = (orientationBits >> 7u) | (((u32(face.position.y) >> 26u) & 0x3Fu) << 9u)
+            | ((colors >> 4u) << 15u);
+        colors = colors & 0xFu;
+    }
 
     // The light and flag bytes ride in y's high bits.
     // y is 0-255. Above it, bit 15 is a flag (tuftAboveFlag); on water's
@@ -420,14 +543,14 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     // bits 16-23.
     let blockPosition = vec3i(face.position.x, face.position.y & 0xFF, face.position.z);
     let light = u32(face.position.y >> 16) & 0xFFu;
-    let water = (u32(face.position.y >> 24) & 1u) != 0u;
     let aboveY = (u32(face.position.y) >> 8u) & 0xFFu;
-    let flags = (u32(face.position.y >> 24) & 0xFFu)
+    // (On water only the flag byte's two low bits are flags.)
+    let flags = (u32(face.position.y >> 24) & select(0xFFu, 0x3u, water))
         | select(select(0u, tuftAboveFlag, (aboveY & 0x80u) != 0u), aboveY << 16u, water);
 
     let corner = stripToCorner[vertexIndex];
     let facePosition = vec3f(blockPosition);
-    var shape = animatedCorner(orientation, corner, facePosition, waterLevel);
+    var shape = animatedCorner(orientation, corner, facePosition, surface);
 
     // A tall-grass sprite where blades grow instead: toward the camera it
     // loses its texels one by one (spriteDissolved) while its tuft's blades
@@ -459,10 +582,12 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     // models) the plane of three of its animated corners, as GL takes it.
     var normal: vec3f;
     if (orientation >= 0 && orientation < 6) { normal = faceNormals[orientation]; }
+    // Water's surface tilts as its corners slope (still water's lies flat).
+    else if (orientation == 24) { normal = waterSurfaceNormal(surface); }
     else if (orientation >= 22 && orientation < 28) { normal = faceNormals[orientation - 22]; }
     else {
-        let p2 = animatedCorner(orientation, (corner + 1u) % 4u, facePosition, waterLevel);
-        let p3 = animatedCorner(orientation, (corner + 2u) % 4u, facePosition, waterLevel);
+        let p2 = animatedCorner(orientation, (corner + 1u) % 4u, facePosition, surface);
+        let p3 = animatedCorner(orientation, (corner + 2u) % 4u, facePosition, surface);
         normal = normalize(cross(p3 - p2, shape - p2));
     }
 
@@ -1169,7 +1294,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
         m.roughness = waterRoughness;
         m.metallic = 0.0;
     }
-    albedo = paintAlbedo(albedo, in.colors);
+    // (On water those bits say which way it runs, not a paint.)
+    if (!water) { albedo = paintAlbedo(albedo, in.colors); }
     if (bladeGroundShaded(in)) { albedo *= bladeGroundShade; }
 
     // The snow weather's cover: the tops of blocks under the open sky (the
@@ -1215,6 +1341,11 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
         let waves = waterWaves(vec2f(in.blockPos.xz & vec2i(1023)) + in.inBlock.xz, waveCount, t.footprint);
         waveHeight = waves.height;
         var slope = waves.slope;
+        // Running water: its own waves, travelling the way it runs.
+        if (in.colors >= 1u && in.colors <= 8u) {
+            slope = slope * 0.5 + waterFlowWaves(vec2f(in.blockPos.xz & vec2i(1023)) + in.inBlock.xz,
+                in.colors, t.footprint);
+        }
         // The rain's rings, as on the puddles but smooth (the puddles' are
         // made of texels): under the open sky, and near enough to show (a
         // ring is about a quarter of a block from crest to crest).
@@ -1595,9 +1726,14 @@ fn foamPatches(in: VertexOutput, footprint: f32) -> f32 {
     return mix(patches, 0.5, smoothstep(0.02, 0.08, footprint));
 }
 
-// How much of the pixel is foam, 0..1, where there is `amount` of it.
-fn foamShown(in: VertexOutput, amount: f32, footprint: f32) -> f32 {
-    let cell = in.blockPos.xz * foamCells + vec2i(floor((in.inBlock.xz + 0.5) * f32(foamCells)));
+// The cell of the foam's grid a pixel of water's surface is in.
+fn foamCell(in: VertexOutput) -> vec2i {
+    return in.blockPos.xz * foamCells + vec2i(floor((in.inBlock.xz + 0.5) * f32(foamCells)));
+}
+
+// How much of the pixel is foam, 0..1, where there is `amount` of it and
+// the pixel is in `cell` of the foam's grid.
+fn foamShown(cell: vec2i, amount: f32, footprint: f32) -> f32 {
     let dithered = select(0.0, 1.0, amount > bayer4(cell));
     let far = smoothstep(0.7 / f32(foamCells), 1.6 / f32(foamCells), footprint);
     return mix(dithered, clamp(amount, 0.0, 1.0), far);
@@ -1634,7 +1770,9 @@ fn shoreFoam(in: VertexOutput, waveHeight: f32, footprint: f32) -> f32 {
     if ((shore & 128u) != 0u) { away = min(away, length(vec2f(0.5 - p.x, 0.5 + p.y))); }
 
     let swell = clamp(0.5 + waveHeight / (0.12 * waveStrength()), 0.0, 1.0);
-    let reach = mix(foamReach.x, foamReach.y, swell);
+    var reach = mix(foamReach.x, foamReach.y, swell);
+    // Water one block wide, land on both sides: less, or it is all foam.
+    if ((shore & 3u) == 3u || (shore & 12u) == 12u) { reach *= 0.45; }
     if (away >= reach) { return 0.0; }
 
     let inward = 1.0 - away / reach; // 1 at the land, 0 where the band ends
@@ -1826,9 +1964,20 @@ fn waterColour(in: VertexOutput, s: Shaded, t: Texels, frontFacing: bool) -> vec
     // The foam, from above: matt and white, so it takes the ambient light
     // and the sun as the ground does, and hides the mirror and the glints.
     if (!inside) {
-        let amount = max(shoreFoam(in, s.waveHeight, t.footprint), s.ripple);
+        var amount = max(shoreFoam(in, s.waveHeight, t.footprint), s.ripple);
+        var cell = foamCell(in);
+        // Running water: streaks the way it runs (and no shore, Chunk::bake).
+        if (in.colors >= 1u && in.colors <= 8u && in.normal.y > 0.5) {
+            amount = max(amount, flowFoam(in, t.footprint));
+        }
+        // A fall's streaks, on water's sides.
+        if (in.colors == waterFalling && abs(in.normal.y) < 0.5) {
+            let fall = fallFoam(in, t.footprint);
+            amount = fall.amount;
+            cell = fall.cell;
+        }
         if (amount > 0.0) {
-            let foam = foamShown(in, amount, t.footprint);
+            let foam = foamShown(cell, amount, t.footprint);
             let lit = vec3f(0.86, 0.9, 0.94) * (s.ambient * 1.15 + sun * 0.6 * max(L.y, 0.0));
             color = mix(color, lit, foam);
             opacity = max(opacity, foam);

@@ -1101,6 +1101,23 @@ void enetServerFunction(std::string path)
 
 
 
+	// OURCRAFT_WORLDGEN_MAP="x0,z0,x1,z1,file": a picture of this world's
+	// generation over those chunks (writeWorldGenMap), then quit. Nothing is
+	// saved or loaded: it shows what the generator makes now.
+	if (const char *env = std::getenv("OURCRAFT_WORLDGEN_MAP"))
+	{
+		int x0 = 0, z0 = 0, x1 = 0, z1 = 0;
+		char file[512] = {};
+		if (std::sscanf(env, "%d,%d,%d,%d,%511[^\n]", &x0, &z0, &x1, &z1, file) == 5)
+		{
+			const bool written = writeWorldGenMap(wg, structuresManager, biomesManager, x0, z0, x1, z1, file);
+			std::cout << "OURCRAFT_WORLDGEN_MAP: " << (written ? "wrote " : "could not write ") << file << "\n";
+		}
+		else { std::cout << "OURCRAFT_WORLDGEN_MAP: expected x0,z0,x1,z1,file\n"; }
+		std::cout.flush();
+		std::_Exit(0);
+	}
+
 	auto start = std::chrono::high_resolution_clock::now();
 
 	float sendEntityTimer = 0.5;

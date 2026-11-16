@@ -197,8 +197,13 @@ struct WorldGenerator
 
 	int getRegionHeightAndBlendingsForChunk(int chunkX, int chunkZ, float values[16*16],
 		float borderingFactor[16 * 16], float &vegetationMaster, float tightBorders[16 * 16],
-		float &xValuue, float &zValue, float &biomeTypeRandomValue
+		float &xValuue, float &zValue, float &biomeTypeRandomValue,
+		float *plainsAround = nullptr
 		);
+	// (`plainsAround`, if asked for: for each column, how much of the 128
+	// blocks square around it is plains, 0..1. 1 well inside the plains,
+	// about a half on a straight coast. The rivers' levels come from it:
+	// worldGenerator.cpp's riverMaxRise.)
 
 	//this isn't game accurate!
 	void generateChunkPreview(gl2d::Texture &t, glm::ivec2 size, glm::ivec2 pos);

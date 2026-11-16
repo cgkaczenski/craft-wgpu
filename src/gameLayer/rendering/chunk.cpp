@@ -1808,23 +1808,128 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 				z * 2 + this->data.z * CHUNK_SIZE};
 		}
 
-		// Flowing water's surface: -1 under more water (full height), 0 a
-		// source's or falling water's surface, 1-7 lower by its level.
-		auto waterSurfaceStep = [](Block *w, Block *above)
+		const bool blockIsWater = b.getType() == BlockTypes::water;
+		// Water with nothing over it: its surface.
+		const bool waterSurface = blockIsWater && !(sides[TOP] && sides[TOP]->getType() == BlockTypes::water);
+
+		// Water's surface, corner by corner (as Minecraft draws it): each
+		// corner the average of the water's heights in the four blocks
+		// around it, so flowing water slopes evenly from block to block
+		// instead of standing in flat steps. Heights within the block: 0.92 a
+		// source's (or falling water's), 0.11 less a level; sources weigh
+		// ten times as much (a pool stays flat where a stream leaves it). An
+		// opening of air counts as nothing there, so the water dips over the
+		// edge it pours from; water over a block beside it raises the corner
+		// to the block's top, to meet the fall. Solid blocks don't count.
+		// 4 bits a corner (corner cx + 2 cz): 0-14 half levels below a
+		// source's surface, 15 the block's top. Only on surfaces (water with
+		// nothing over it), at full detail.
+		int waterCorners = 0;
+		float waterCornerDrop[4] = {};
+		if (waterSurface && lod == 0)
 		{
-			if (above && above->getType() == BlockTypes::water) { return -1; }
-			if (w->getWaterFalling()) { return 0; }
-			return (int)w->getWaterLevel();
+			const int sideX[2] = {LEFT, RIGHT};
+			const int upX[2] = {UP_LEFT, UP_RIGHT};
+			const int sideZ[2] = {BACK, FRONT};
+			const int upZ[2] = {UP_BACK, UP_FRONT};
+			const int diagonal[2][2] = {{BACKLEFT, BACKRIGHT}, {FRONTLEFT, FRONTRIGHT}};
+			const int upDiagonal[2][2] = {{UP_BACKLEFT, UP_BACKRIGHT}, {UP_FRONTLEFT, UP_FRONTRIGHT}};
+			const float sourceHeight = 0.92f;
+			const float levelDrop = 0.11f; // chunkFaces.wgsl's waterLevelDrop
+
+			for (int cz = 0; cz < 2; cz++)
+				for (int cx = 0; cx < 2; cx++)
+				{
+					float total = 0;
+					float weight = 0;
+					bool full = false;
+					auto add = [&](Block *n, Block *above)
+					{
+						if (!n) { return; }
+						if (n->getType() == BlockTypes::water)
+						{
+							if (above && above->getType() == BlockTypes::water) { full = true; return; }
+							const bool still = n->getWaterFalling() || n->getWaterLevel() == 0;
+							const float h = sourceHeight - (n->getWaterFalling() ? 0 : n->getWaterLevel()) * levelDrop;
+							const float w = still ? 10.f : 1.f;
+							total += h * w;
+							weight += w;
+						}
+						else if (n->air())
+						{
+							weight += 1;
+						}
+					};
+
+					Block *alongX = sides[sideX[cx]];
+					Block *alongZ = sides[sideZ[cz]];
+					add(&b, nullptr);
+					add(alongX, sides[upX[cx]]);
+					add(alongZ, sides[upZ[cz]]);
+					// The diagonal only past water: not round a solid block's corner.
+					if ((alongX && alongX->getType() == BlockTypes::water) || (alongZ && alongZ->getType() == BlockTypes::water))
+					{
+						add(sides[diagonal[cz][cx]], sides[upDiagonal[cz][cx]]);
+					}
+
+					const int k = cx + cz * 2;
+					int code = 15;
+					float drop = -0.08f;
+					if (!full)
+					{
+						const float halfLevels = (sourceHeight - total / weight) / (levelDrop * 0.5f);
+						code = std::clamp((int)std::lround(halfLevels), 0, 14);
+						drop = code * levelDrop * 0.5f;
+					}
+					waterCorners |= code << (k * 4);
+					waterCornerDrop[k] = drop;
+				}
+		}
+
+		// Which way the water runs over this block's surface, for the
+		// shader's waves (chunkFaces.wgsl's waterFlowWaves): down its slope.
+		// In the bits a painted block keeps its colour in (water has none):
+		// 0 still, 1-8 one of eight directions (the signs of x and z), and
+		// on water's sides 9, falling.
+		int waterFlow = 0;
+		if (waterCorners)
+		{
+			// Downhill: toward the corners that drop more.
+			const float runX = ((waterCornerDrop[1] + waterCornerDrop[3]) - (waterCornerDrop[0] + waterCornerDrop[2])) * 0.5f;
+			const float runZ = ((waterCornerDrop[2] + waterCornerDrop[3]) - (waterCornerDrop[0] + waterCornerDrop[1])) * 0.5f;
+			const float length = std::sqrt(runX * runX + runZ * runZ);
+			if (length > 0.03f)
+			{
+				// Within 22.5 degrees of an axis, along it.
+				const float lean = 0.383f * length;
+				const int sx = runX > lean ? 1 : runX < -lean ? -1 : 0;
+				const int sz = runZ > lean ? 1 : runZ < -lean ? -1 : 0;
+				// 1-8: (sx + 1) + (sz + 1) * 3, less the middle.
+				const int cell = (sx + 1) + (sz + 1) * 3;
+				waterFlow = cell < 4 ? cell + 1 : cell;
+			}
+		}
+
+		// Water falls down a side open to the air when it is falling itself
+		// (water over it), or the opening has nothing under it to stand on:
+		// it pours over that edge. The leading edge of water spreading
+		// over the ground is not falling.
+		auto waterFallsBeside = [&](int i)
+		{
+			if (lod != 0) { return false; }
+			if (!waterSurface || b.getWaterFalling()) { return true; }
+			int downSide = i == FRONT ? DOWN_FRONT : i == BACK ? DOWN_BACK : i == LEFT ? DOWN_LEFT : DOWN_RIGHT;
+			Block *under = sides[downSide];
+			return under && !under->isColidable();
 		};
 
-		const bool blockIsWater = b.getType() == BlockTypes::water;
-		const int ownWaterStep = (blockIsWater && lod == 0) ? waterSurfaceStep(&b, sides[TOP]) : 0;
-		// The shader lowers the water faces' top corners by this (shape bits
-		// 13-15). They sit above every corner table row: the models' rows run
-		// past 5000, and with the level in bits 8-10 the shader read model faces
-		// at row 256 and beyond as water with a level, and drew them as the wrong
-		// row (row & 0xFF), such as a 2x2-block LOD face against a wall.
-		const int waterLevelBits = ownWaterStep > 0 ? (ownWaterStep << 13) : 0;
+		// The corners ride above the water's orientation (22-35 at full
+		// detail, under 128 at any), which the shader reads from the low 7
+		// bits of a water face's shape: shape bits 7-15 hold the corners'
+		// low 9 bits, the flag byte's bits 2-7 (unused on water) the next 6,
+		// and the colour's top bit (the flow code needs only 4) the last.
+		auto waterShapeBits = [&]() { return (waterCorners & 0x1FF) << 7; };
+		auto waterColorBits = [&](int flow) { return flow | (((waterCorners >> 15) & 1) << 4); };
 
 		for (int index = 0; index < 6; index++)
 		{
@@ -1833,19 +1938,9 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 
 			bool isWater = blockIsWater;
 
-			// A side face towards lower water: the step between the two
-			// surfaces, which would otherwise be a hole.
-			bool waterStepFace = false;
-			if (isWater && lod == 0 && (i == FRONT || i == BACK || i == LEFT || i == RIGHT)
-				&& sides[i] && sides[i]->getType() == BlockTypes::water)
-			{
-				int upSide = i == FRONT ? UP_FRONT : i == BACK ? UP_BACK : i == LEFT ? UP_LEFT : UP_RIGHT;
-				waterStepFace = ownWaterStep < waterSurfaceStep(sides[i], sides[upSide]);
-			}
-
 			if ((sides[i] != nullptr
 				&& (!(sides[i])->isOpaque() && sides[i]->getType() != b.getType())
-				) || waterStepFace ||
+				) ||
 				(
 				isWater && i == 2 //display water if there is a block on top
 				)
@@ -1856,11 +1951,12 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 				)
 			{
 
-				//no faces in between water
-				if (isWater && sides[i] && sides[i]->getType() == BlockTypes::water && !waterStepFace) { continue; }
+				//no faces in between water (neighbouring surfaces share their
+				//corners, waterCorners, so they meet)
+				if (isWater && sides[i] && sides[i]->getType() == BlockTypes::water) { continue; }
 
 				//no faces in between same types
-				if (sides[i] && sides[i]->getType() == b.getType() && !waterStepFace) { continue; }
+				if (sides[i] && sides[i]->getType() == b.getType()) { continue; }
 
 
 				unsigned char sunLight = 0;
@@ -1949,10 +2045,11 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 						}
 
 						if (lod == 1) { currentIndex = i + lod1Parts; }
-						else { currentIndex |= waterLevelBits; }
+						else { currentIndex |= waterShapeBits(); }
 
 						pushFaceShapeTextureAndColor(*currentVector, currentIndex,
-							getGpuIdIndexForBlock(b.getType(), i), color);
+							getGpuIdIndexForBlock(b.getType(), i),
+							waterColorBits(waterFallsBeside(i) ? 9 : 0));
 
 					}
 					else
@@ -1960,10 +2057,10 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 						int currentIndex = i + 22;
 
 						if (lod == 1) { currentIndex = i + lod1Parts; }
-						else { currentIndex |= waterLevelBits; }
+						else { currentIndex |= waterShapeBits(); }
 
 						pushFaceShapeTextureAndColor(*currentVector, currentIndex,
-							getGpuIdIndexForBlock(b.getType(), i), color);
+							getGpuIdIndexForBlock(b.getType(), i), waterColorBits(i == TOP ? waterFlow : 0));
 					}
 
 					//if (!sides[2] || sides[2]->type != BlockTypes::water)
@@ -1980,15 +2077,18 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 						getGpuIdIndexForBlock(b.getType(), i), color);
 				}
 
-				int aoShape = determineAOShape(i, sides);
+				// (Water's flag bits 2-7 carry its corners instead.)
+				int aoShape = isWater ? 0 : determineAOShape(i, sides);
 
 				bool isInWater = (sides[i] != nullptr) && sides[i]->getType() == BlockTypes::water;
 
 				pushFlagsLightAndPosition(*currentVector, position, isWater, isInWater,
 					sunLight, torchLight, aoShape);
+				if (isWater) { (*currentVector)[currentVector->size() - 2] |= ((waterCorners >> 9) & 0x3F) << 26; }
 
-				// Water's surface where it meets the land: which of the eight
-				// blocks around it, at its own height, are solid, in bits
+				// Water's surface where it meets the land or a fall lands on
+				// it: which of the eight blocks around it, at its own height,
+				// are solid or have water over them, in bits
 				// 8-15 of the position's y (0-255, so free; on other faces
 				// bit 15 is the tuft's). chunkFaces.wgsl's shoreFoam draws
 				// the foam along those sides and round those corners.
@@ -1996,11 +2096,21 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 				{
 					static const int around[8] = {FRONT, BACK, LEFT, RIGHT,
 						FRONTLEFT, FRONTRIGHT, BACKLEFT, BACKRIGHT};
+					// The blocks over those: water there falls onto this
+					// surface, and foams where it lands as at a shore.
+					static const int over[8] = {UP_FRONT, UP_BACK, UP_LEFT, UP_RIGHT,
+						UP_FRONTLEFT, UP_FRONTRIGHT, UP_BACKLEFT, UP_BACKRIGHT};
+					// Running water (waterFlow 1-8) has no shore: its foam
+					// streaks along the way it runs instead (chunkFaces.wgsl's
+					// flowFoam). A fall landing on it still foams.
+					const bool running = waterFlow != 0;
 					int shore = 0;
 					for (int n = 0; n < 8; n++)
 					{
 						Block *side = sides[around[n]];
-						if (side && side->getType() != BlockTypes::water && side->isColidable()) { shore |= 1 << n; }
+						if (!running && side && side->getType() != BlockTypes::water && side->isColidable()) { shore |= 1 << n; }
+						Block *above = sides[over[n]];
+						if (above && above->getType() == BlockTypes::water) { shore |= 1 << n; }
 					}
 					(*currentVector)[currentVector->size() - 2] |= shore << 8;
 				}

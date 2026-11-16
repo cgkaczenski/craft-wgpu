@@ -36,7 +36,7 @@ Words used throughout:
 | --- | --- |
 | Chunk | 16×16 columns, 256 blocks tall (`CHUNK_SIZE`, `CHUNK_HEIGHT`). The unit the generator works in |
 | Column | One (x, z) position in a chunk, bottom to top |
-| Water level | y = 65 (`waterLevel` in `worldGenerator.cpp`). All water in the world sits at this height |
+| Water level | y = 65 (`waterLevel` in `worldGenerator.cpp`): the sea's level. Rivers and lakes on plains stand up to 3 blocks above it (section 8) |
 | Region | One Voronoi cell of chunks, about 9.5 chunks (150 blocks) across. Has one height level and one biome |
 | Level | A region's height class, 0 to 5: deep water, water, plains, hills, mountain, big mountain |
 | Shaped noise | A noise value after the game's three steps: move to 0..1, raise to a power, pass through a spline |
@@ -296,6 +296,15 @@ Ways to look, from least work to most:
   run where a feature is.
 - World type **Super Flat** removes terrain when you want to look at
   something else.
+- **A picture of the generation, from above.**
+  `OURCRAFT_WORLDGEN_MAP="x0,z0,x1,z1,file.png"` (with `OURCRAFT_WORLD`)
+  generates the chunks from (x0, z0) to (x1, z1) with the world's settings,
+  writes them a pixel to a block, and quits (`writeWorldGenMap`). Nothing
+  is saved or loaded, so it shows what the generator makes _now_: change
+  the code, run it again, compare. Water is blue, lighter the higher it
+  stands; it also counts and marks the water that falls (white) and the
+  water that nothing holds in (magenta), which is how the rivers' banks
+  were checked. 120 chunks square takes about two minutes.
 
 **2. A small program that writes a noise to an image.** This is what the
 measurements in this file came from. It links the same `shared/` code the
@@ -669,21 +678,23 @@ gravel or clay pocket), not a special unbreakable block.
 
 ## 8. Water: seas, rivers, lakes, swamps and ice
 
-**The one rule:** there is no water simulation at generation time and no
-water above or below y = 65. Water appears wherever the ground is lower
-than that. Every water feature is therefore made the same way: **lower the
-ground below 65 and let the fill pass find it.**
+**The one rule:** there is no water simulation at generation time. Every
+column has a water level, and water appears wherever the ground is lower
+than it. For the sea and nearly everything else the level is y = 65; for a
+river or a lake on plains it is the river's own, up to 3 blocks higher (see
+Rivers). Every water feature is therefore made the same way: **lower the
+ground below the level and let the fill pass find it.**
 
 **The fill** is the second loop of `calculateBlockPass1`. For each column
-it walks down from y = 67 to y = 20:
+it walks down from two blocks above the column's level to y = 20:
 
-- Air at or below 65 becomes water.
+- Air at or below the level becomes water.
 - The first stone under the water is replaced by a bed block (section 11).
 - Anything else stops the walk.
 
-Because the walk starts at 67 and stops at the first solid block, a column
-whose ground is above 66 is never filled, and an air pocket under a roof
-stays dry even below sea level.
+Because the walk starts just above the level and stops at the first solid
+block, a column whose ground is above it is never filled, and an air pocket
+under a roof stays dry even below the level.
 
 ### Seas
 
@@ -702,21 +713,88 @@ above 0.1.
 except a narrow dip to 0. On **plains** (level 2):
 
 ```cpp
-start = mix(waterLevel - 5, start, rivers);   // rivers = 0 in the channel
-max   = mix(waterLevel - 2, max,   rivers);
+start = mix(riverLevel - 5, start, rivers);   // rivers = 0 in the channel
+max   = mix(riverLevel - 2, max,   rivers);
 ```
 
-In the channel the height range becomes 60 to 63 before the peaks are
-added, the ground ends up a few blocks below 65, and the fill makes it a
-shallow river. The banks slope because the spline's dip has sloped sides.
+In the channel the height range becomes 5 to 2 below the river's level
+before the peaks are added, the ground ends up a few blocks below it, and
+the fill makes it a shallow river. The banks slope because the spline's dip
+has sloped sides.
 
-**What they are like:** closed loops and blobs, with pools where the noise
-is flat. _Measured:_ on plains, 8.5% of columns are in a channel and 13.6%
-are lowered at least a little; the channel averages 13 blocks wide, 21
-counting the banks. They all sit at
-y = 65. They do not flow downhill, start at a spring, or end at the sea,
-except by accident. The author's `todo.txt` has both of these on the list:
-rivers that enter the ocean, and rivers at different heights.
+**The river's level.** Rivers used to sit at y = 65 everywhere, in channels
+cut up to 8 blocks down into plains that stand at 66 to 73. Now a river
+stands near the height of its plain:
+
+```cpp
+inland = smoothstep(0.55, 1, plainsAround)      // how much of the 128 blocks square around is plains
+rise   = 3 * inland                             // riverMaxRise
+riverLevel = 65 + round(rise)
+```
+
+`plainsAround` is new, from `getRegionHeightAndBlendingsForChunk`: for each
+column, the share of the square 64 blocks each way that lies in plains
+chunks. It is 1 well inland and about a half on a straight coast, so a
+river stands at 68 inland and comes down to 65 over its last 60 blocks
+before the sea or the hills. The level is a whole number, so where it
+changes the river **falls one block**: three small falls on the way to the
+sea, a dozen blocks apart. (It is a sum of rectangles, not of columns: a
+chunk's level is one number, so each of the 81 chunks around adds its
+overlap with the square.)
+
+**Holding the water in.** Water above the sea's level needs ground beside
+it wherever the land is lower, or it stands in a wall (and runs out as
+soon as the water simulation wakes). Each column still knows only its own
+noise, so the banks come from the river value too:
+
+| River value | What the column is |
+| --- | --- |
+| under 0.35 (`riverWaterZone`) | The river: its water level is the river's. A column that stands out of the water is a bank, at least as high as the water |
+| 0.35 to 0.8 | The bank: ground kept above the river's level |
+| 0.8 to 1 | The bank sloping down to what the land was |
+
+Two things had to be added before no water was left unheld:
+
+- **Beside a fall** the lower reach's banks must be as high as the upper
+  water. A column cannot ask its neighbour's level, but the level changes
+  by at most 0.6 from one block to the next, so the banks stand for
+  `rise + 1.1` rounded down: a block above their own water wherever the
+  level is changing, level with it where it is steady.
+- **Where the river value changes fast** (a small lake's edge) the bank's
+  band can be thinner than a block. A last pass over the finished chunk
+  builds up any open ground that still stands beside higher water.
+
+Next to a raised river the 3D density (section 7) carves nothing, so a
+bank has no holes. Checked on a map of 3.7 million columns
+(`OURCRAFT_WORLDGEN_MAP`, section 3): about 100,000 of them water above
+the sea's level, 3,000 at a fall, none unheld. The pass cannot see past
+its own chunk, so a gap exactly on a chunk's edge is possible; the map
+found none.
+
+**Reaching the sea.** Two things used to stop a river short of it. The
+sea's chunks (levels 0 and 1) cut no channel, so a beach or an island in
+one closed the mouth; and the small bumps of the peaks noise lift the bed
+out of the water here and there, which inland makes the dry stretches the
+river has but at the coast made a bar. Now the river's line keeps its
+channel through the sea's chunks (only ever lowering the ground: the sea's
+own bed is far below), and within the blend toward the sea the peaks are
+held down in the channel.
+
+**What they are like:** still closed loops and blobs, with pools where the
+noise is flat, and dry stretches inland. _Measured (before the levels
+changed):_ on plains, 8.5% of columns are in a channel and 13.6% are
+lowered at least a little; the channel averages 13 blocks wide, 21 counting
+the banks. They do not flow downhill from a spring: the level comes from
+how far inland the river is, not from where it started, so a river that
+loops through the middle of a plain rises and comes back down. Both lines
+of the author's `todo.txt` this answers (rivers that enter the ocean,
+rivers at different heights) are done in this sense; rivers that form a
+network are still section 18's.
+
+**In an old world** only new chunks are generated this way. Where a new
+chunk meets an old one a raised river meets one at y = 65 along the
+chunk's edge, as a straight fall, and the old chunk's banks may be lower
+than the new water.
 
 Rivers exist only on plains. At the edge of a hills region the same noise
 line continues as something else:
@@ -739,7 +817,8 @@ it goes under the hill.
 `lakesNoise` is 0 in most places and rises in blobs (_measured:_ above 0.1
 in 1.2% of columns). On plains, the river value is multiplied by
 `1 − lake`, so a lake behaves as a river channel that is a blob instead of
-a line: the same depth, the same fill. Lakes fade toward region borders.
+a line: the same depth, the same fill, and the same level as a river there
+(a lake inland stands at 68). Lakes fade toward region borders.
 The code that lowered the ground for lakes directly is commented out; the
 multiplication is what does it now.
 
@@ -754,7 +833,7 @@ columns are swampy at all, 0.3% strongly.
 
 ### Ice
 
-In an icy biome the top layer of water (y = 65) becomes ice where
+In an icy biome the top layer of water (the column's level) becomes ice where
 `iceNoise` is above 0.5, and along the edges of rivers and lakes. Water
 below the top layer stays water.
 
@@ -813,8 +892,8 @@ There are two kinds, both made one column at a time inside
 
 **River bridge.** While the fill pass walks down a column on plains, if the
 column is a road and the block is air with air under it, it places wood
-instead of leaving a gap: a plank at y = 66 near the banks and a slab at
-y = 67 over the middle of the river. Wherever a road line crosses a river
+instead of leaving a gap: a plank one block above the water's level near
+the banks and a slab two above over the middle of the river. Wherever a road line crosses a river
 or lake, this makes a low wooden deck the width of the road, slightly
 arched.
 

@@ -70,6 +70,15 @@ void generateChunk(Chunk &c, WorldGenerator &wg, StructuresManager &structuresMa
 // for a chunk loaded from disk.
 void computeChunkBiome(ChunkData &c, WorldGenerator &wg, BiomesManager &biomesManager);
 
+// A picture of what the generator makes, from above, a pixel to a block:
+// the chunks from (x0, z0) to (x1, z1), written to `file` as a PNG. Water is
+// blue, lighter the higher its surface (sea level darkest), ice white, sand
+// pale, the rest green to grey by height. For looking at rivers, lakes and
+// coasts without walking them (OURCRAFT_WORLDGEN_MAP="x0,z0,x1,z1,file",
+// which the server runs once its settings are loaded, and then quits).
+bool writeWorldGenMap(WorldGenerator &wg, StructuresManager &structuresManager, BiomesManager &biomesManager,
+	int x0, int z0, int x1, int z1, const char *file);
+
 void generateChunk(ChunkData &c, WorldGenerator &wg, StructuresManager &structuresManager, BiomesManager &biomesManager
 	,std::vector<StructureToGenerate> &generateStructures);
 

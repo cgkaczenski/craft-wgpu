@@ -11,8 +11,24 @@
 #include <array>
 #include <functional>
 #include <gameplay/entity.h>
+#include <memory>
+#include <vector>
+#include <stb_image_write/stb_image_write.h>
 
 const int waterLevel = 65;
+
+// Rivers and lakes on plains stand higher inland than the sea: this many
+// blocks, where there is nothing but plains for 64 blocks around, coming down
+// a block at a time (a small fall each) toward the plains' edges, where they
+// meet the sea and the hills' tunnels at the sea's level.
+const int riverMaxRise = 3;
+// Where a river's own level holds, by the river noise (0 in the channel's
+// middle, 1 where its banks end): its water reaches no further out than
+// this, and from here to riverBankEnd the ground is kept above it, so a
+// river higher than the land beside it has a bank and does not stand in a
+// wall. Past that the bank slopes down to the land.
+const float riverWaterZone = 0.35f;
+const float riverBankEnd = 0.8f;
 
 alignas(32) static float iceNoise[CHUNK_SIZE * CHUNK_SIZE] = {};
 float getIceNoise(int x, int z)
@@ -26,10 +42,15 @@ void calculateBlockPass1(int height, Block *startPos, Biome &biome, bool road, f
 	float randomNumber, bool sandShore, bool stonePatch, float riverValue,
 	float currentInterpolatedValue, float randomBlockVariation, 
 	float swampValue, int biomeHeight, float stoneSpikes, float canionValue, 
-	int valueWithoutCanionDropDown, int x, int z, float lakeValue, BlockType &outSurfaceBlock)
+	int valueWithoutCanionDropDown, int x, int z, float lakeValue, BlockType &outSurfaceBlock,
+	int columnWaterLevel)
 {
 
-	
+	// The water's level in this column: the sea's, or a river's own, higher
+	// (getHeightForBiome's rivers). Everything below that says waterLevel
+	// means this one.
+	const int waterLevel = columnWaterLevel;
+
 	BlockType surfaceBlock = biome.surfaceBlock;
 	BlockType secondBlock = biome.secondaryBlock;
 	float canionBridgeHeight = 89;
@@ -483,9 +504,10 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 	float xCellValue = 0;
 	float zCellValue = 0;
 	float biomeType = 0;
+	float plainsAround[16 * 16] = {};
 	int currentBiomeHeight = wg.getRegionHeightAndBlendingsForChunk(c.x, c.z,
 		interpolateValues, borderingFactor, vegetationMaster, tightBorders, xCellValue, zCellValue,
-		biomeType);
+		biomeType, plainsAround);
 
 
 #pragma region determine biome
@@ -1182,6 +1204,11 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 
 	}dataForStructureGen;
 
+	// Each column's water level (a raised river's, or the sea's) and surface
+	// block, for the banks' last pass after the columns.
+	int raisedWaterLevel[CHUNK_SIZE * CHUNK_SIZE] = {};
+	BlockType columnSurfaceBlock[CHUNK_SIZE * CHUNK_SIZE] = {};
+
 	for (int x = 0; x < CHUNK_SIZE; x++)
 		for (int z = 0; z < CHUNK_SIZE; z++)
 		{
@@ -1207,6 +1234,7 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 
 			float lakeNoiseVal = getLakesNoiseVal(x, z); //this one is 1 for lake 0 for no lake
 			float localBorderingFactor = borderingFactor[z + x * CHUNK_SIZE];
+			float localPlainsAround = plainsAround[z + x * CHUNK_SIZE];
 
 			float localSwampVal = getSwampNoise(x, z) * getSwampMaskNoise(x, z);
 			float localStoneSpikes = getStoneSpikesNoise(x, z) * getStoneSpikesMaskNoise(x, z);
@@ -1224,8 +1252,17 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 				&roadValue, float &outLakeNoiseVal, float &underGroundRivers,
 				float &riverChanceValue, int &heightDiff, int &startLevel, int maxMountainLevel
 				, float &outCanionValue, int &valueWithoudCanionDropDown
+				, int &outWaterLevel, bool &outRaisedRiver
 				)
 			{
+
+				outWaterLevel = waterLevel;
+				outRaisedRiver = false;
+				// A plains river's level and its banks' (see riverMaxRise), and
+				// the river noise there (1: no river).
+				int riverLevel = waterLevel;
+				int riverBankLevel = waterLevel;
+				float riverHere = 1;
 
 				outCanionValue = 0;
 				float newPeaks = peaks;
@@ -1327,9 +1364,48 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 					rivers *= (1 - lakeNoiseVal);
 
 					riverChanceValue = 1 - rivers;
+					riverHere = rivers;
 
-					newStartLevel = glm::mix(waterLevel - 5, newStartLevel, rivers);
-					newMaxMountainLevel = glm::mix(waterLevel - 2, newMaxMountainLevel, rivers);
+					// How high the river stands here: all of the rise where
+					// the land for 64 blocks around is plains, and less the
+					// more of it is something else, down to nothing some 6
+					// blocks from a straight coast (and at any rate where the
+					// plains blend into another level, sea or hills). So a
+					// river comes down to the sea over its last 60 blocks.
+					// Whole blocks: where the number steps down, the river
+					// falls a block.
+					// The banks stand for the highest water a column next to
+					// this one can have: the number changes by up to 0.6 from
+					// one block to the next, so beside a fall, and wherever
+					// the level is changing, they are a block above their own
+					// water; where it is steady (a region's middle) level
+					// with it.
+					const float inland = glm::smoothstep(0.55f, 1.f, localPlainsAround)
+						* (1.f - glm::smoothstep(0.02f, 0.3f, std::abs(currentInterpolatedValue - 2.f)));
+					const float rise = riverMaxRise * inland;
+					riverLevel = waterLevel + int(rise + 0.5f);
+					riverBankLevel = waterLevel + (rise <= 0.f ? 0 : std::min(int(rise + 1.1f), riverMaxRise));
+
+					// Toward the sea the channel stays open: the small bumps
+					// that elsewhere lift its bed out of the water, into a
+					// dry stretch, are held down.
+					const float coast = 1.f - glm::smoothstep(1.6f, 2.f, currentInterpolatedValue);
+					newPeaks = glm::mix(glm::mix(newPeaks, std::min(newPeaks, 0.2f), coast), newPeaks, rivers);
+
+					newStartLevel = glm::mix(riverLevel - 5, newStartLevel, rivers);
+					newMaxMountainLevel = glm::mix(riverLevel - 2, newMaxMountainLevel, rivers);
+				}
+				else if (currentHeightLevel <= 1)
+				{
+					// The sea's regions: the river's line keeps its channel
+					// through whatever stands above the water there (a
+					// beach, an island), so a river that reaches the coast
+					// reaches the sea. Only ever lower: the sea's own bed is
+					// far below a river's.
+					float rivers = getRivers(x, z);
+					newPeaks = glm::mix(std::min(newPeaks, 0.2f), newPeaks, rivers);
+					newStartLevel = std::min(newStartLevel, (int)glm::mix(waterLevel - 5, newStartLevel, rivers));
+					newMaxMountainLevel = std::min(newMaxMountainLevel, (int)glm::mix(waterLevel - 2, newMaxMountainLevel, rivers));
 				}
 				else if (currentHeightLevel >= 3)
 				{
@@ -1467,6 +1543,27 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 
 				int height = int(newStartLevel + continentalness * heightDiff);
 
+				// A river above the sea's level: its water where the river's
+				// zone is, and ground that holds it. In the zone, a column
+				// that stands out of the water is a bank, at least as high as
+				// the water (one more beside a fall); from the zone's edge
+				// out, the ground is kept above the water, then let down to
+				// what it was.
+				if (riverBankLevel > waterLevel && riverHere < 1.f)
+				{
+					outRaisedRiver = true;
+					if (riverHere < riverWaterZone)
+					{
+						outWaterLevel = riverLevel;
+						if (height > riverLevel) { height = std::max(height, riverBankLevel + 1); }
+					}
+					else
+					{
+						const float down = glm::smoothstep(riverBankEnd, 1.f, riverHere);
+						height = std::max(height, (int)std::ceil(glm::mix(float(riverBankLevel + 1), float(height), down)));
+					}
+				}
+
 				if (valueWithoudCanionDropDown == 0)
 				{
 					valueWithoudCanionDropDown = height;
@@ -1490,6 +1587,8 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 			float canionValue = 0;
 			int heightDiff = 0;
 			int valueWithoutCanionDropDown = 0;
+			int columnWaterLevel = waterLevel;
+			bool raisedRiver = false;
 
 			int startLevel = interpolator(startValues, currentInterpolatedValue);
 			int maxMountainLevel = interpolator(maxlevels, currentInterpolatedValue);
@@ -1501,7 +1600,13 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 
 			int height = getHeightForBiome(currentBiomeHeight, placeRoad, roadValue, newLakeNoiseVal,
 				underGroundRivers, riverChanceValue, heightDiff, 
-				newStartLevel, maxMountainLevel, canionValue, valueWithoutCanionDropDown);
+				newStartLevel, maxMountainLevel, canionValue, valueWithoutCanionDropDown,
+				columnWaterLevel, raisedRiver);
+
+			// Beside a raised river the 3D density carves nothing: a hole in
+			// a bank would let the river out.
+			const float carving = raisedRiver ? localWierdness * glm::smoothstep(0.85f, 1.f, 1.f - riverChanceValue)
+				: localWierdness;
 
 			//if (currentInterpolatedValue != (float)((int)(currentInterpolatedValue))
 			//	&& currentInterpolatedValue < 5.f
@@ -1593,7 +1698,7 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 					heightNormalized = glm::clamp(heightNormalized, 0.f, 1.f);
 					float heightNormalizedRemapped = linearRemap(heightNormalized, 0, 1, 0.2, 7);
 
-					heightNormalized = glm::mix(0.1f, heightNormalizedRemapped, localWierdness);
+					heightNormalized = glm::mix(0.1f, heightNormalizedRemapped, carving);
 					//heightNormalized = 0.1f;
 
 
@@ -1682,7 +1787,7 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 				riverValueForPlacingRocks, currentInterpolatedValue, 
 				getAlternativeNoiseVal(x, z), localSwampVal, currentBiomeHeight, 
 				localStoneSpikes, canionValue, valueWithoutCanionDropDown, x, z, 
-				lakeNoiseVal, surfaceBlock);
+				lakeNoiseVal, surfaceBlock, columnWaterLevel);
 
 			//all caves
 			for (int y = 2; y < firstH; y++)
@@ -2184,7 +2289,41 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 				dataForStructureGen.rivers = riverChanceValue;
 			}
 
+			raisedWaterLevel[z + x * CHUNK_SIZE] = columnWaterLevel;
+			columnSurfaceBlock[z + x * CHUNK_SIZE] = surfaceBlock;
+
 		}
+
+		// The last of the raised rivers' banks. The banks above come from
+		// each column's own noise, and where the river noise changes fast (a
+		// small lake's edge) the band of raised ground can be thinner than a
+		// block, leaving water beside lower, open ground. Such a column of
+		// ground is built up to the water's level here, with its own surface
+		// block. (Within the chunk only: across a chunk's edge the rare gap
+		// stays.)
+		for (int x = 0; x < CHUNK_SIZE; x++)
+			for (int z = 0; z < CHUNK_SIZE; z++)
+			{
+				const int level = raisedWaterLevel[z + x * CHUNK_SIZE];
+				if (level <= waterLevel || c.unsafeGet(x, level, z).getType() != BlockTypes::water) { continue; }
+				const int around[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+				for (auto &n : around)
+				{
+					const int nx = x + n[0], nz = z + n[1];
+					if (nx < 0 || nz < 0 || nx >= CHUNK_SIZE || nz >= CHUNK_SIZE) { continue; }
+					// What the open column beside it comes down to: lower
+					// water is a fall, as meant; ground is the gap.
+					int ground = level;
+					while (ground > waterLevel && c.unsafeGet(nx, ground, nz).getType() == BlockTypes::air) { ground--; }
+					const auto under = c.unsafeGet(nx, ground, nz).getType();
+					if (ground == level || under == BlockTypes::water || under == BlockTypes::ice) { continue; }
+					const BlockType surface = columnSurfaceBlock[nz + nx * CHUNK_SIZE];
+					for (int y = level; y > ground; y--)
+					{
+						c.unsafeGet(nx, y, nz).setType(surface ? surface : (BlockType)BlockTypes::dirt);
+					}
+				}
+			}
 
 
 	#pragma region big structures
@@ -2437,4 +2576,105 @@ void WorldGenerator::generateChunkPreview(gl2d::Texture &t, glm::ivec2 size, glm
 	//t.create1PxSquare();
 
 
+}
+
+
+bool writeWorldGenMap(WorldGenerator &wg, StructuresManager &structuresManager, BiomesManager &biomesManager,
+	int x0, int z0, int x1, int z1, const char *file)
+{
+	if (x1 < x0 || z1 < z0) { return false; }
+	const int width = (x1 - x0 + 1) * CHUNK_SIZE;
+	const int height = (z1 - z0 + 1) * CHUNK_SIZE;
+	std::vector<unsigned char> pixels((size_t)width * height * 3);
+	// Each column's top block: how high, and what.
+	std::vector<short> topHeight((size_t)width * height);
+	std::vector<BlockType> topType((size_t)width * height);
+	auto chunk = std::make_unique<ChunkData>();
+	std::vector<StructureToGenerate> structures;
+
+	for (int cz = z0; cz <= z1; cz++)
+	{
+		for (int cx = x0; cx <= x1; cx++)
+		{
+			chunk = std::make_unique<ChunkData>(); // (too large to make on the stack)
+			chunk->x = cx;
+			chunk->z = cz;
+			structures.clear();
+			generateChunk(*chunk, wg, structuresManager, biomesManager, structures);
+
+			for (int x = 0; x < CHUNK_SIZE; x++)
+			{
+				for (int z = 0; z < CHUNK_SIZE; z++)
+				{
+					int y = CHUNK_HEIGHT - 1;
+					while (y > 0 && chunk->unsafeGet(x, y, z).getType() == BlockTypes::air) { y--; }
+					const size_t at = (size_t)((cz - z0) * CHUNK_SIZE + z) * width + (cx - x0) * CHUNK_SIZE + x;
+					topHeight[at] = (short)y;
+					topType[at] = chunk->unsafeGet(x, y, z).getType();
+				}
+			}
+		}
+	}
+
+	// Water that is not held in: a column of water beside a lower column that
+	// is not water (a leak: it would stand in a wall, and run out once the
+	// water is updated), or beside lower water (a fall, as meant).
+	int raised = 0, falls = 0, leaks = 0;
+	for (int pz = 0; pz < height; pz++)
+	{
+		for (int px = 0; px < width; px++)
+		{
+			const size_t at = (size_t)pz * width + px;
+			const int y = topHeight[at];
+			const auto type = topType[at];
+			bool fall = false, leak = false;
+
+			glm::vec3 colour;
+			if (type == BlockTypes::water)
+			{
+				if (y > waterLevel) { raised++; }
+				const int around[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+				for (auto &n : around)
+				{
+					const int nx = px + n[0], nz = pz + n[1];
+					if (nx < 0 || nz < 0 || nx >= width || nz >= height) { continue; }
+					const size_t other = (size_t)nz * width + nx;
+					if (topHeight[other] >= y) { continue; }
+					if (topType[other] == BlockTypes::water || topType[other] == BlockTypes::ice) { fall = true; }
+					else { leak = true; }
+				}
+				// Sea level darkest; each block higher a step lighter.
+				const float up = glm::clamp((y - waterLevel) / 4.f, 0.f, 1.f);
+				colour = glm::mix(glm::vec3(20, 50, 170), glm::vec3(150, 240, 255), up);
+				if (y < waterLevel) { colour = glm::vec3(120, 0, 160); } // should not happen
+			}
+			else if (type == BlockTypes::ice) { colour = glm::vec3(245, 245, 255); }
+			else
+			{
+				const float up = glm::clamp((y - 60) / 60.f, 0.f, 1.f);
+				if (type == BlockTypes::sand || type == BlockTypes::sand_stone) { colour = glm::vec3(225, 210, 150); }
+				else if (type == BlockTypes::stone || type == BlockTypes::gravel || type == BlockTypes::cobblestone)
+					{ colour = glm::mix(glm::vec3(110, 110, 110), glm::vec3(230, 230, 230), up); }
+				else if (type == BlockTypes::wooden_plank || type == BlockTypes::wooden_slab) { colour = glm::vec3(200, 60, 40); }
+				else if (y <= 75) { colour = glm::mix(glm::vec3(30, 95, 30), glm::vec3(150, 215, 90), glm::clamp((y - 63) / 12.f, 0.f, 1.f)); }
+				else { colour = glm::mix(glm::vec3(170, 190, 90), glm::vec3(120, 80, 50), glm::clamp((y - 75) / 60.f, 0.f, 1.f)); }
+			}
+			if (fall) { falls++; colour = glm::vec3(255, 255, 255); }
+			if (leak)
+			{
+				leaks++;
+				colour = glm::vec3(255, 0, 255);
+				if (leaks <= 12)
+				{
+					std::cout << "  leak at block " << x0 * CHUNK_SIZE + px << ", " << y << ", " << z0 * CHUNK_SIZE + pz << "\n";
+				}
+			}
+
+			unsigned char *p = &pixels[at * 3];
+			p[0] = (unsigned char)colour.r; p[1] = (unsigned char)colour.g; p[2] = (unsigned char)colour.b;
+		}
+	}
+	std::cout << "world gen map: " << raised << " columns of water above the sea's level, " << falls
+		<< " at a fall (white), " << leaks << " not held in (magenta)\n";
+	return stbi_write_png(file, width, height, 3, pixels.data(), width * 3) != 0;
 }

@@ -39,11 +39,14 @@ bool canFlowInto(Block *b)
 }
 
 // The water at pos would go down rather than sideways: below it is air, or
-// water that isn't a source.
+// water. A source below counts too: water that lands on a pool joins it, and
+// does not run on across its surface as it would over ground. (A river that
+// steps down a block would otherwise lay a sheet of flowing water seven
+// blocks long over its lower reach.)
 bool canFlowDown(ServerChunkStorer &chunkCache, glm::ivec3 pos)
 {
 	Block *below = chunkCache.getBlockSafe(pos + glm::ivec3(0, -1, 0));
-	return below && (below->air() || (isWater(below) && !below->isWaterSource()));
+	return below && (below->air() || isWater(below));
 }
 
 Block makeWater(int level, bool falling)

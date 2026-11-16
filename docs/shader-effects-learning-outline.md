@@ -1252,6 +1252,46 @@ how strong, how long it lasts, how big it starts), 32 of them in the
 uniforms. The shader turns each into a low ridge spreading from its middle,
 which tilts the normal and carries foam, through the same dither.
 
+**Running water and falls.** Rivers inland stand above the sea and come
+down to it a block at a time (the terrain outline's section 8), and the
+player can make water flow, so some water has a direction.
+
+Flowing water's surface slopes: each level is 0.11 of a block lower than
+the one before. The mesher gives each corner of a surface the average
+height of the water in the four blocks around that corner, as Minecraft
+does. Sources weigh ten times as much, an opening of air counts as
+nothing, and water with more water over it raises the corner to the
+block's top. Neighbouring surfaces share their corners, so the slope runs
+on without steps. The four heights (4 bits each) ride in bits of the face
+that water doesn't otherwise use, and the vertex shader lowers each corner
+by its own (`waterCornerDrop`). Water's corners lie about the block's
+middle, -0.5 to 0.5, so its top is at 0.5, not 1.
+
+The water runs down that slope. One of eight directions goes into the bits
+a painted block keeps its colour in, and a ninth value marks a side where
+the water falls: one with water over it, or an edge with nothing under it.
+
+- **Running water** gets three more waves, short and steep, that travel
+  the way it runs (`waterFlowWaves`), over the still water's own at half
+  strength. They are whole numbers of turns across the same 1024-block
+  tile, whichever of the eight ways they are turned.
+- **Running water's surface** has no shore band. Instead, streaks of foam
+  are drawn out the way it runs and carried downstream a block and a half
+  a second (`flowFoam`). They sit on the surface's own foam grid, so they
+  dither like the rest of the foam.
+- **A fall's face** gets streaks of foam running down it (`fallFoam`): a
+  noise stretched four to one along the drop, sliding three blocks a
+  second, through the same dither, on a grid that lies on the face.
+- **Where a fall lands** is a shore as far as the foam is concerned. The
+  eight shore bits are also set where the block beside the surface has
+  water over it.
+
+One rule of the water simulation had to change for the falls to stay
+falls. Water that lands on a pool used to run on across its surface, as it
+would over ground, so each one-block fall grew a sheet of flowing water
+seven blocks long over the reach below. Now water with any water under it
+counts as going down (`fluids.cpp`'s `canFlowDown`) and stops there.
+
 **What floats: buoyancy.** Archimedes: a body in water is pushed up by the
 weight of the water it moves aside. For a box, per unit of its own mass,
 that is
@@ -1319,8 +1359,11 @@ water; an apple thrown in, which floats where it used to sink; the player
 rising from the bed to rest at the surface, diving and coming back,
 swimming to a bank and climbing out onto it; standing on the bed in water
 one block deep; and goblins spawned on the sea, which float and come
-ashore. Not checked: pigs, cats and zombies on their own (the same code),
-flowing water, and a fall from height into deep water.
+ashore; a river's falls, their streaks and the foam where they land, and
+which blocks the mesher marks as running. Not checked: pigs, cats and
+zombies on their own (the same code), the running waves in motion, a long
+slope of player-made flowing water, and a fall from height into deep
+water.
 
 **Read:** GPU Gems'
 [Effective Water Simulation from Physical Models](https://developer.nvidia.com/gpugems/gpugems/part-i-natural-effects/chapter-1-effective-water-simulation-physical-models),
