@@ -101,6 +101,10 @@ void clientMessageLoop(EventCounter &validatedEvent, RevisionNumber &invalidateR
 	std::unordered_map<std::uint64_t, PlayerConnectionData> &playersConnectionData
 	);
 
+// Set by a /tp with no height: the local player goes on top of their column
+// once its chunk has arrived (gamePlayLogic clears it).
+bool &clientTeleportFindsGround();
+
 void attackEntity(std::uint64_t eid, unsigned char inventorySlot, glm::vec3 direction,
 	HitResult hitResult);
 

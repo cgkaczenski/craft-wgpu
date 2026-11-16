@@ -231,16 +231,19 @@ void scrollCallback(GLFWwindow *window, double xoffset, double yoffset);
 // release on the next), move@x,y (the mouse moves there, no button: turns the
 // camera in game; the game re-centres the cursor at half the framebuffer
 // size each frame, so the offset from there is the turn), key@E, key@Space,
-// key@LShift, key@Escape or key@F9 (pressed, then released the same way), hold@W,N (held
+// key@LShift, key@Escape, key@Enter or key@F9 (pressed, then released the same way), hold@W,N (held
 // for N frames: walking; hold@Mouse,N holds the left button and
 // hold@RMouse,N the right; hold@LCtrl,N
-// with a key@F2 inside it is Ctrl+F2) and quit (closes the window, so
+// with a key@F2 inside it is Ctrl+F2), type@text (typed, as into the chat;
+// a key reaches the game a frame after its step but typed text on its own
+// frame, so leave a few frames: 300:key@Enter;304:type@/time set noon;
+// 308:key@Enter) and quit (closes the window, so
 // shutdown runs). Feeds the callbacks below; the mouse position is overridden from
 // the first click on, without moving the real cursor.
 static glm::ivec2 scriptedMouse = {0, 0};
 static bool scriptedMouseActive = false; // set by the first click@ or move@ (coordinates may be negative)
 
-// A key named in a script: one letter or digit, Space, LShift, LCtrl or Escape. -1 if unknown.
+// A key named in a script: one letter or digit, Space, LShift, LCtrl, Escape or Enter. -1 if unknown.
 static int scriptedKey(const char *name)
 {
 	const std::string n = name;
@@ -250,6 +253,7 @@ static int scriptedKey(const char *name)
 	if (n == "LCtrl") { return GLFW_KEY_LEFT_CONTROL; }
 	if (n == "LShift") { return GLFW_KEY_LEFT_SHIFT; }
 	if (n == "Escape") { return GLFW_KEY_ESCAPE; }
+	if (n == "Enter") { return GLFW_KEY_ENTER; }
 	return -1;
 }
 
@@ -283,7 +287,16 @@ static void playScriptedInput(GLFWwindow *window)
 		int frame = 0, x = 0, y = 0, function = 0;
 		int quitFrame = 0;
 		char quitWord[5] = {};
-		if (std::sscanf(step.c_str(), "%d:%4s", &quitFrame, quitWord) == 2 && std::string(quitWord) == "quit"
+		const size_t typeAt = step.find(":type@");
+		if (typeAt != std::string::npos)
+		{
+			if (std::atoll(step.c_str()) == frameIndex)
+			{
+				for (char c : step.substr(typeAt + 6)) { characterCallback(window, (unsigned char)c); }
+				std::cout << "input: frame " << frameIndex << " type " << step.substr(typeAt + 6) << "\n";
+			}
+		}
+		else if (std::sscanf(step.c_str(), "%d:%4s", &quitFrame, quitWord) == 2 && std::string(quitWord) == "quit"
 			&& quitFrame == frameIndex)
 		{
 			glfwSetWindowShouldClose(window, GLFW_TRUE);

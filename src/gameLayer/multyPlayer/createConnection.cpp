@@ -12,6 +12,12 @@
 #include <gameplay/blocks/blocksWithData.h>
 #include <lightSystem.h>
 
+bool &clientTeleportFindsGround()
+{
+	static bool findGround = false;
+	return findGround;
+}
+
 static ConnectionData clientData;
 
 void playSoundAndShakeForPlayerTakingDamage(float lifeLost);
@@ -862,6 +868,19 @@ void recieveDataClient(ENetEvent &event,
 				}
 			}
 
+			break;
+		}
+
+		case headerTeleportPlayer:
+		{
+			if (sizeof(Packet_TeleportPlayer) != size) { break; }
+			Packet_TeleportPlayer *packetData = (Packet_TeleportPlayer *)data;
+			if (p.cid != entityManager.localPlayer.entityId) { break; }
+
+			entityManager.localPlayer.entity.position = packetData->pos;
+			entityManager.localPlayer.entity.lastPosition = packetData->pos;
+			entityManager.localPlayer.entity.forces = {};
+			clientTeleportFindsGround() = packetData->findGround;
 			break;
 		}
 

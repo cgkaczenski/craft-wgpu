@@ -68,3 +68,6 @@ std::uint64_t getCurrentEntityId(int entityType);
 // Milestone G1b: tell every player of a lightning strike (the server's storms,
 // the /lightning command). Server thread only.
 void broadcastLightningStrike(glm::ivec2 position);
+
+// /tp: tells one player where they are now.
+void sendTeleportPlayer(ENetPeer *peer, std::uint64_t cid, glm::dvec3 position, bool findGround);

@@ -1400,6 +1400,67 @@ std::string executeServerCommand(std::uint64_t cid, const char *command)
 			return "Lightning " + std::to_string((int)distance) + " blocks away";
 		}
 
+		// /tp x z puts the player on top of that column (the ground, or the
+		// water's surface); /tp x y z puts their feet at y. Commas between
+		// the numbers are fine, so a position copied from the map works.
+		// /tp alone says where the player is.
+		if (consumeStringToken("tp"))
+		{
+			if (!client) { return "No client was given for the command"; }
+
+			auto here = [&]()
+			{
+				const glm::dvec3 at = client->playerData.entity.position;
+				char text[96] = {};
+				const glm::ivec3 block = glm::floor(at + glm::dvec3(0.5));
+				std::snprintf(text, sizeof(text), "You are at %d, %d, %d", block.x, block.y, block.z);
+				return std::string(text);
+			};
+			if (isEof()) { return here(); }
+
+			// The tokenizer splits "-12" into the symbol '-' and the number 12.
+			auto consumeCoordinate = [&](double &out)
+			{
+				const int start = position;
+				if (!isEof() && tokens[position].type == Symbol && tokens[position].value == ",") { position++; }
+				bool negative = false;
+				if (!isEof() && tokens[position].type == Symbol && tokens[position].value == "-")
+				{
+					negative = true;
+					position++;
+				}
+				if (!consumeNumber(&out)) { position = start; return false; }
+				if (negative) { out = -out; }
+				return true;
+			};
+
+			double numbers[3] = {};
+			int count = 0;
+			while (count < 3 && consumeCoordinate(numbers[count])) { count++; }
+			if (!isEof() || count < 2) { return "Usage: /tp <x> <z> or /tp <x> <y> <z>"; }
+
+			// Block n spans n - 0.5 to n + 0.5, so a block's numbers are its
+			// centre, and feet in block y stand at y - 0.5.
+			const bool findGround = count == 2;
+			const double x = std::round(numbers[0]);
+			const double z = std::round(numbers[count - 1]);
+			const double y = findGround ? CHUNK_HEIGHT : std::clamp(std::round(numbers[1]), 0.0, (double)CHUNK_HEIGHT) - 0.5;
+			client->playerData.entity.position = {x, y, z};
+			client->playerData.entity.lastPosition = {x, y, z};
+			sendTeleportPlayer(client->peer, cid, {x, y, z}, findGround);
+
+			char text[96] = {};
+			if (findGround)
+			{
+				std::snprintf(text, sizeof(text), "Teleported to %d, %d", (int)x, (int)z);
+			}
+			else
+			{
+				std::snprintf(text, sizeof(text), "Teleported to %d, %d, %d", (int)x, (int)(y + 0.5), (int)z);
+			}
+			return std::string(text);
+		}
+
 		// /weather, /weather <clear, cloudy, rain, storm or snow> [seconds to change].
 		if (consumeStringToken("weather"))
 		{

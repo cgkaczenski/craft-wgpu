@@ -86,6 +86,17 @@ void broadcastLightningStrike(glm::ivec2 position)
 	broadCast(packet, &packetData, sizeof(packetData), nullptr, true, channelOtherVisualThings);
 }
 
+void sendTeleportPlayer(ENetPeer *peer, std::uint64_t cid, glm::dvec3 position, bool findGround)
+{
+	Packet packet;
+	packet.cid = cid;
+	packet.header = headerTeleportPlayer;
+	Packet_TeleportPlayer packetData;
+	packetData.pos = position;
+	packetData.findGround = findGround;
+	sendPacket(peer, packet, (const char *)&packetData, sizeof(packetData), true, channelChunksAndBlocks);
+}
+
 // In a storm, a strike every few seconds, somewhere around a random player:
 // rarely close, mostly a few hundred blocks off.
 static void serverUpdateLightning(float deltaTime, std::minstd_rand &rng)

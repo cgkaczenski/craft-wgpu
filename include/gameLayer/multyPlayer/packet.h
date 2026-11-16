@@ -97,6 +97,7 @@ enum : std::uint32_t
 	headerTrainingDummyGotAttacked, //from server to players!
 	headerUpdateWorldClock, //from server to players: the time of day and the weather (G1)
 	headerLightningStrike, //from server to players: a lightning strike's place (G1b)
+	headerTeleportPlayer, //from server to one player: /tp moves them
 
 };
 
@@ -155,6 +156,14 @@ struct Packet_ClientDamageLocally
 struct Packet_RespawnPlayer
 {
 	glm::dvec3 pos = {};
+};
+
+struct Packet_TeleportPlayer
+{
+	glm::dvec3 pos = {};
+	// No height was given: the client puts the player on top of the column
+	// (the ground, or the water's surface) once that chunk has arrived.
+	unsigned char findGround = 0;
 };
 
 struct Packet_ClientUsedItem

@@ -1031,7 +1031,29 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 		};
 
 		
-		if (gameData.killed)
+		// Without its chunk the player has nothing to stand on and would fall
+		// through the world: after a /tp, or while joining. They wait in place.
+		const glm::ivec3 playerBlock = from3DPointToBlock(player.entity.position);
+		ChunkData *playerChunk = chunkGetter(fromBlockPosToChunkPos(playerBlock.x, playerBlock.z));
+
+		// A /tp with no height: on top of the column, ground or water.
+		if (playerChunk && clientTeleportFindsGround())
+		{
+			const glm::ivec3 inChunk = fromBlockPosToBlockPosInChunk(playerBlock);
+			// Feet on the top face of the highest block (block y's top is y + 0.5).
+			double top = CHUNK_HEIGHT;
+			for (int y = CHUNK_HEIGHT - 1; y >= 0; y--)
+			{
+				auto &b = playerChunk->unsafeGet(inChunk.x, y, inChunk.z);
+				if (b.isColidable() || b.getType() == BlockTypes::water) { top = y + 0.5; break; }
+			}
+			player.entity.position.y = top;
+			player.entity.lastPosition = player.entity.position;
+			player.entity.forces = {};
+			clientTeleportFindsGround() = false;
+		}
+
+		if (gameData.killed || (!playerChunk && gameData.colidable))
 		{
 			gameData.entityManager.localPlayer.entity.forces = {};
 			gameData.entityManager.localPlayer.entity.updatePositions();
@@ -3091,7 +3113,7 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 	{
 
 		gameData.mapEngine.update(programData, deltaTime, {posInt.x, posInt.z},
-			gameData.chunkSystem);
+			gameData.chunkSystem, player.entity.position, gameData.c.viewDirection);
 
 	}
 
