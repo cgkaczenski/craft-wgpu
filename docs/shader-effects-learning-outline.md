@@ -1044,7 +1044,7 @@ Shorter, because each is a variation on a block above.
 | Toon shading | Flat bands of light, inked outlines | Quantised lighting (3), edge detection (7) | No | Roystan's [Outline Shader](https://roystan.net/articles/outline-shader/) |
 | Noise | Structured randomness: clouds, terrain, wobble, variation | Hashes blended across a grid (value, gradient, simplex, cellular) | Throughout: rain, drops, dither, the SSR jitter | The Book of Shaders [10](https://thebookofshaders.com/10/) and [11](https://thebookofshaders.com/11/), Jarzynski and Olano's [Hash Functions for GPU Rendering](https://jcgt.org/published/0009/03/02/) |
 | Signed distance fields | Shapes as "how far to the surface" functions: crisp text, soft shadows, whole ray-marched scenes | A distance function, marched or thresholded | No | Inigo Quilez's [distance functions](https://iquilezles.org/articles/distfunctions/) |
-| Fur and grass shells | Volume from stacked see-through layers | The same mesh drawn many times, pushed out along its normal | No | Acerola's [Shell-Texturing](https://github.com/GarrettGunnell/Shell-Texturing) |
+| Fur and grass shells | Volume from stacked see-through layers | The same mesh drawn many times, pushed out along its normal | For looking at: `vs_shell` in `chunkFaces.wgsl`, on the grass tops (the render roadmap's S0), off unless turned on | Acerola's [Shell-Texturing](https://github.com/GarrettGunnell/Shell-Texturing) |
 
 **The order of a post chain** is itself a topic, because most effects only
 make sense on one side of another: depth of field and motion blur before

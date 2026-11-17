@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <rendering/model.h>
 #include <gameplay/weather.h>
+#include <rendering/shellSettings.h>
 
 struct BlocksLoader;
 struct ChunkSystem;
@@ -127,6 +128,18 @@ struct Renderer
 	// screenshots.
 	bool wetGround = true;
 	float groundWetness = 0;
+	// For looking at the lighting (roadmap L0; lighting.wgsl's Lobes, the
+	// client control panel's "Light Stuff"). One part of the light shown
+	// alone, without fog or reflections: 0 all of it, 1 the lights' diffuse,
+	// 2 their specular, 3 the ambient (OURCRAFT_LIGHT_VIEW=0..3); the
+	// exposure holds still meanwhile. The diffuse model: 0 the game's, 1
+	// Lambert (OURCRAFT_DIFFUSE). And a roughness and a metallic for every
+	// block face and entity in place of their own (OURCRAFT_ROUGHNESS,
+	// OURCRAFT_METALLIC, 0..1).
+	int lightView = 0;
+	int diffuseModel = 0;
+	bool overrideRoughness = false, overrideMetallic = false;
+	float roughnessOverride = 0.9f, metallicOverride = 0.f;
 	// Grass blades (chunkFaces.wgsl's vs_blade, on with the Grass setting):
 	// how far from the camera they reach, in blocks, and how dense, 0..1.
 	float grassRadius = 22.f;
@@ -134,6 +147,10 @@ struct Renderer
 	// The clumps of short grass on the grass blocks between the tufts: how
 	// full they are, 0 (none) to 1.
 	float grassClumps = 1.f;
+	// Shells (roadmap S0): the shell-texturing demo on the grass tops, for
+	// looking at. The panel's "Shells", or OURCRAFT_SHELLS=<layers>,
+	// OURCRAFT_SHELL_VIEW=1 and OURCRAFT_SHELL_SET="length=0.2,density=32".
+	ShellSettings shells;
 
 	// How much the sun shines into the lens, 0..1: on screen, toward the
 	// middle, not behind blocks or clouds. The lens flare measures it each

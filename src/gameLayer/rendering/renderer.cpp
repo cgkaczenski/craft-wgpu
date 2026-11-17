@@ -21,6 +21,9 @@
 #include <chunkSystem.h>
 #include <gamePlayLogic.h>
 #include <iostream>
+#include <cstring>
+#include <string>
+#include <utility>
 #include <platformTools.h>
 #include <gameplay/entityManagerClient.h>
 #include <rendering/frustumCulling.h>
@@ -1958,8 +1961,10 @@ namespace
 // out to see.
 namespace
 {
+	// `bareTops`: keep the bare tops with the clumps off too (the shells
+	// stand on every cell).
 	void grassCellsInView(const std::vector<glm::ivec4> &all, Camera &c, float radius, float density, float clumps,
-		std::vector<glm::ivec4> &cells, wgpuWorld::GrassGroup groups[wgpuWorld::grassGroups])
+		bool bareTops, std::vector<glm::ivec4> &cells, wgpuWorld::GrassGroup groups[wgpuWorld::grassGroups])
 	{
 		// Where each band starts; the last is where the blades give way to
 		// the sprites (chunkFaces.wgsl's bladeSpriteShare).
@@ -1979,7 +1984,7 @@ namespace
 			const int tuft = (cell.w >> 19) & 1;
 			const glm::vec3 relative = glm::vec3(glm::dvec3(cell.x, cell.y - 0.2, cell.z) - c.position);
 			const float away = glm::length(glm::vec2(relative.x, relative.z));
-			if (away > radius + 0.75f || (!tuft && clumps <= 0.f)) { continue; }
+			if (away > radius + 0.75f || (!tuft && clumps <= 0.f && !bareTops)) { continue; }
 			if (away > 2.5f)
 			{
 				const glm::vec4 clip = viewProjection * glm::vec4(relative, 1.f);
@@ -2509,6 +2514,33 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		lighting.wetness = wetGround ? groundWetness : 0.f;
 		lighting.rainOnGround = underWater ? 0.f : rainHere;
 	}
+	// For looking at the lighting (roadmap L0): the panel's choices, or the
+	// environment's for scripted screenshots.
+	{
+		struct Environment { int view = -1, diffuse = -1; float roughness = -1, metallic = -1; };
+		static const Environment environment = []()
+		{
+			Environment e;
+			if (const char *env = std::getenv("OURCRAFT_LIGHT_VIEW")) { e.view = std::atoi(env); }
+			if (const char *env = std::getenv("OURCRAFT_DIFFUSE")) { e.diffuse = std::atoi(env); }
+			if (const char *env = std::getenv("OURCRAFT_ROUGHNESS")) { e.roughness = (float)std::atof(env); }
+			if (const char *env = std::getenv("OURCRAFT_METALLIC")) { e.metallic = (float)std::atof(env); }
+			return e;
+		}();
+		static bool started = false;
+		if (!started)
+		{
+			started = true;
+			if (environment.view >= 0) { lightView = environment.view; }
+			if (environment.diffuse >= 0) { diffuseModel = environment.diffuse; }
+			if (environment.roughness >= 0) { overrideRoughness = true; roughnessOverride = environment.roughness; }
+			if (environment.metallic >= 0) { overrideMetallic = true; metallicOverride = environment.metallic; }
+		}
+		lighting.lightView = lightView;
+		lighting.diffuseModel = diffuseModel;
+		lighting.roughnessOverride = overrideRoughness ? glm::clamp(roughnessOverride, 0.f, 1.f) : -1.f;
+		lighting.metallicOverride = overrideMetallic ? glm::clamp(metallicOverride, 0.f, 1.f) : -1.f;
+	}
 	// Milestone 15: the tone mapper's and FXAA's settings, as GL sets them.
 	lighting.tonemapper = getShadingSettings().tonemapper;
 	// Milestone G2: the screen effects on top (the weather's overcast holds
@@ -2627,6 +2659,51 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 			return env ? std::atoi(env) : -1;
 		}();
 		const bool blades = environmentGrass >= 0 ? environmentGrass != 0 : getShadingSettings().grassBlades != 0;
+		// Shells (roadmap S0): the panel's, or the environment's for
+		// scripted screenshots.
+		static bool shellsStarted = false;
+		if (!shellsStarted)
+		{
+			shellsStarted = true;
+			if (const char *env = std::getenv("OURCRAFT_SHELLS")) { shells.count = std::atoi(env); }
+			if (const char *env = std::getenv("OURCRAFT_SHELL_VIEW")) { shells.view = std::atoi(env); }
+			if (const char *env = std::getenv("OURCRAFT_SHELL_SET"))
+			{
+				// "name=value,name=value", the names ShellSettings's.
+				const std::pair<const char *, float *> names[] = {
+					{"length", &shells.length}, {"distanceAttenuation", &shells.distanceAttenuation},
+					{"density", &shells.density}, {"noiseMin", &shells.noiseMin}, {"noiseMax", &shells.noiseMax},
+					{"thickness", &shells.thickness}, {"curvature", &shells.curvature},
+					{"displacementStrength", &shells.displacementStrength},
+					{"occlusionAttenuation", &shells.occlusionAttenuation}, {"occlusionBias", &shells.occlusionBias},
+					{"reach", &shells.reach}, {"red", &shells.color.r}, {"green", &shells.color.g},
+					{"blue", &shells.color.b} };
+				std::string text = env;
+				size_t at = 0;
+				while (at < text.size())
+				{
+					const size_t end = std::min(text.find(',', at), text.size());
+					const std::string item = text.substr(at, end - at);
+					const size_t equals = item.find('=');
+					bool known = false;
+					if (equals != std::string::npos)
+					{
+						for (const auto &name : names)
+						{
+							if (item.compare(0, equals, name.first) != 0 || std::strlen(name.first) != equals) { continue; }
+							*name.second = (float)std::atof(item.c_str() + equals + 1);
+							known = true;
+						}
+					}
+					if (!known) { std::cout << "OURCRAFT_SHELL_SET: not a setting: " << item << "\n"; }
+					at = end + 1;
+				}
+			}
+			// The blades' density too, 0..1: at 0 the lawn is bare but for
+			// the shells.
+			if (const char *env = std::getenv("OURCRAFT_GRASS_DENSITY")) { grassDensity = (float)std::atof(env); }
+		}
+		lighting.shells = shells;
 		static std::vector<glm::ivec4> grassCells, grassCellsSeen;
 		static uint64_t grassVersion = 0;
 		wgpuWorld::GrassGroup grassGroups[wgpuWorld::grassGroups] = {};
@@ -2635,7 +2712,7 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		{
 			collectGrassCells(chunkSystem, blockPosition, grassRadius, grassCells, grassVersion);
 			grassCellsInView(grassCells, c, grassRadius, glm::clamp(grassDensity, 0.f, 1.f),
-				glm::clamp(grassClumps, 0.f, 1.f), grassCellsSeen, grassGroups);
+				glm::clamp(grassClumps, 0.f, 1.f), shells.count >= 2, grassCellsSeen, grassGroups);
 		}
 		wgpuWorld::setGrassCells(grassCellsSeen, grassGroups);
 		lighting.grassRadius = blades ? grassRadius : 0.f;
@@ -2643,6 +2720,14 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 		lighting.grassClumps = grassClumps;
 		lighting.wind = waveWind;
 	}
+	// OURCRAFT_PREPASS=0|1 sets the depth prepass (the panel's zprepass), for
+	// timing one against the other.
+	static const int environmentPrepass = []()
+	{
+		const char *env = std::getenv("OURCRAFT_PREPASS");
+		return env ? std::atoi(env) : -1;
+	}();
+	if (environmentPrepass >= 0) { zprepass = environmentPrepass != 0; }
 	wgpuWorld::render(c, chunkVectorCopy, blockCubes, shadingSettings.waterColor,
 		getShadingSettings().waterType != 0, zprepass, lighting);
 
@@ -2740,7 +2825,10 @@ void Renderer::renderFromBakedData(ChunkSystem &chunkSystem, Camera &c,
 
 #pragma region automatic exposure
 	// The WebGPU world's reading of a frame's average color (it arrives a
-	// few frames late), as GL's luminosity.
+	// few frames late), as GL's luminosity. Not while one part of the light
+	// is shown alone (lightView): the exposure stays where the whole frame
+	// had it, so the part is as bright on the screen as it is in that frame.
+	if (lightView == 0)
 	{
 		glm::vec3 average;
 		if (wgpuWorld::takeExposureColor(average))

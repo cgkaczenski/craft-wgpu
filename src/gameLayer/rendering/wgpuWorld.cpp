@@ -98,9 +98,15 @@ namespace
 		glm::vec4 horizonFog;        // x where the world has gone into the sky, y where the fog starts (blocks)
 		glm::vec4 skyZenith;         // rgb the sky straight up, as sky.wgsl draws it (the water mirrors it)
 		glm::vec4 skyHorizon;        // rgb what the sky gains toward the horizon
+		glm::vec4 lightDebug;        // x the part of the light shown alone, y the diffuse model, zw roughness and metallic for all (below 0: their own)
+		glm::vec4 shellShape;        // shells (vs_shell): x layers (0 off), y length, z distance attenuation, w reach
+		glm::vec4 shellStrands;      // x density, y thickness, z and w the least and most of a strand's height
+		glm::vec4 shellPush;         // xyz the direction the layers are pushed, w the curvature
+		glm::vec4 shellColour;       // rgb linear, w 1 for the layer view
+		glm::vec4 shellShade;        // x the occlusion's attenuation, y its bias, z the push's strength
 		glm::vec4 ripples[64];       // the rings on the water, two each (Lighting's ripples); animation.w how many
 	};
-	static_assert(sizeof(Uniforms) == 1744, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 1840, "uniform layout must match world.wgsl");
 
 	// The PSX look's lines down the screen: the PlayStation's usual 240.
 	constexpr float psxLines = 240.f;
@@ -391,6 +397,13 @@ namespace
 		RenderPipeline bladeEqualPipeline = nullptr;
 		// The blades into the nearest shadow cascade (vs_bladeShadow).
 		RenderPipeline bladeShadowPipeline = nullptr;
+		// Shells (roadmap S0; vs_shell): layers over the same cells, with
+		// the blades' layout. Lit on its own, or depth first and lit where
+		// it is Equal, as the blades are.
+		RenderPipeline shellPipeline = nullptr;
+		RenderPipeline shellEqualPipeline = nullptr;
+		RenderPipeline shellPrepassPipeline = nullptr;
+		uint32_t shellLayers = 0;       // this frame's, 0: none
 		Buffer grassCellBuffer = nullptr;
 		uint64_t grassCellCapacity = 0; // in cells
 		BindGroup grassBindGroup = nullptr;
@@ -1387,6 +1400,27 @@ namespace
 		blades.targets = ColorTargets::None;
 		w.bladeShadowPipeline = createFacePipeline(module, blades);
 
+		// Shells: the same three, less the shadow. Both sides, as the demo
+		// (a layer is seen from below over a ledge).
+		FacePipelineDesc shells;
+		shells.label = "world shells";
+		shells.layout = w.bladePipelineLayout;
+		shells.vertexEntry = "vs_shell";
+		shells.fragmentEntry = "fs_shell";
+		shells.faceBuffer = false;
+		shells.cull = CullMode::None;
+		w.shellPipeline = createFacePipeline(module, shells);
+		shells.label = "world shells, depth Equal";
+		shells.depthCompare = CompareFunction::Equal;
+		shells.depthWrite = false;
+		w.shellEqualPipeline = createFacePipeline(module, shells);
+		shells.label = "world shells, depth prepass";
+		shells.depthCompare = CompareFunction::Less;
+		shells.depthWrite = true;
+		shells.fragmentEntry = "fs_shellDepth";
+		shells.targets = ColorTargets::GBufferMasked;
+		w.shellPrepassPipeline = createFacePipeline(module, shells);
+
 		// Pass 4: water into the peel depth, no color (glColorMask 0).
 		FacePipelineDesc waterDepth;
 		waterDepth.label = "world water depth";
@@ -1434,7 +1468,8 @@ namespace
 		module.release();
 		return w.pipeline && w.waterDepthPipeline && w.peelPipeline && w.finalPeelPipeline
 			&& w.finalPlainPipeline && w.decalPipeline && w.shadowPipelines[0] && w.shadowPipelines[1]
-			&& w.shadowPipelines[2] && w.bladePipeline && w.bladeEqualPipeline && w.bladePrepassPipeline && w.bladeShadowPipeline && !invalid;
+			&& w.shadowPipelines[2] && w.bladePipeline && w.bladeEqualPipeline && w.bladePrepassPipeline && w.bladeShadowPipeline
+			&& w.shellPipeline && w.shellEqualPipeline && w.shellPrepassPipeline && !invalid;
 	}
 
 	// The dropped block cubes and the gizmo lines (entities.wgsl).
@@ -5130,7 +5165,8 @@ namespace
 			&w.lastColorPipeline, &w.hbaoPipeline, &w.hbaoApplyPipeline,
 			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline,
 			&w.weatherDrawPipeline, &w.snowPipeline,
-			&w.bladePipeline, &w.bladeEqualPipeline, &w.bladePrepassPipeline, &w.bladeShadowPipeline };
+			&w.bladePipeline, &w.bladeEqualPipeline, &w.bladePrepassPipeline, &w.bladeShadowPipeline,
+			&w.shellPipeline, &w.shellEqualPipeline, &w.shellPrepassPipeline };
 		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
 		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
 		for (RenderPipeline &pipeline : w.viewPipelines) { onPipeline(pipeline); }
@@ -5443,8 +5479,30 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	w.grassRadius = w.grassCells ? std::max(lighting.grassRadius, 0.f) : 0.f;
 	uniforms.grass = glm::vec4(w.grassRadius, glm::clamp(lighting.wind, 0.f, 1.f),
 		glm::clamp(lighting.grassDensity, 0.f, 1.f), grassClumpBlades * glm::clamp(lighting.grassClumps, 0.f, 1.f));
+	// Shells: over the blades' cells, so off without them. The layers past
+	// the block's own top are what is drawn (up to 1024: the panel stops at
+	// 64, and the roadmap's S0 timed them by the hundred). Pushed downwind,
+	// as the blades bend (vs_blade's windDirection).
+	{
+		const ShellSettings &shells = lighting.shells;
+		const int layers = w.grassRadius > 0.f ? glm::clamp(shells.count, 0, 1024) : 0;
+		w.shellLayers = layers >= 2 ? (uint32_t)layers : 0;
+		const float reach = glm::clamp(shells.reach, 0.f, w.grassRadius);
+		const glm::vec3 colour = glm::pow(glm::clamp(shells.color, 0.f, 1.f), glm::vec3(2.2f));
+		const glm::vec2 downwind = glm::normalize(glm::vec2(1.f, 0.35f));
+		uniforms.shellShape = glm::vec4((float)w.shellLayers, std::max(shells.length, 0.f),
+			std::max(shells.distanceAttenuation, 0.01f), reach);
+		uniforms.shellStrands = glm::vec4(std::max(std::round(shells.density), 1.f), std::max(shells.thickness, 0.f),
+			shells.noiseMin, shells.noiseMax);
+		uniforms.shellPush = glm::vec4(downwind.x, 0.f, downwind.y, std::max(shells.curvature, 0.01f));
+		uniforms.shellColour = glm::vec4(colour, shells.view ? 1.f : 0.f);
+		uniforms.shellShade = glm::vec4(std::max(shells.occlusionAttenuation, 0.f), shells.occlusionBias,
+			shells.displacementStrength, 0.f);
+	}
 	uniforms.wet = glm::vec4(glm::clamp(lighting.wetness, 0.f, 1.f), glm::clamp(lighting.rainOnGround, 0.f, 1.f),
 		glm::clamp(lighting.snow, 0.f, 1.f), 0.f);
+	uniforms.lightDebug = glm::vec4((float)glm::clamp(lighting.lightView, 0, 3), (float)glm::clamp(lighting.diffuseModel, 0, 1),
+		lighting.roughnessOverride, lighting.metallicOverride);
 	w.framePsx = psx;
 	w.frameSurface = glm::vec2((float)width, (float)height);
 	w.frameProjectionScale = glm::vec2(projection[0][0], projection[1][1]);
@@ -5784,6 +5842,18 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 				pass.draw((2 * g.segments + 3) * g.bladesPerCell, g.cells, 0, g.firstCell);
 			}
 		};
+		// Shells: an instance is a cell again, and its layers one strip, a
+		// layer's first and last vertex doubled (vs_shell). Every cell in
+		// view; the vertex stage drops those past the shells' reach.
+		const bool shells = blades && w.shellLayers && w.shellPipeline;
+		auto drawShells = [&](RenderPipeline pipeline)
+		{
+			pass.setPipeline(pipeline);
+			pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+			pass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
+			pass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
+			pass.draw(6 * (w.shellLayers - 1), w.grassCells, 0, 0);
+		};
 		// With the prepass the blades' depth goes down with the chunks',
 		// before anything is lit.
 		const bool bladesInPrepass = blades && depthPrepass && w.arena && opaqueCount;
@@ -5799,6 +5869,11 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			{
 				DebugGroup group(pass, "grass blades: depth prepass");
 				drawBlades(w.bladePrepassPipeline);
+				if (shells)
+				{
+					DebugGroup group(pass, "shells: depth prepass");
+					drawShells(w.shellPrepassPipeline);
+				}
 			}
 			DebugGroup group(pass, depthPrepass ? "chunks: solid (depth Equal)" : "chunks: solid (depth Less)");
 			bindFaces(pass, depthPrepass ? w.pipeline : w.solidLessPipeline, true);
@@ -5808,6 +5883,11 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		{
 			DebugGroup group(pass, bladesInPrepass ? "grass blades (depth Equal)" : "grass blades (depth Less)");
 			drawBlades(bladesInPrepass ? w.bladeEqualPipeline : w.bladePipeline);
+		}
+		if (shells)
+		{
+			DebugGroup group(pass, bladesInPrepass ? "shells (depth Equal)" : "shells (depth Less)");
+			drawShells(bladesInPrepass ? w.shellEqualPipeline : w.shellPipeline);
 		}
 
 		// Dropped block items: opaque, so before the transparent passes (GL
@@ -6723,6 +6803,9 @@ void shutdown()
 	if (w.bladeEqualPipeline) { w.bladeEqualPipeline.release(); w.bladeEqualPipeline = nullptr; }
 	if (w.bladePrepassPipeline) { w.bladePrepassPipeline.release(); w.bladePrepassPipeline = nullptr; }
 	if (w.bladeShadowPipeline) { w.bladeShadowPipeline.release(); w.bladeShadowPipeline = nullptr; }
+	if (w.shellPipeline) { w.shellPipeline.release(); w.shellPipeline = nullptr; }
+	if (w.shellEqualPipeline) { w.shellEqualPipeline.release(); w.shellEqualPipeline = nullptr; }
+	if (w.shellPrepassPipeline) { w.shellPrepassPipeline.release(); w.shellPrepassPipeline = nullptr; }
 	if (w.bladePipelineLayout) { w.bladePipelineLayout.release(); w.bladePipelineLayout = nullptr; }
 	if (w.grassBindGroupLayout) { w.grassBindGroupLayout.release(); w.grassBindGroupLayout = nullptr; }
 	if (w.grassCellBuffer) { w.grassCellBuffer.release(); w.grassCellBuffer = nullptr; }

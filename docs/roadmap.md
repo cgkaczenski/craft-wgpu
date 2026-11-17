@@ -267,6 +267,915 @@ ourCraft. Phases B–D are where the new 3D concepts are.
 | 19 | Delete OpenGL | Decided: the project becomes WebGPU only (wgpu-native: Direct3D 12 or Vulkan on Windows, Vulkan on Linux, Metal on macOS; the CMake fetch has prebuilt binaries for all three). The last commit that builds the OpenGL renderer is tagged `opengl-final` (`cmake -DRENDERER_WEBGPU=OFF` there), for comparisons on a machine whose GL draws, and for the GLSL that each WebGPU pass was ported from. In steps, each leaving the game buildable and drawing as before: **19a** the build is WebGPU only (no `RENDERER_WEBGPU` option or guards; the vendored GLFW 3.3, gl2d and the OpenGL tools go). **19b** GL leaves the smaller files, and what they took from GL names gets real identifiers: meshes keyed by GL vertex array names, block texture slots by fake bindless handles. **19c** `renderer.cpp`'s GL passes go, keeping what computes the frame's settings. **19d** the null GL scaffold (`nullGL.*`, `nullGLStubs.inl`, `tools/genNullGL.py`), glad, ImGui's OpenGL backend and the GLSL shaders are deleted. **19e** Windows and Linux: CMake and code kept portable, tested later on real machines (expect MSVC and gcc fixes, and naga's HLSL and SPIR-V output to differ from its Metal). **19a done:** the `RENDERER_WEBGPU` option and define are gone, and its guards resolved to the WebGPU side by `unifdef -DRENDERER_WEBGPU=1` (it cannot parse C++14 digit separators, so `gamePlayLogic.cpp`'s two guards were removed by hand). Deleted: `noiseTool/`, `PBRTool/`, `thirdparty/gl2d`, `thirdparty/glfw-3.3.7` and `glfw-3.3.2`. GLFW 3.4, wgpu-native and glfw3webgpu are always fetched. Checked: the title menu matches the earlier capture pixel for pixel, the world draws, and the shader reload works, with no validation errors. The world couldn't be diffed pixel for pixel: the spawn varied from run to run. The server corrected the spawn height only on a tick that found the spawn chunk loaded, and chunks load after a player joins, so it was a race. Fixed after 19a: `loadSpawnChunkAndPlaceSpawn` (`server.cpp`) runs at server startup, before connections are handled. It generates the spawn chunk and the chunks two each way, so neighbouring trees have landed, then runs the same ground-finding, now `correctSpawnHeight`. Four runs of `test` all spawn at (0, 67, 0) with the same view; the camera's starting pitch can still follow the real mouse. **19b done:** GL calls are gone from `blocksLoader.cpp`, `model.cpp`, `chunk.cpp`, `gameLayer.cpp`, `gamePlayLogic.cpp`, `createConnection.cpp`, `renderSettings.cpp`, `UiEngine.cpp` and `glfwMain.cpp` (which now defines `GLFW_INCLUDE_NONE`: the window is a WebGPU surface and needs no GL header). New identifiers: a block or item texture slot (`gpuIds`, `gpuIdsItems`, a model's or skin's texture) is the wgpu2d texture id itself, 0 for none, in place of a bindless handle; a model's or item's mesh comes from `wgpuWorld::newMeshId()`, still in a field named `vao` until 19c. Textures are now freed (`wgpu2d::cleanupTextureId`) where GL deleted them: `clearAllTextures`, `clearAllModels`. The profiler is CPU only (the GL timer queries and `initGPUProfiler` went), and `errorReporting.cpp` (GL debug output only) is deleted. Left for 19c, as renderer machinery: chunks' `vao`, `transparentVao` and `lightsBuffer` (always 0, named only by `renderer.cpp`'s GL passes), `programData.GPUProfiler`, `skyBoxRenderer`, `shader.cpp`, `bigGpuBuffer` and `sunShadow`. Checked: the title menu matches pixel for pixel; `test` draws as before 19b (the same 88 chunks and 193071 opaque faces, with pixels differing only on swaying leaves and grass); `test2` draws its items and models; the shader reload runs the same sequence as milestone 20; no validation errors. One `test` run looked lower, with 52 chunks: the starting pitch followed the real mouse, and the two runs after it matched. A texture-pack reload (`clearAllTexturePacks`, forced once mid-game by a temporary edit) frees and reloads them, and the blocks, the hand and the hotbar draw the same afterwards. **19c done:** `renderer.cpp` (7056 lines to 2846) keeps what a frame computes on the CPU and hands to wgpuWorld: the time-of-day lighting, the frustum culling and chunk sort, the dropped block cubes, the `Lighting` values, the water timer, the entities' bones and instances, the crack decal's faces, the exposure update from the WebGPU reading, the lens flare (wgpu2d), the block geometry tables and the inventory icons. Gone with GL's passes: the shader structs and their uniforms, `FBO`, `QueryObject`, `renderShadow` and its unused frustum helpers (wgpuWorld's cascades come from `sunCascadeMatrix`), the bloom mip setup, the GL light-buffer copy, and `PointDebugRenderer` (GL points only). `renderer.h` keeps `Renderer` (its `ShadingSettings`, which the menus edit, moved up from the default shader: `renderer.shadingSettings`), `AdaptiveExposure` and `GyzmosRenderer` (lines only). Deleted: `shader.*`, `sunShadow.*` (wgpuWorld has its own cascades), `bigGpuBuffer.*` (switched off; `ChunkSystem::gpuBuffer` and the `BigGpuBuffer *` parameters went with it), chunks' `vao`, `transparentVao` and `lightsBuffer`, `ProgramData::GPUProfiler` and `sunRenderer`. `skyBoxRenderer.*` keeps only the sky colors (wgpuWorld re-bakes its skies when they change, so the "Refresh" button went), the sun and moon textures and `calculateSunPosition`. Models' and items' `vao` is now `mesh`. The debug panels lost the GL texture previews (GL names mean nothing to ImGui's WebGPU backend; the G-buffer views stay), and the metallic, roughness, "Sort chunks" and "Render Transparent" controls, which only GL's passes read. One behavior the GL code carried by accident: the icon pass returned early until the GL icon shader existed, which skipped the first call (made while the texture packs load, before `create`). A `created` flag keeps that order; without it the world started up early and `create`'s shader reload ran for real, shifting the reload test by one. Checked: the title menu matches pixel for pixel; `test` draws as before 19b (88 chunks, 193071 opaque faces, at most 0.04% of pixels off by more than 32, on swaying leaves and grass; a first run that started with the mouse elsewhere matched 19b's run with the same view); `test2` matches 19b; the shader reload runs milestone 20's sequence and its frames match 19b's; a forced texture-pack reload redraws all 208 icons and the frame after matches 19b's; no validation errors. **19d done:** nothing calls OpenGL, so its scaffolding is deleted: `nullGL.cpp`, `nullGLStubs.inl`, `nullGL.h` and `tools/genNullGL.py`; `thirdparty/glad` (and its links from the game, glui and the gl2d shim, and the includes in the shim and `shared/blocks.h`); ImGui's OpenGL backend (`imgui_impl_opengl3.*`; ImGui draws through `wgpuImgui`, with `imgui_impl_glfw` for input); the 43 GLSL files under `resources/shaders/` (the WGSL under `webgpu/` is all that is loaded; the GLSL each pass was ported from is at the `opengl-final` tag); and `ShadingSettings::formatIntoGLSLcode`. `GLFW_INCLUDE_NONE` is now a compile definition of the game target, so no file gets the system GL header through GLFW (on Linux that header need not even be installed); the per-file defines went. Left on purpose: `thirdparty/imgui-docking/imgui/examples/` (vendored, never built, many backends' samples), comments that name the GL behavior a WebGPU pass matches, and the learning outlines' history (each section is tied to its commit). Checked: it builds with no glad on the include path; the title menu matches pixel for pixel; `test` draws 88 chunks and 193071 opaque faces as before (three earlier runs looked toward the horizon because the real mouse was moving; the two after matched); `test2` matches 19b; the shader reload runs milestone 20's sequence with its frames matching 19b's; a forced texture-pack reload redraws the icons, with differences only on swaying leaves and grass. |
 | 20 | Hot reload | Done. `wgpuWorld::reloadShaders`, called from `Renderer::reloadShaders`: GL's `R` key, or a shading setting GL recompiles for (that check also fires once on entering a world). WGSL is baked into pipelines, so a reload rebuilds the pipelines and their layouts and nothing else. The five create functions that mixed the two are split: `create*Resources` (bind group layouts, buffers, samplers, the sky cubes and the bake's group) runs once at startup, and `createPipelineSet` (the eight pipeline functions) runs at startup and on each reload. Bind groups, the arena and the targets are untouched. All or nothing: `forEachReloadable` lists the 42 pipelines and 17 layouts. A reload moves them aside, builds a new set, and keeps the new one only if every pipeline was made; otherwise it releases what it made and puts the old set back. A WGSL error prints with its line (naga's message) and the game keeps drawing. The skies re-bake after a reload, as GL's reload redoes its sky textures. The block icons' and block textures' pipelines run once at load and are not reloaded. A reload takes about 20 ms. Checked by script, editing `post.wgsl` between `R` presses: a red tint appears on reload, a syntax error is reported and the tint stays, and restoring the file brings the normal image back. No other validation errors; the GL build compiles. |
 
+### Lighting: ideas from Disney's principled BRDF
+
+Ideas; L0 is done. Drafted 2026-11-16 from `~/game-dev/Disney-PBR`
+(Acerola's Unity demo: Lambert, Blinn-Phong and Disney's 2012 BRDF with a
+sky sample for indirect light) and a read of
+[`lighting.wgsl`](../resources/shaders/webgpu/lighting.wgsl). The aim is to
+learn the model by building it in WGSL, and to keep only the lobes this game
+has a surface for.
+
+**What the game has today.** One function lights everything,
+`computePointLightSource`: GGX, Smith and Schlick for the highlight and
+`diffuseOrenNayar2` for the rest. The sun, every light block, the entities
+(`lightEntity`) and the lying snow (`fs_snow`) all go through it, so a change
+there reaches all of them. The ambient light is `albedo * ambient`: the baked
+light levels and nothing else. Only the sun and the light blocks make a
+highlight; a surface never reflects the sky, except puddles and water, and
+faces smoother than 0.45 through SSR.
+
+**What the reference is.** Take the math from Burley's 2012 course notes and
+Disney's own `disney.brdf` (both linked in the demo's README), and use the
+demo as a readable companion, not as text to port. It has no license file,
+and it differs from the reference in places: the clearcoat's `SmithGGX` is
+called with its arguments in the wrong order, `AcerolaBRDF.shader`'s sheen
+uses the view angle and the specular colour, and its indirect light samples
+the skybox along the normal, not the reflected ray.
+
+**A finding in the current diffuse.** `diffuseOrenNayar2` is not Oren-Nayar
+as Fujii published it, and GL's was the same (`fDiffuseOrenNayar2` at
+`opengl-final`), so it is not a porting slip. Fujii has
+`s = L·V - (N·L)(N·V)` and `B = σ·A`; this has `L·N` in place of `L·V` and
+`PI` in place of `σ`. The result does not depend on the angle between the
+light and the eye at all. It brightens a face the more it is seen edge-on: at
+roughness 0.9, a block's top under an overhead sun is 0.79 of Lambert looking
+straight down and 3.3 times Lambert looking along it, and summed over every
+view direction it sends back 1.6 times the sunlight that arrives (1.8 at
+roughness 0.5; L0's `tools/brdfEnergy` prints the table). Distant sunlit ground is bright
+because of this. The game's sun strength and exposure were tuned
+on top of it.
+
+| # | Milestone | Depends on | Type |
+|---|---|---|---|
+| L0 | Lobe views and an energy check (done) | | Learning |
+| L1 | Burley diffuse | L0 | Learning |
+| L2 | The sky in the ambient light | L0 | Learning |
+| L3 | A water film on wet ground (clearcoat) | L2 | Mixed |
+| L4 | A material table per texture | | Game-specific |
+| L5 | Sheen | L1, L4 | Mixed |
+| L6 | Snow's soft diffuse, and light through leaves | L1 | Mixed |
+
+#### L0. Lobe views and an energy check
+
+**Disney:** the notes are built on looking at one lobe at a time; the demo
+returns `BRDFResults` (diffuse, specular, clearcoat) and has a slider per
+parameter (`Material Wizard.cs`).
+
+**Here:** `computePointLightSource` returns its lobes separately; a setting
+in the client control panel (and an environment variable, as
+`WGPU_GBUFFER_VIEW`) shows one alone: diffuse, specular, ambient, later
+coat and sheen. Panel sliders override roughness and metallic on every face
+(19c removed GL's, which nothing read). A small standalone program integrates
+each diffuse model over the hemisphere and prints the share of light sent
+back, for a table of roughness and light angles: the check that found the
+1.6 above would be one run.
+
+**Done (2026-11-16).** `lighting.wgsl`'s `computePointLightSource`,
+`pointLights` and `sunLight` return a `Lobes` (diffuse, specular), and
+`lightShown` gives their sum with the ambient or one part alone. The block
+faces, the entities and the lying snow (whose crystals' glints count as
+specular) all go through it. The world uniforms gained `lightDebug` (1760
+bytes).
+
+- **Views:** "Light shown" in the panel's "Light Stuff", or
+  `OURCRAFT_LIGHT_VIEW=1|2|3` (diffuse, specular, ambient). A part is shown
+  as it left the surface: no fog, no reflections, no emissive bloom, water
+  opaque, and the exposure held where the whole frame had it, so the part is
+  as bright on the screen as it is in that frame.
+- **Diffuse model:** "Diffuse model", or `OURCRAFT_DIFFUSE=1`, swaps in
+  Lambert. L1 adds Burley to the same switch.
+- **Overrides:** "roughness for all" and "metallic for all", or
+  `OURCRAFT_ROUGHNESS` and `OURCRAFT_METALLIC` (0..1), replace the material
+  map's values on block faces and the entities' constants. Water, the wet
+  ground and the snow still set their own afterwards.
+- **Energy check:** `tools/brdfEnergy`
+  (`cmake --build build --target brdfEnergy && build/brdfEnergy`, a few
+  seconds). The BRDF's functions copied line for line into C++, summed over
+  the hemisphere for eight roughnesses and six light heights. A new model is
+  one function and one line in `diffuseModels`.
+
+What the check prints, beyond the finding above:
+
+- The game's diffuse sends back 1.6 to 2.0 times what arrives under a high
+  light, most for smooth surfaces, and drops to about 1 for a light 5
+  degrees up. Fujii's formula stays between 0.78 and 1.
+- It is not the same with the light and the eye swapped (0.91 one way,
+  0.27 the other, for one pair of directions), which a real surface is.
+  Lambert, Fujii's and the specular lobe are.
+- `distributionGGX`'s floor under its denominator (`max(denom, 0.0000001)`)
+  cuts off the highlight's peak below a roughness of about 0.11. The
+  material map's smoothest (0.09) keeps 60% of its highlight and a puddle
+  (0.07) 25%; still water (0.11) keeps 97%. With the floor lowered the same
+  sum gives 1.
+- The specular lobe keeps 99% at roughness 0.3 and 41% at 0.9: light lost
+  between a rough surface's bumps, which this model never returns.
+
+**Checked** in a copy of `test2` (dry land at 179,80,-26 and the pond,
+clear, day time 0.2). With the view off the frame matches the commit before
+to within what two runs of the same build differ by (1.5% of pixels by more
+than 2 levels against 1.4%, on the swaying grass). The diffuse and ambient
+views show the ground lit and unlit by the sun as expected. The specular
+view of the same ground is black: at the block textures' roughness the
+highlight adds nothing visible, so L2 and L3 are what will make it show.
+With roughness 0.25 for all, texel-sized glints appear on the ground; at the
+sea shore at sunrise the view shows the sun's path on the water alone; on
+lying snow it shows only the crystals. Lambert in place of the game's
+diffuse changes 61% of that frame's pixels by more than 8 levels, darker.
+Metallic 1 leaves the ground lit by the ambient alone, plus glints. No
+validation errors. Not checked: the panel's controls themselves (scripted
+runs cannot reach ImGui; the environment variables set the same fields).
+
+#### L1. Burley diffuse
+
+**Disney:** `Fd90 = 0.5 + 2·roughness·(L·H)²`, and the diffuse is Lambert
+times `mix(1, Fd90, (1-N·L)^5) · mix(1, Fd90, (1-N·V)^5)`. Rough surfaces
+brighten when the light and the eye are both low and on the same side; smooth
+ones darken at their edges. It can also send back more than arrives (1.03
+under an overhead sun at roughness 0.9, 1.3 under one 5 degrees up);
+Frostbite's version (Lagarde and de Rousiers, 2014) rescales it and stays
+under 0.9.
+
+**Here:** replaces `diffuseOrenNayar2`, behind a setting so the two can be
+switched per frame. This changes the look more than any other item: for the
+overhead-sun case above, Burley gives 1.0 of Lambert looking down and about
+1.2-1.4 looking along the ground, against 0.79 and 3.3 now. In the sun's
+diffuse light, near ground gets a quarter brighter and far ground less than
+half as bright, so one multiplier cannot match the old frames. Decide by eye whether the bright
+distance is wanted. If it is, keep it as a bounded, named term rather than
+as the formula's accident.
+
+**Done when:** L0's energy check agrees with those numbers, and noon and low-sun frames of `test` and `test2` are compared side
+by side with `sunLight`'s 1.9 retuned.
+
+#### L2. The sky in the ambient light
+
+**Disney-PBR:** its fourth example adds the skybox, blurred by roughness, to
+the BRDF. The standard form is the split sum: the sky blurred for the
+roughness, looked up along the reflected ray, times a Fresnel term that
+depends on roughness and view angle. GL had this and switched it off
+(`physicallyAccurateReflections`), and the port never made the prefiltered
+skies or the BRDF LUT.
+
+**Here:** the largest gap in the lighting, and what L3 depends on. This
+game's skies depend only on how high a direction points (milestone 14), so
+the prefiltered sky is a small 2D table, height by roughness, rebuilt when
+the time of day or the weather changes: one read, no cube mips. The Fresnel
+term can be Karis's analytic fit, with no LUT. The result is scaled by how
+much sky reaches the face (`skyUnchanged`, so caves get none) and by the AO.
+The diffuse ambient stays the baked levels. SSR, where it finds something,
+replaces the sky read as it does for puddles today (`reflectPuddle`'s
+`skyToward`, which reads the screen's sky copy and clamps at its edges, can
+then use the table).
+
+**Done when:** a gold block, ice and a puddle show the sky's colour at a
+shallow angle under an overcast sky, with no sun; a cave shows none.
+
+#### L3. A water film on wet ground (clearcoat)
+
+**Disney:** a second highlight over the base: GTR1 (a longer tail than GGX),
+a fixed reflectance of 0.04 and a fixed geometry term. Two parameters, how
+much and how glossy.
+
+**Here:** rain now halves the ground's roughness (`shade`: floor 0.46, kept
+just above SSR's 0.45), which makes damp stone look like a smoother stone. A
+film of water over a rough stone is the two-lobe case the clearcoat exists
+for: the base keeps its roughness and its darkened albedo (that part is
+right), and the film adds a tight highlight.
+
+- Reflectance 0.02, water's, not Disney's 0.04. The base is scaled by what
+  the film lets through, `1 - Fcoat` (Disney omits this; glTF's clearcoat
+  and Filament do it).
+- The film's normal: the mapped normal when damp, going to the face's own as
+  it gets wetter, as a puddle already "lies flat over the block's bumps".
+- Damp ground and puddles become one thing: `wet.amount` is how much coat,
+  `wet.puddle` takes its gloss to water's. `reflectPuddle` becomes the
+  coat's reflection.
+- It needs L2. Rain sets the sun to 0.25 and a storm to 0.1
+  (`weather.cpp`), so the film's sun highlight is nearly absent while it
+  rains; what a wet street shows then is the sky at a shallow angle. The
+  sun's glint shows after the rain, while the ground dries.
+- The same coat fits the sand and stone in the band along a shore, and ice.
+
+**Done when:** under rain, damp ground reflects the sky looking along it and
+not looking down; after rain with the sun out, a sharp glint sits on stone
+that still looks rough in the diffuse view.
+
+#### L4. A material table per texture
+
+**Disney:** eleven parameters per material. Here the material map gives
+three per texel (roughness, metallic, emission), and every dielectric has a
+reflectance of 0.04.
+
+**Here:** a storage buffer beside `textureLayers`, one record per texture
+layer: sheen, subsurface, light through, coat, reflectance. Filled from a
+text file in `resources` that names blocks; everything defaults to 0 and
+0.04. Without it the new lobes can only go on what the shader recognises by
+the weather (wet, snowed on), which is why L3 comes first. Reflectance alone
+is worth having: water 0.02, ice 0.018, glass 0.04, gems up to 0.17.
+Entities get one record per kind in place of `lightEntity`'s constants.
+
+**Done when:** editing the file and reloading changes one block's look.
+
+#### L5. Sheen
+
+**Disney:** `(1 - L·H)^5 · sheen`, tinted toward the base colour, added to
+the diffuse. Made for cloth: light scattered back from fibres at the edge.
+
+**Here:** its home is the cloth blocks (`clothBlock`, the wool colours, their
+stairs, slabs and walls) and `mossyCobblestone`. On snow it is a trial:
+snow's albedo is already near white, and the term is small unless both the
+sun and the eye are low, which is a low sun over a snowfield. Judge it in
+L0's sheen view before keeping it.
+
+**Done when:** a cloth block's edges lighten against the light and a stone
+block's do not.
+
+#### L6. Snow's soft diffuse, and light through leaves
+
+**Disney:** `subsurface` blends the diffuse toward a flatter shape (after
+Hanrahan and Krueger). It is not light passing through anything; it only
+softens the falloff toward the shadow side. Disney's 2015 extension adds
+light through thin surfaces; the demo does not have it.
+
+**Here:** two separate things.
+
+- Snow (the weather's cover in `shade`, `fs_snow`, `snow_block`): a little
+  of the flattening, 0.3 or so. More would wash out the tracks, which read by
+  their walls' shading. Scale it by `1 - pressed` in `fs_snow`: packed snow
+  scatters less, and the tracks keep their contrast.
+- Leaves, grass blades and plant sprites: light coming through, which is the
+  larger effect. Looking toward the sun, a term of the albedo (shifted
+  toward yellow-green) times the sun and its shadow times a power of
+  `dot(V, -L)`, the same shape as the water's `through` glow in
+  `waterColour`. Grass is lit by an up normal, so the term must come from
+  the view, not from the normal.
+
+**Done when:** a canopy seen from below toward a low sun glows and the same
+canopy seen with the sun behind the camera does not; footprints in snow are
+as easy to see as before.
+
+#### Smaller, with L1 or later
+
+- Smith's geometry term: the height-correlated form (the demo's `SmithGGX`)
+  or Disney's remap `((1 + roughness) / 2)²` for direct lights, which tames
+  the highlight on rough blocks at shallow angles.
+- `distributionGGX`'s floor (L0's check): lower it, or raise the smoothest
+  roughness to 0.11, so that smooth surfaces and puddles keep their whole
+  highlight. A look change: the sun's glint on a puddle would be four times
+  as bright.
+- Cost: the lobes run once for the sun and once per light block in range
+  (9-41 a frame in `test`). Skip a lobe whose amount is 0, and measure with
+  the present mode set to Immediate, since the frame time is vsync-capped.
+
+#### Not taking
+
+- **Anisotropy.** It needs a grain direction per block, and nothing here is
+  brushed metal. (`normalToRotation` would supply the tangent if a use
+  appears: log ends, say.)
+- **Specular tint and sheen tint** as parameters: constants in L5 are enough.
+- **The tone mappers.** The demo has nine; `post.wgsl` has five, including
+  the same ACES fit.
+- **Its Blinn-Phong and Lambert shaders**, except Lambert as a comparison
+  view in L0.
+
+### Shells: ideas from Acerola's shell texturing
+
+Ideas; nothing is built. Drafted 2026-11-16 from `~/game-dev/Shell-Texturing`
+(Acerola's Unity demo, MIT: a furry ball) and a read of the grass blades
+(`vs_blade` in
+[`chunkFaces.wgsl`](../resources/shaders/webgpu/chunkFaces.wgsl)), the lying
+snow ([`snow.wgsl`](../resources/shaders/webgpu/snow.wgsl)) and the creatures
+(`vs_model` in [`entities.wgsl`](../resources/shaders/webgpu/entities.wgsl)).
+The aim is to learn the technique by building it in WGSL, and to keep it only
+where this game has a surface it suits.
+
+**What the demo is.** Two files, `Shell.shader` and `SimpleShell.cs`.
+
+- The mesh is drawn once per shell, each copy pushed out along the normal by
+  `length * (i / count)^distanceAttenuation`.
+- The fragment stage multiplies the uv by a density and takes the whole part
+  as a strand's number. A hash of the number is the strand's height. A pixel
+  is discarded when it is farther from the strand's middle than
+  `thickness * (height - h)`, where `h` is the shell's own height, 0..1: each
+  strand is a cone. Shell 0 is never cut, so the mesh has no holes.
+- Light is half Lambert, squared, times `h^attenuation + bias`: dark at the
+  roots, standing in for the light the strands block.
+- A direction from the CPU moves each shell sideways by `h^curvature`: roots
+  fixed, tips moved. The script lets it lag behind the ball's movement and
+  fall under gravity at rest.
+
+Three things to do differently, none of them a port's concern: it makes a
+GameObject and a draw per shell and sets thirteen uniforms on each every
+frame; its seed (`x + 100 * y`) repeats along diagonals once the density
+passes 100; and it has no fins, so a shell seen edge on is a stack of lines.
+
+**What WebGPU changes.** These are the parts worth learning here.
+
+- One draw, not one per shell. The shell's number comes from the vertex or
+  instance index, as a blade's number does in `vs_blade` (one instance per
+  cell, the vertex index says which blade). For ground: one instance per
+  top, `6 * shells` vertices, shell `vertexIndex / 6`. For a creature:
+  `instances * shells` instances of its mesh, shell `instance % shells`.
+- The parameters live in the world uniforms, set once.
+- The cost is fill, not triangles: every pixel of a shelled surface runs the
+  fragment stage once per layer, and a fragment that may discard is the kind
+  Apple's GPUs remove hidden surfaces for least well. The blades already
+  have the answer: their own depth prepass with a fragment stage that only
+  discards (`fs_bladeDepth`), then the lit pass where the depth is Equal. A
+  shell layer's prepass fragment is one hash and one compare, and the
+  lighting runs once per pixel. The layers are listed top first.
+- The hash is integer math (`bladeHash` is already that), and a texture read
+  after a discard needs `textureSampleLevel`, as elsewhere in this file.
+
+**A finding: shells need more layers the farther away they are.** The other
+suggestion on the table was real blades near, shells in the middle band,
+sprites at the edge. The gap it names is real: a bare grass top has a clump
+on 12% to 70% of blocks (`bladeHash`'s `clump.z` against the patch noise) and
+the flat texture everywhere else. But that is as true at the player's feet
+as in the middle band, and distance works against shells. A ray that drops
+one layer's spacing while crossing less than one strand's width cannot slip
+between two layers of a strand; past that it can. So the layers needed are
+about `height * distance / (strand width * eye height)`. For strands a texel
+wide (1/16 of a block), turf 2 texels high and the eye 1.5 blocks up, that
+is `1.33 * distance`: 4 layers at 3 blocks, 11 at 8, 18 at 13.6 (where the
+blades start to give way to the sprites), 29 at 22 (the blades' reach).
+
+S0 measured it (its tables are below). The direction is right and there is
+no sharp line; what too few layers look like depends on the field:
+
+- Strands standing apart come apart into separate discs, and the ground
+  shows between them.
+- A dense lawn shows no lines at 1080p at any distance. It gets darker with
+  distance, because the view reaches down between the layers to the darker
+  ones near the roots: at 10 to 14 blocks, 8 layers are 15% darker than 64
+  and 16 layers 6%.
+
+So 16 layers are enough for dense turf 2 texels high out to the blades'
+whole reach, and the count is not what limits how far the shells go. Two
+other things do. Each layer costs fill over every lawn pixel (S0's cost
+table). And at 1080p, 13 blocks away, a strand is under 4 pixels wide and
+the turf 7 high: there is little left to see. So the shells are still not a
+band between the blades and the sprites. They are a layer under the blades
+from the feet outward, where they are seen from above and show the most,
+fading out by sinking to nothing where the blades give way to the sprites.
+Sinking is the fade: layer 0 is the block's own top.
+
+**What fits this game's look.** Strands at the texture's own grain: 16 to a
+block, square, each a texel of the top's picture standing up to its own
+hashed height, darker toward the root in whole steps. The blades already
+take a texel of the sprite each, and the dithers and the PSX snap are at the
+same grain. The demo's round cones are for S0 only.
+
+| # | Milestone | Depends on | Type |
+|---|---|---|---|
+| S0 | The demo in WGSL, on the grass tops, with a layer view (done) | | Learning |
+| S1 | Turf: the game's own version | S0 | Mixed |
+| S2 | Moss, cloth and hay: shells off any face | S1, L4 helps | Mixed |
+| S3 | A coat for the cat: fur on creatures | S0 | Mixed |
+| S4 | Trampled grass | S1 | Game-specific |
+
+#### S0. The demo in WGSL, with a layer view
+
+**Demo:** all of it, as written: extrusion, the cone test, the root shading,
+the displacement.
+
+**Here:** a new pipeline pair beside the blades' (prepass and Equal), drawn
+over the grass tops near the camera from a cell list made as
+`findGrassCells` makes the blades' (flag bit 3 already marks those tops). The
+demo's parameters are panel sliders and environment variables: count, length,
+density, thickness, the height range, the two exponents, the bias. The
+displacement is a fixed direction for now.
+
+- **Layer view:** each pixel coloured by the layer it came from. This shows
+  the lines at shallow angles, and is the check on the finding above: walk
+  back from a lawn at 8, 16 and 32 layers and note where the lines appear.
+- **Cost:** the frame time with the present mode Immediate (the log line is
+  vsync-capped), looking down at a lawn that fills the screen, at each count,
+  with and without the prepass. That table decides S1's layer count.
+
+**Done when:** a patch of lawn looks like the demo's ball unrolled, the layer
+view matches the formula or corrects it, and the cost table is in this file.
+
+**Done (2026-11-16).** `chunkFaces.wgsl`'s "Shells" section: `vs_shell`,
+`fs_shell` and `fs_shellDepth`, with the demo's reasoning in its comments.
+Three pipelines (`shellPipeline`, `shellEqualPipeline`,
+`shellPrepassPipeline`) on the blades' layout and the blades' cell buffer:
+one draw, an instance a cell, `6 * (layers - 1)` vertices each, the top layer
+first. Nothing new is uploaded. The world uniforms gained five vectors (1840
+bytes), filled from `ShellSettings` (`shellSettings.h`). Off unless turned
+on, and only with the Grass setting's BLADES, whose cells they stand on.
+
+- **Controls:** "Shells" in the panel, beside the grass sliders, with the
+  demo's twelve parameters and a reach. For scripted runs
+  `OURCRAFT_SHELLS=<layers>`, `OURCRAFT_SHELL_VIEW=1` and
+  `OURCRAFT_SHELL_SET="length=0.25,density=32"` (`ShellSettings`'s names).
+  Two more were added for the checks: `OURCRAFT_GRASS_DENSITY=0` leaves the
+  lawn bare but for the shells, and `OURCRAFT_PREPASS=0|1` sets the depth
+  prepass.
+- **Layer view:** each pixel in its layer's colour, four colours taking
+  turns, the block's own top black, a white ring every 4 blocks from the
+  camera.
+- **Not as the demo:** layer 0 is not drawn; it is the block's own top,
+  which `shade` gives layer 0's colour. A strand's number is its place in
+  the world, hashed, in place of `x + 100 * y`. The light is the game's
+  (`shade`), since half Lambert on a flat top is one number for the whole
+  lawn; only the roots' darkening is kept. The push is a fixed direction,
+  downwind. The demo's hash has a constant longer than 32 bits; what fits
+  is used.
+- **Values:** the demo's own scene (256 layers, density 366, thickness
+  3.53) is set for a ball. On a block's top, 32 layers, 32 strands across,
+  thickness 3.5 and length 0.25 give a plush lawn; the defaults here (16,
+  16, 2, 0.15) give something closer to scales.
+
+**The layer check.** Standing on a flat lawn in a copy of `test2`
+(179,80,-26, looking west, pitch -10, 1920 by 1048), blades off, strands a
+texel wide and 2 texels high, shells out to 22 blocks.
+
+Strands standing apart (a quarter of the cells have one), in the layer view:
+the share of pixels where the black top shows, by distance. With enough
+layers it falls away with distance as the strands hide the ground behind
+them. With 8 it stops falling at about 5 blocks, near the 6 the estimate
+gives; with 16 it falls slowly; the difference grows steadily and there is
+no distance where it starts. Part of it is there from the first block: a
+strand only reaches the last layer under its height, so fewer layers make
+shorter strands.
+
+| Blocks away | 8 layers | 16 | 32 | 64 |
+|---|---|---|---|---|
+| 3-4 | 0.56 | 0.48 | 0.44 | 0.43 |
+| 5-6 | 0.43 | 0.31 | 0.27 | 0.25 |
+| 7-8 | 0.45 | 0.26 | 0.19 | 0.17 |
+| 10-12 | 0.46 | 0.21 | 0.13 | 0.11 |
+| 12-14 | 0.44 | 0.17 | 0.09 | 0.06 |
+| 17-21 | 0.22 | 0.08 | 0.02 | 0.01 |
+
+A dense lawn (every cell a strand), lit: the mean green level, and in
+brackets the share of pixels more than 24 levels from the 64-layer frame.
+Side by side the three frames look alike past 8 blocks; the 8-layer one
+shows its steps on the nearest strands.
+
+| Blocks away | 8 layers | 16 | 64 |
+|---|---|---|---|
+| 3-4 | 127 (8%) | 133 (2%) | 138 |
+| 6-8 | 140 (28%) | 152 (6%) | 158 |
+| 10-12 | 141 (46%) | 156 (16%) | 165 |
+| 12-14 | 143 (51%) | 157 (20%) | 168 |
+| 17-21 | 177 (17%) | 180 (8%) | 183 |
+
+**The cost.** Looking down (pitch -60) at that lawn filling the screen, 1920
+by 1048, the same dense strands, shells out to 13 blocks, an M6, the present
+mode Immediate for the runs. Under about 100 layers the frame time cannot
+show them: without shells it reads 8 to 12 ms from one run to the next. So
+the cost is the slope where the GPU is the limit. Two or three runs each,
+within 0.7 ms of each other (128 with the prepass was run once, and is
+still inside that 8 to 12):
+
+| Layers | Prepass on, ms | Prepass off, ms |
+|---|---|---|
+| 128 | 11.2 | 17.9 |
+| 256 | 12.6 | 25.1 |
+| 512 | 18.2 | 37.7 |
+| 1024 | 28.7 | |
+
+That is 0.021 ms a layer with the prepass and 0.05 without: the prepass
+makes a layer 2.4 times cheaper. Carried down to the counts in question, an
+estimate and not a measurement: 16 layers 0.3 ms (0.8 without the prepass),
+32 layers 0.7 ms (1.6), 64 layers 1.3 ms (3.2). The panel's slider stops at
+64; `OURCRAFT_SHELLS` takes up to 1024, for timing.
+
+**Checked:** no validation errors in any run. With the blades off, the
+frame with the prepass on and the frame with it off differ in 0.16% of
+pixels by more than 8 levels, less than two runs of the same (0.27%). It
+draws in the PSX look, at night (lit by the game's light, not glowing) and
+under the snow weather, where the lying snow covers it. As expected of S0:
+the lawn ends in a hard edge at the reach, and nothing is drawn along a
+ledge's side. **Not checked:** the panel's controls (scripted runs cannot
+reach ImGui; the environment variables set the same fields); the cost at 16
+to 64 layers directly; the frame with shells off against the commit before
+(by the code nothing is drawn and the top is not recoloured); walking, which
+the plan named, was one standing view read by distance.
+
+#### S1. Turf: the game's own version
+
+**Here:** what S0 measured, made to sit under the blades.
+
+- Strands are texels, coloured from the top's own picture; the tops under a
+  tuft and under a clump get them too, and `bladeGroundShaded`'s dither
+  stays as the shade of the taller grass.
+- Height from the patches (`bladePatch`: taller where the blades are lush),
+  sinking to nothing toward where the blades give way to the sprites.
+- 16 layers (S0: 0.3 ms with the prepass, by its estimate). The roots'
+  darkening is what made S0's lawn darker with distance; keep it mild, or
+  ease it off with distance.
+- Wind: the blades' own gust (`bladeNoise` rolling downwind, `u.grass.y`),
+  moving a layer by `h^curvature`. It is worked out from each corner's world
+  position, not from the cell, so the tops of neighbouring blocks stay joined.
+- Fins: along a top's edge where the neighbour is lower or not grass, a strip
+  as high as the turf with the edge row's strands, so a ledge seen from
+  below or from the side has a ragged pixel edge and not a stack of lines.
+  The demo has none.
+- Lit through `shade` as the top is, taking the sun's shadow and casting
+  none. Under the snow weather the strands whiten as the top does; where
+  snow lies, the snow's mesh covers them by depth, and strands show through
+  snow thinner than they are tall.
+- With the Grass setting's BLADES, and a slider of its own.
+
+**Done when:** looking down, no bare top texture shows on a lawn; walking,
+nothing pops or crawls; the lawn is no darker in the middle distance than
+near or far; a ledge's edge is ragged from below; the frame cost is written
+here.
+
+#### S2. Moss, cloth and hay: shells off any face
+
+**Demo:** the gravity half of its displacement: at rest the direction is
+straight down, so hair on the side of the ball hangs.
+
+**Here:** `mossyCobblestone` and its stairs, slab and wall; `clothBlock` and
+its shapes; `hayBalde`. Short: a texel long, 4 to 6 layers.
+
+- A mask from the picture: on mossy cobblestone only the green texels grow
+  strands, and the stone between them stays flat. The rule per texture
+  (length, which texels) belongs in L4's material table; without L4, a
+  switch on the block type.
+- On side faces the tips hang down by the demo's term.
+- The faces come from a list `Chunk::bake` makes, as the grass cells are
+  found, within a short radius.
+- Edges: shells pushed out of two faces of a cube leave a notch a strand
+  long along the edge between them. At one texel it may read as a bevel.
+  If not, push along the corner's averaged normal (the demo's ball has
+  smooth normals, so it never meets this).
+- L5's sheen and this are two answers to the same surface: decide on cloth
+  with both in view.
+
+**Done when:** a mossy cobblestone wall is soft on its green texels and hard
+on its grey ones, from the front and looking along it.
+
+#### S3. A coat for the cat: fur on creatures
+
+**Demo:** this is the demo: a mesh, its shells, and hair that streams behind
+it as it moves.
+
+**Here:** the cat first (`ModelsManager::cat`); the pig, the goblin and the
+zombie are bare-skinned. Any furred animal added later takes it for free.
+
+- `vs_model` after skinning, pushed along the normal;
+  `instances * shells` instances in one draw.
+- The models are boxes with a normal per face, so shells split open along
+  every edge of a box. `model.cpp` needs a second, averaged normal per
+  vertex for the push; the lighting keeps the face's.
+- Strands at the skin's texel grain. Where fur grows and how long (not the
+  eyes, the nose, the paws) is a mask picture beside the skin.
+- The direction: gravity, plus the creature's velocity lagging behind as
+  the script's `displacementDirection` does, kept per creature on the CPU
+  and sent in `Model`.
+- A handful of creatures on screen, so the fill is small. Skip the shells
+  beyond a distance where the coat is under a pixel.
+
+**Done when:** the cat's outline is soft against the sky, its coat streams
+back when it runs and settles when it stops, and its face is bare.
+
+#### S4. Trampled grass
+
+**Here:** the snow's tracks are a picture of the ground from above, 16
+texels to a block, stamped under every body (`snowCover.cpp`'s `stamp`).
+That is the strands' own grain. A second picture of the same kind for grass:
+a strand under a footprint stands lower and leans the way the walker went,
+and comes back over a minute or so, as snow fills a track again.
+
+**Done when:** a path walked across a lawn shows, and has gone a few minutes
+later.
+
+#### Smaller, or trials
+
+- **Leaves.** Three or four shells off a leaf block's faces, each keeping
+  fewer of the picture's texels, for a bushier canopy edge. A trial after
+  S2: leaf faces are many and are seen at every distance, and with so few
+  layers the sparse case of S0's layer check applies (discs, with gaps).
+- **Light through the tips.** L6's term for grass on the turf's top layers,
+  looking toward the sun.
+- **Clouds.** The weather's clouds are a grey laid over the sky
+  (`sky.wgsl`), with no shape. A stack of noise layers at cloud height, each
+  cut at a threshold that rises away from the middle layer, is the same
+  technique and gives clouds a thickness seen from below. Toward the horizon
+  it is seen edge on, so it needs its own look at S0's finding and the fog.
+  Not examined further. The Volumes section's V5 is the other way to do
+  this, and the likelier one.
+- **One layer instead of a stack.** The turf could be drawn with no shells:
+  march the view ray through the texel grid inside the top face, as parallax
+  occlusion mapping does. No lines at shallow angles and one fragment per
+  pixel, but nothing rises past the block's outline. Worth a switch in S1
+  for the comparison, since both read the same strand heights.
+
+#### Not taking
+
+- **Shells as a band of their own** between the blades and the sprites.
+  The finding above: the bare ground is at the feet too, and that is where
+  shells show the most.
+- **Snow as shells.** `snowCover` is a heightfield: a depth per column,
+  pillow edges, tracks pressed in with a rim, melt. A stack of layers has no
+  thickness to walk down into. Where the two meet is S1 (strands through
+  thin snow) and S4 (the tracks' machinery).
+- **Round cone strands** past S0, and **the demo's lighting**: everything
+  here is lit by `computePointLightSource`.
+- **A draw or an object per shell**, and counts past 16 or so.
+
+### Volumes: ideas from Acerola's CS2 smoke
+
+Ideas; nothing is built. Drafted 2026-11-16 from
+`~/game-dev/CS2-Smoke-Grenades` (Acerola's Unity demo of Counter-Strike 2's
+smoke grenade; no license file, so a companion to read and not text to port)
+and a read of the fog (`computeFog` in
+[`chunkFaces.wgsl`](../resources/shaders/webgpu/chunkFaces.wgsl)), the god
+rays ([`godRays.wgsl`](../resources/shaders/webgpu/godRays.wgsl)), the lying
+snow ([`snow.wgsl`](../resources/shaders/webgpu/snow.wgsl)) and how enemies
+notice a player (`basicEnemyBehaviour.h`). The aim is to learn volume
+rendering by building it in WGSL, and to keep it where this game has
+something only a volume can show.
+
+**What the demo is.** Three parts, about 900 lines.
+
+- **The fill** (`Voxelizer.cs`, `Voxelize.compute`). A grid of quarter-unit
+  cells. The level's meshes are voxelized into a "solid" grid once (a
+  triangle-box test of every cell against every triangle). The smoke's seed
+  cell is set to 16. Each pass, an empty cell takes its six neighbours'
+  largest value less one; a solid cell beside smoke is set to 1, which stops
+  the spread there. After n passes a cell holds 16 less the length of the
+  shortest way to it from the seed, going round walls. An ellipsoid caps the
+  reach.
+- **The march** (`RenderSmoke.compute`). A compute pass over every pixel of a
+  full, half or quarter size target. It steps along the view ray until it
+  finds a smoke cell, then takes up to 64 steps of 0.05. At each step the
+  density is the cell value read with a hand-written trilinear blend, thinned
+  toward the fill's front and the ellipsoid's edge, and eaten away by a tiled
+  128³ Worley noise that scrolls. Eight more steps toward the light give the
+  smoke's own shadow. A phase function (Henyey-Greenstein, Mie or Rayleigh)
+  weights the light by angle. Bullet holes are a list of capsule distance
+  fields that cut the density.
+- **The composite** (`CompositeEffects.shader`). A 9-tap Catmull-Rom
+  upsample, a sharpen, and a mix over the frame by the smoke's mask.
+
+**Findings in the demo.** Take the math from a reference (Wrenninge's
+*Production Volume Rendering*, or the Frostbite and Nubis course notes) and
+read the demo for the shape of the thing.
+
+- The transmittance is `exp(-thickness * accumDensity * extinction)`, where
+  `thickness` and `accumDensity` are both running sums of the density along
+  the ray. The exponent grows with the square of the way through the smoke.
+  Beer-Lambert has one sum: `T *= exp(-sigma * density * step)`.
+- The light added at a step is not multiplied by the step's length, so
+  halving the step doubles the brightness. The colour also starts at the
+  smoke's own colour and not at black, and is clamped to 1.
+- The light is always overhead. The shadow march goes straight up and the
+  phase function is given the angle to straight up; `_SunDirection` is
+  declared and never read.
+- The distance to the scene comes from the x components alone
+  (`-((origin - sceneWorldPos) / rayDir).x`), which fails as the ray turns
+  along z.
+- To find the smoke, every pixel steps 0.4 at a time for up to 200 units,
+  sky included. A ray against the grid's box gives where it enters and
+  leaves in six divisions.
+- A pixel that crosses the smoke at the default settings makes about 4600
+  buffer reads and 640 noise reads (64 steps, each 8 cell reads plus 8 light
+  steps of 8 more). The README's own word for the bullet holes is "not
+  performant".
+
+**What WebGPU changes.** These are the parts worth learning here.
+
+- **3D textures.** New to this renderer: `texture_3d<f32>`, a linear
+  sampler, and repeat addressing for a noise that tiles. The demo's
+  trilinear blend of eight buffer reads becomes one `textureSampleLevel`.
+  Inside a march loop it is always `textureSampleLevel`: `textureSample`
+  needs uniform control flow, as elsewhere in these shaders.
+- **Formats.** `r8unorm`, `rgba8unorm` and `rgba16float` can be filtered;
+  `r32float` cannot without the `Float32Filterable` feature. A compute
+  shader can write `rgba8unorm` and `rgba16float` storage textures; `r8unorm`
+  is not a storage format in core WebGPU. So a noise baked by compute goes
+  into `rgba8unorm`, which is a use for the other three channels: four
+  frequencies of Worley, mixed in the shader. To check against the vendored
+  headers and the validation layer, not taken from memory.
+- **No texture read and written in one pass.** The demo's fill writes a
+  second buffer and copies it back each pass. Here two textures and two bind
+  groups swap, as the bloom's levels do.
+- **A fragment pass over the box, not a compute pass over the screen.** Draw
+  the grid's box with its front faces culled and no depth test, so only the
+  pixels the box covers run, and the camera may be inside it. The pass has
+  no depth attachment, so the scene's depth can be bound as
+  `texture_depth_2d` and read with `textureLoad`, as the god rays do. The
+  output is premultiplied (`One, OneMinusSrcAlpha`) with `1 - T` as alpha.
+- **Banding.** Few steps show as rings. The start of each ray is moved by a
+  fraction of a step from `bayer4` or the tone mapper's gradient noise. With
+  no temporal filter the offset stays visible as a dither, which is this
+  game's grain already.
+- **Cost** is steps times reads per pixel, at whatever size the target is.
+  Measured with the present mode Immediate and the camera inside the smoke,
+  where the box covers the screen.
+
+**What this game changes.**
+
+- **The world is the grid.** No voxelizer: a block is solid or not. The
+  fill is a breadth-first walk of at most a few thousand blocks on the CPU,
+  run again when a block beside the smoke changes, so smoke pours through a
+  wall the moment it is broken. Every client runs the same fill from the
+  same blocks; the server sends only a seed, a tick and a size.
+- **The light is baked.** Every block has a sky level and a block-light
+  level (`Block::getSkyLight`, `getLight`). The fill can carry both into the
+  grid's spare channels, and the smoke is lit by the faces' own ambient
+  formula: orange round a `goblinTorch`, dark in an unlit stair, white
+  outdoors. That takes the place of most of the shadow march, which is eight
+  ninths of the demo's cost.
+- **The look.** Soft bicubic smoke would sit oddly beside dithered foam and
+  PSX snap. Opacity in a few bands with dithered edges (as
+  `heldLight.wgsl`'s bands), and noise read at 16 texels to a block, is the
+  version to try against the smooth one.
+- **It can mean something.** `basicEnemyBehaviour.h` gives an enemy a chance
+  to notice a player from distance and from the angle to where it looks; a
+  read found no test of what stands between them. A smoke's grid on the
+  server is such a test.
+
+| # | Milestone | Depends on | Type |
+|---|---|---|---|
+| V0 | The demo in WGSL: one smoke, with step views | | Learning |
+| V1 | The game's smoke: baked light, the game's grain | V0 | Mixed |
+| V2 | Goblins' smoke pots | V1 | Game-specific |
+| V3 | A window of the world's light as a 3D texture | | Mixed |
+| V4 | Mist: fog that lies in the world | V3 | Mixed |
+| V5 | Clouds | V0 | Mixed |
+
+#### V0. The demo in WGSL: one smoke, with step views
+
+**Demo:** the fill, the march and the phase functions, with the findings
+above corrected and the demo's own shadow march kept for now.
+
+**Here:** a chat command beside `/tp` puts a smoke at the block under the
+cursor. No gameplay.
+
+- The fill on the CPU, two cells to a block, into an `r8unorm` 3D texture
+  about 32 blocks across, with `writeTexture`.
+- The Worley noise baked once by a compute pass (the pattern is
+  `blockTextures.wgsl`'s), four frequencies in `rgba8unorm`.
+- The box pass after the glass and the water and before the exposure and
+  the bloom, onto the HDR colour at full size. The march ends at the scene's
+  depth. To look at: whether the water writes depth, and what smoke behind
+  glass and under water does.
+- **Views:** steps taken per pixel, the transmittance alone, the fill's
+  cell values as cubes, a slice of the noise.
+- **Cost:** frame time with the camera inside the smoke, at 16, 32 and 64
+  steps and at 0, 4 and 8 light steps.
+
+**Done when:** a smoke fills a goblin tower's room, goes round a corner and
+out of the door and not through the wall; walking through it shows no rings
+and no hard edge at the box; the cost table is in this file.
+
+#### V1. The game's smoke: baked light, the game's grain
+
+**Here:** what V0 measured, made cheap enough to keep and made to look like
+this game.
+
+- The grid becomes `rgba8unorm`: density, sky light, block light, and when
+  the fill reached the cell. The arrival time lets the shader grow the smoke
+  outward and ease each cell in, with no upload per tick.
+- Lit from the two light channels as the faces are. For the sun, a march of
+  two to four steps toward where it is, only where the sky level is high.
+- The fill spends a number of cells and not a number of steps, so a narrow
+  stair fills further than an open room. A step up costs less than a step
+  sideways, and a step down more: the smoke pools under a ceiling and leaves
+  by a hole in the roof. Cells open to the sky thin faster.
+- A half size target and an upsample that looks at depth: each full size
+  pixel takes, of the four low ones round it, the one nearest its own depth.
+  The demo's Catmull-Rom smears smoke over anything standing in front of it.
+- The banded, dithered version beside the smooth one, on a switch.
+- Mixed toward the sky copy by `computeFog` at its near face, so a far
+  smoke fades as the terrain does.
+- Up to four at once, each its own grid, drawn far to near. Two that
+  overlap blend wrongly; accepted.
+
+**Done when:** a smoke beside a goblin torch is orange on that side; a hole
+knocked in the wall lets it out; a goblin in front of it has no halo; the
+camera inside it costs under 2 ms at 1080p, or the number is written here
+with why.
+
+#### V2. Goblins' smoke pots
+
+**Demo:** the reason the grenade exists: it blocks sight.
+
+**Here:**
+
+- A pot item. A goblin that has noticed a player from a distance throws one
+  between them and closes in under it; a goblin tower drops them when
+  alarmed. The player can take and throw them too.
+- The server keeps each smoke's grid. The chance of being seen is scaled by
+  the transmittance along the line from the enemy's eyes to the player, so
+  it hides both sides. Hearing is unchanged.
+- Arrows are the bullet holes: an arrow's path cuts a capsule that closes
+  over a second or two. At most four, each tested against its bounds before
+  its distance. A `flamingArrow` lights the smoke from inside for as long as
+  it is in it.
+
+**Done when:** a goblin loses a player who steps into smoke and finds them
+again when they leave it or make a noise; a goblin's own pot covers its
+approach; an arrow leaves a tunnel that the far side shows through.
+
+#### V3. A window of the world's light as a 3D texture
+
+**Here:** V1 gives each smoke its own copy of the light. Fog needs the light
+everywhere near the camera: a 3D texture of about 96 by 64 by 96 blocks
+(`rgba8unorm`, 2.4 MB): solid or not, sky level, block-light level. It wraps
+as the snow's tracks do, so moving the camera uploads only the slab that
+came into range, and a chunk's bake updates its part.
+
+Other things could read it once it exists: the weather's particles, the
+creatures (lit by one factor each today, as milestone 12 left them), and
+anything else drawn in the air.
+
+**Done when:** a view shows a slice of it at the camera's height, right
+after a torch is placed and after walking a hundred blocks.
+
+#### V4. Mist: fog that lies in the world
+
+**Here:** `computeFog` is a haze by distance toward the sky copy, the same
+in a cave as on a hill, and the god rays are a blur on the screen that only
+exists while the sun is in view. Mist is the near field: the first 48 blocks
+or so, handing over to `computeFog` beyond.
+
+- **Froxels, not a march per pixel.** A 3D texture laid along the view
+  (about 160 by 90 by 64, `rgba16float`). One compute pass writes each
+  cell's density and the light scattered in it; a second sums them front to
+  back. Every surface then reads its own depth's cell with one sample: the
+  opaque faces, the water, the glass and the particles alike, which a march
+  that ends at the opaque depth cannot do. Mist is soft, so the coarse grid
+  holds. Smoke has edges and keeps its own box.
+- **Where it lies:** over water and in hollows at dawn (the weather's column
+  map has each column's height and kind), thicker under rain and as the
+  whiteout of heavy snow, and low in caves where the sky level is 0.
+- **What lights it:** the sky level, so none glows inside a sealed room; the
+  block light, so a torch has a halo in it; and with the `shadows` setting
+  on, the sun through the cascades, which gives shafts under trees and
+  through a window whether or not the sun is on screen. `shadows` is 0 by
+  default, so the shafts are the part that may not be seen.
+
+**Done when:** a river at dawn has mist on it that a hill's shadow cuts;
+a torch in a wet cave has a halo; glass and water in the mist take it
+correctly; there is no seam where `computeFog` takes over; the cost is
+written here.
+
+#### V5. Clouds
+
+**Here:** this replaces the Shells section's trial (a stack of noise layers).
+A slab between two heights, entered and left by arithmetic; V0's noise with
+one coarser frequency for the shapes; a march at quarter size into the sky
+copy before the world is drawn. `computeFog` mixes far terrain toward that
+copy, so hills fade into the clouds behind them with no further work.
+Clouds are far and slow: a sixteenth of the pixels a frame, the rest
+carried over, is the usual way to afford them. The weather sets the cover,
+in place of the grey laid over the sky. The same cover, read flat where the
+sun's ray meets the cloud height, is the clouds' shadow on the ground in
+`shade`.
+
+**Done when:** clouds have undersides and lit edges, thicken as rain comes
+in, and their shadows cross the ground with them. Not examined further.
+
+#### Smaller, or trials
+
+- **A drift against walls.** The suggestion on the table was a small 3D
+  occupancy beside vertical faces, meshed as a skirt or an isosurface. A
+  drift banked against a wall is still one height at each point of the
+  ground, and `snowBase` already shapes the depth inside a block from its
+  neighbours: where a neighbour is a wall, let the depth rise toward it in
+  the same quarter circle the pillow edge falls by. Two walls give a corner
+  twice as deep, and the weather's wind picks the lee side. That is the
+  whole request with no grid, and it is the first thing to try. What a
+  height per column cannot hold is a second level (snow under a tree or a
+  bridge as well as on it), snow on shapes that are not a block's top
+  (fences, slabs, stairs), and snow plastered on a trunk's windward side. A
+  second layer in the column map answers the first. An occupancy grid and
+  surface nets answer all three, as a meshing technique to learn for itself;
+  it shares V1's fill and nothing of the march.
+- **A furnace's smoke.** V1's rising fill from a working furnace: a room
+  with no chimney fills from the ceiling down.
+- **Gas.** The same smoke in another colour with an effect on whoever
+  stands in it, for a goblin shaman.
+- **Under water.** V4's cells with the underwater colour, and shafts from
+  the surface.
+- **Wisps, breath, dust, the mist at a river step.** Particles (the
+  weather's machinery), not volumes: each is smaller than a grid cell worth
+  marching. They gain from V3's light and from fading where they meet the
+  scene's depth.
+
+#### Not taking
+
+- **The mesh voxelizer**, and **the fill on the GPU** a pass a tick with a
+  copy back.
+- **The search for the volume by stepping**, and **a compute pass over the
+  whole screen.**
+- **The demo's transmittance, its overhead light and its depth from x.**
+- **The Catmull-Rom upsample and the sharpen.**
+- **A list of holes** tested at every step past a few capsules.
+- **A fluid simulation.** Velocity and pressure on a 3D grid is the real
+  thing and another project. The fill and a scrolling noise are what a
+  smoke that blocks sight needs.
+- **A volume per torch** or per small effect.
+
 ## Integration approach
 
 space-game swapped gl2d for `wgpu2d` with a namespace alias. That still works

@@ -2534,6 +2534,29 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				ImGui::SliderFloat("Grass blade reach", &programData.renderer.grassRadius, 4, 48);
 				ImGui::SliderFloat("Grass blade density", &programData.renderer.grassDensity, 0, 1);
 				ImGui::SliderFloat("Short grass clumps", &programData.renderer.grassClumps, 0, 1);
+				// Roadmap S0: the shell-texturing demo on the grass tops,
+				// with the demo's own parameters.
+				if (ImGui::TreeNode("Shells"))
+				{
+					ShellSettings &shells = programData.renderer.shells;
+					ImGui::SliderInt("Shell count", &shells.count, 0, 64);
+					bool byLayer = shells.view != 0;
+					ImGui::Checkbox("Colour by layer", &byLayer);
+					shells.view = byLayer ? 1 : 0;
+					ImGui::SliderFloat("Shell length", &shells.length, 0, 1);
+					ImGui::SliderFloat("Distance attenuation", &shells.distanceAttenuation, 0.01f, 3);
+					ImGui::SliderFloat("Density", &shells.density, 1, 64, "%.0f");
+					ImGui::SliderFloat("Noise min", &shells.noiseMin, 0, 1);
+					ImGui::SliderFloat("Noise max", &shells.noiseMax, 0, 1);
+					ImGui::SliderFloat("Thickness", &shells.thickness, 0, 10);
+					ImGui::SliderFloat("Curvature", &shells.curvature, 0.01f, 10);
+					ImGui::SliderFloat("Displacement strength", &shells.displacementStrength, 0, 1);
+					ImGui::ColorEdit3("Shell colour", &shells.color[0]);
+					ImGui::SliderFloat("Occlusion attenuation", &shells.occlusionAttenuation, 0, 5);
+					ImGui::SliderFloat("Occlusion bias", &shells.occlusionBias, 0, 1);
+					ImGui::SliderFloat("Shell reach", &shells.reach, 0, 48);
+					ImGui::TreePop();
+				}
 				ImGui::Checkbox("Wet ground and puddles", &programData.renderer.wetGround);
 				if (programData.renderer.wetGround)
 				{
@@ -2603,6 +2626,19 @@ bool gameplayFrame(float deltaTime, int w, int h, ProgramData &programData)
 				ImGui::SliderFloat("exposure", &gameData.adaptiveExposure.currentExposure, 0.001, 10);
 				ImGui::Combo("Tonemapper", &programData.renderer.
 					shadingSettings.tonemapper, "ACES\0AgX\0ZCAM\0");
+
+				// Roadmap L0: one part of the light alone (no fog or
+				// reflections, the exposure held), the diffuse model, and
+				// one roughness and metallic for everything.
+				ImGui::Combo("Light shown", &programData.renderer.lightView,
+					"All\0Diffuse (sun and light blocks)\0Specular (sun and light blocks)\0Ambient\0");
+				ImGui::Combo("Diffuse model", &programData.renderer.diffuseModel, "The game's\0Lambert\0");
+				ImGui::Checkbox("##overrideRoughness", &programData.renderer.overrideRoughness);
+				ImGui::SameLine();
+				ImGui::SliderFloat("roughness for all", &programData.renderer.roughnessOverride, 0, 1);
+				ImGui::Checkbox("##overrideMetallic", &programData.renderer.overrideMetallic);
+				ImGui::SameLine();
+				ImGui::SliderFloat("metallic for all", &programData.renderer.metallicOverride, 0, 1);
 
 				ImGui::SliderFloat3("Sky pos", &programData.renderer.sunPos[0], -1, 1);
 

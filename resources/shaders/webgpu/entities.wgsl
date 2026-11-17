@@ -277,15 +277,17 @@ fn entityAlbedo(in: EntityOutput) -> vec4f {
 // A model in the world's light, as chunkFaces.wgsl's shade lights a block
 // face: the sun or moon (its color and direction from the time of day and the
 // weather) with its shadow, the ambient light, and the light blocks. Rough and
-// not metal; no ambient occlusion.
+// not metal (but for the panel's override, lighting.wgsl's overrideRoughness);
+// no ambient occlusion.
 fn lightEntity(albedo: vec3f, packedLight: u32, relative: vec3f, N: vec3f, fragCoord: vec2f) -> vec3f {
     let levels = lightLevels(packedLight);
     let viewDepth = -(u.view * vec4f(relative, 1.0)).z;
     let shadow = sunShadow(relative, viewDepth, dot(u.sunDirection.xyz, N), fragCoord);
     let ambient = computeAmbient(withHeldLight(levels, relative, N), N, 1.0, false, 1.0, shadow);
 
-    let roughness = 0.9;
-    let F0 = vec3f(0.04);
+    let roughness = overrideRoughness(0.9);
+    let metallic = overrideMetallic(0.0);
+    let F0 = mix(vec3f(0.04), albedo, metallic);
     let V = -normalize(relative);
     // The block this point is in and where in it (blocks are centered on
     // their integer position), for the point lights.
@@ -293,9 +295,10 @@ fn lightEntity(albedo: vec3f, packedLight: u32, relative: vec3f, N: vec3f, fragC
     let cell = floor(world + vec3f(0.5));
     let blockPos = u.positionInt.xyz + vec3i(cell);
 
-    var color = pointLights(levels, blockPos, world - cell, 0.0, roughness, V, albedo, N, F0, vec3f(1.0));
-    color += sunLight(levels, 0.0, roughness, V, albedo, N, F0, 1.0, shadow, vec3f(1.0));
-    return color + albedo * ambient;
+    let direct = lobesSum(
+        pointLights(levels, blockPos, world - cell, metallic, roughness, V, albedo, N, F0, vec3f(1.0)),
+        sunLight(levels, metallic, roughness, V, albedo, N, F0, 1.0, shadow, vec3f(1.0)));
+    return lightShown(direct, albedo * ambient);
 }
 
 @fragment

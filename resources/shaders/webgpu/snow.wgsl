@@ -188,16 +188,19 @@ fn fs_snow(in: SnowOutput) -> GBuffer {
     let world = u.positionFloat.xyz + in.relative;
     let worldCell = floor(world + vec3f(0.5));
     let blockPos = u.positionInt.xyz + vec3i(worldCell);
-    var color = pointLights(levels, blockPos, world - worldCell, 0.0, roughness, V, albedo, N, F0, vec3f(1.0));
-    color += sunLight(levels, 0.0, roughness, V, albedo, N, F0, 1.0, shadow, vec3f(1.0));
-    color += albedo * ambient;
+    var direct = lobesSum(
+        pointLights(levels, blockPos, world - worldCell, 0.0, roughness, V, albedo, N, F0, vec3f(1.0)),
+        sunLight(levels, 0.0, roughness, V, albedo, N, F0, 1.0, shadow, vec3f(1.0)));
 
     // Crystals that catch the sun: a few texels (finer than the speckle)
     // flash, different ones as the eye moves.
     let grain = floor(fract(in.trailUV) * snow.params.z * 2.0);
     let turn = floor(dot(V, vec3f(17.0, 9.0, 13.0)));
     let glint = step(0.994, hash2(grain + vec2f(turn * 7.0, turn * 3.0)));
-    color += u.sunLightColor.rgb * (glint * shadow * max(dot(N, u.sunDirection.xyz), 0.0) * 0.5 * lowSunStrength());
+    // (Mirrored sunlight, so it counts with the specular lobe.)
+    direct.specular += u.sunLightColor.rgb
+        * (glint * shadow * max(dot(N, u.sunDirection.xyz), 0.0) * 0.5 * lowSunStrength());
+    let color = lightShown(direct, albedo * ambient);
 
     var out: GBuffer;
     out.color = vec4f(applyWeatherFog(color, in.relative, N, levels.skyUnchanged), 1.0);

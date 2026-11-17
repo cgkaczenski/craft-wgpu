@@ -160,6 +160,10 @@ struct VertexOutput {
     // which blade it is (bladeDissolved); for a face, y is how much of a
     // tall-grass sprite has given way to blades, 0..1 (spriteDissolved).
     @location(13) blade: vec4f,
+    // For a shell layer (vs_shell): x its height among the layers, above 0
+    // to under 1, y which layer it is, zw the place on the block's top, 0..1
+    // each way (the demo's uv). 0 for everything else.
+    @location(14) shell: vec4f,
 };
 
 // The texture coordinates to read with: affine in the PSX look.
@@ -965,6 +969,195 @@ fn fs_bladeDepth(in: VertexOutput) {
     if (bladeDissolved(in)) { discard; }
 }
 
+// ---- Shells ---------------------------------------------------------------
+// Roadmap S0: Acerola's shell-texturing demo (Shell.shader, SimpleShell.cs),
+// on the grass tops near the camera instead of on a ball. For looking at
+// the technique: off unless the panel's "Shells" or OURCRAFT_SHELLS turns
+// it on.
+//
+// The idea: a surface is drawn again and again, each copy (a shell, a
+// layer) a little farther out along its normal. Every layer is cut full of
+// holes, and the holes grow from one layer to the next, so what is left
+// standing through the stack is strands: a strand is the same small disc on
+// layer after layer, shrinking to nothing at its own height.
+//
+// What is the demo's, under the demo's names (u.shellShape and the rest):
+// where a layer lies (vs_shell: the length and its distance attenuation),
+// the push that leaves the roots where they are (the curvature and the
+// displacement strength), the strands (shellCut: the density, the noise's
+// range, the thickness) and the dark roots (shellOcclusion: the attenuation
+// and the bias).
+//
+// What is different, and why:
+//  - One draw. The demo makes an object per layer, each with its own draw
+//    and its own copy of every uniform. Here an instance is a cell (the
+//    blades' own list, grassCells) and the vertex index says which layer
+//    and which corner, as it says which blade in vs_blade. The uniforms are
+//    set once.
+//  - Layer 0 is not drawn: it is the block's own top, which is there
+//    already. The top takes layer 0's colour instead (shellGround, shade).
+//    The demo's layer 0 is the ball itself, never cut, for the same reason:
+//    no holes to see through.
+//  - A strand's number is its place in the world in whole numbers, so the
+//    strands of two blocks never repeat. The demo's `x + 100 * y` repeats
+//    along diagonals once the density passes 100.
+//  - The light. The demo's is half Lambert, squared: on a top, where every
+//    layer faces up, that is one number for the whole lawn. So the layers
+//    are lit as the top is (shade), and only the roots' darkening is kept.
+//  - The cost is the pixels: a lawn that fills the screen is shaded once
+//    per layer. With the depth prepass the layers' depth goes down first,
+//    with a fragment stage that only cuts the holes (fs_shellDepth), and
+//    the light is worked out once a pixel, where the depth is Equal
+//    (fs_shell). The layers are drawn top first, so that what is under a
+//    strand can fail the depth test.
+
+// The demo's hash, Hugo Elias's: a whole number shuffled to 0..1. (Its last
+// constant is written 0x1376312589 there, more than 32 bits hold; this is
+// what is left of it.)
+fn shellHash(seed: u32) -> f32 {
+    var n = seed;
+    n = (n << 13u) ^ n;
+    n = n * (n * n * 15731u + 0x789221u) + 0x76312589u;
+    return f32(n & 0x7fffffffu) / 2147483647.0;
+}
+
+// How much light reaches a strand at height `h` (0 the root, 1 the tip of
+// the tallest): the demo's stand-in for the shade of the strands around
+// it, an exponent that keeps the dark low down and a bias so it isn't black.
+fn shellOcclusion(h: f32) -> f32 {
+    var occlusion = u.shellShade.y;
+    if (h > 0.0) { occlusion += pow(h, u.shellShade.x); }
+    return clamp(occlusion, 0.0, 1.0);
+}
+
+// Whether this pixel of a layer is one of its holes.
+fn shellCut(in: VertexOutput) -> bool {
+    // The top's 0..1 stretched over `density` cells each way: a strand a
+    // cell. The whole part says which cell, the rest where in it, moved to
+    // -1..1 so the cell's middle is 0.
+    let density = u.shellStrands.x;
+    let newUV = in.shell.zw * density;
+    let localUV = fract(newUV) * 2.0 - 1.0;
+    let fromCentre = length(localUV);
+
+    // The strand's number, and from it its height: somewhere in the
+    // noise's range.
+    let tid = in.blockPos.xz * i32(density) + vec2i(floor(newUV));
+    let seed = bitcast<u32>(tid.x) * 0x8da6b343u ^ bitcast<u32>(tid.y) * 0xd8163841u;
+    let rand = mix(u.shellStrands.z, u.shellStrands.w, shellHash(seed));
+
+    // A strand is a cone: as wide as the thickness at its root, a point at
+    // its own height, nothing above. Past the cone's edge is a hole.
+    let h = in.shell.x;
+    return fromCentre > u.shellStrands.y * (rand - h);
+}
+
+// A top the shells stand on (the blades' ground, in the shells' reach): it
+// is layer 0, and is coloured as one.
+fn shellGround(in: VertexOutput) -> bool {
+    if ((in.flags & bladeGroundFlag) == 0u || u.shellShape.x < 2.0) { return false; }
+    let cell = in.blockPos + vec3i(0, 1, 0);
+    let cellRelative = vec3f(cell - u.positionInt.xyz) - u.positionFloat.xyz;
+    return length(cellRelative.xz) < u.shellShape.w;
+}
+
+// The layer view (u.shellColour.w): a layer's own colour, four taking
+// turns, so two layers next to each other are told apart; the top is black.
+// A white ring lies every 4 blocks from the camera, to read distances off.
+fn shellLayerColour(layer: u32, relative: vec3f) -> vec3f {
+    const colours = array<vec3f, 4>(
+        vec3f(0.9, 0.12, 0.1), vec3f(0.9, 0.75, 0.08), vec3f(0.1, 0.7, 0.2), vec3f(0.12, 0.35, 0.95));
+    let away = length(relative.xz);
+    if (away > 2.0 && abs(fract(away / 4.0 + 0.5) - 0.5) * 4.0 < 0.03) { return vec3f(0.8); }
+    if (layer == 0u) { return vec3f(0.0); }
+    return colours[layer % 4u] * 0.3;
+}
+
+@vertex
+fn vs_shell(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = bladeHidden;
+
+    let layers = u32(u.shellShape.x);
+    if (layers < 2u) { return out; }
+    let cell = grassCells[instance];
+    let cellRelative = vec3f(cell.xyz - u.positionInt.xyz) - u.positionFloat.xyz;
+    if (length(cellRelative.xz) >= u.shellShape.w) { return out; }
+
+    // Six vertices a layer: the four corners of the top as a strip, the
+    // first and the last doubled to join it to the next layer with
+    // triangles of no area. The top layer first.
+    let layer = layers - 1u - vertexIndex / 6u;
+    let corner = u32(clamp(i32(vertexIndex % 6u) - 1, 0, 3));
+    let at = vec2f(f32(corner & 1u), f32(corner >> 1u));
+
+    // The layer's height among the layers, 0..1, and where that puts it:
+    // the exponent crowds the layers toward the top (under 1) or the tips
+    // (over 1).
+    let h = f32(layer) / f32(layers);
+    let height = pow(h, u.shellShape.z);
+    var relative = cellRelative + vec3f(at.x - 0.5, -0.5 + u.shellShape.y * height, at.y - 0.5);
+
+    // The push: all of it at the tips, less lower down by the curvature,
+    // none at the root. The demo's direction follows the ball about and
+    // falls at rest; this one is fixed, downwind.
+    let k = pow(height, u.shellPush.w);
+    relative += u.shellPush.xyz * k * u.shellShade.z;
+
+    out.position = psxSnap(u.viewProjection * vec4f(relative, 1.0));
+    out.uv = at;
+    out.affineUV = at;
+    out.layer = 0u;
+    out.normalLayer = 0u;
+    out.materialLayer = 0u;
+    out.ambientMultiplier = vertexColor[2];
+    out.relative = relative;
+    out.normal = vec3f(0.0, 1.0, 0.0);
+    out.flags = 0u;
+    out.blockPos = cell.xyz;
+    out.inBlock = relative - cellRelative;
+    out.light = u32(cell.w) & 0xFFu;
+    out.colors = 0u;
+    out.blade = vec4f(0.0);
+    out.shell = vec4f(h, f32(layer), at);
+    return out;
+}
+
+// The layers' depth prepass: only the holes.
+@fragment
+fn fs_shellDepth(in: VertexOutput) {
+    if (shellCut(in)) { discard; }
+}
+
+// A layer lit: the shell's colour, darker toward the root, in the light the
+// top would have there. No picture is read: flat, rough, not metal.
+@fragment
+fn fs_shell(in: VertexOutput) -> GBuffer {
+    var t: Texels;
+    t.albedo = vec4f(fromLinear(u.shellColour.rgb * shellOcclusion(in.shell.x)), 1.0);
+    t.normalMap = vec3f(0.5, 0.5, 1.0);
+    t.material = vec3f(0.05, 0.0, 0.0);
+    t.ao = 1.0;
+    t.water.p = vec2f(0.0);
+    t.water.dx = vec2f(0.0);
+    t.water.dy = vec2f(0.0);
+    t.footprint = max(length(dpdx(in.relative)), length(dpdy(in.relative)));
+    // After the prepass Equal has dropped the holes already; this is for
+    // the prepass off.
+    if (shellCut(in)) { discard; }
+
+    let s = shade(in, t, true);
+    var lit = s.color;
+    if (!lobeView()) { lit = reflectSurface(in, s).color; }
+    var out: GBuffer;
+    out.color = vec4f(applyFog(in, lit), 1.0);
+    if (u.shellColour.w != 0.0) { out.color = vec4f(shellLayerColour(u32(round(in.shell.y)), in.relative), 1.0); }
+    out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, s.roughness);
+    out.normal = packNormal(s.normal);
+    out.bloom = vec4f(s.bloom, 0.0);
+    return out;
+}
+
 // Milestone 13: the sun's shadow maps (renderShadow, zpass.vert with the
 // cascade's matrix). The same corner, placed by a cascade's matrix instead
 // of the camera's; fs_depth's alpha test lets leaves and grass cast their
@@ -1297,6 +1490,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     // (On water those bits say which way it runs, not a paint.)
     if (!water) { albedo = paintAlbedo(albedo, in.colors); }
     if (bladeGroundShaded(in)) { albedo *= bladeGroundShade; }
+    // Under the shells the top is their layer 0: their colour, at the root.
+    if (in.shell.x == 0.0 && shellGround(in)) { albedo = u.shellColour.rgb * shellOcclusion(0.0); }
 
     // The snow weather's cover: the tops of blocks under the open sky (the
     // sky light above them unblocked) whiten as it snows, keeping some of
@@ -1396,11 +1591,13 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     if (water) { F0 = vec3f(waterF0); }
     F0 = mix(F0, vec3f(0.02), wet.puddle);
 
-    var color = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0, caustics);
+    let blockLights = pointLights(levels, in.blockPos, in.inBlock, m.metallic, m.roughness, V, albedo, N, F0, caustics);
     var sunN = N;
     if (isGrass(in)) { sunN = sunNormal; }
-    let sun = sunLight(levels, m.metallic, m.roughness, V, albedo, sunN, F0, ao, shadow, caustics);
-    color += sun;
+    let sunLobes = sunLight(levels, m.metallic, m.roughness, V, albedo, sunN, F0, ao, shadow, caustics);
+    let sun = lobesTotal(sunLobes);
+    let direct = lobesSum(blockLights, sunLobes);
+    let color = lobesTotal(direct);
 
     var s: Shaded;
     s.dotNV = dot(N, V);
@@ -1410,6 +1607,8 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     var lit = color + albedo * ambient;
     // (Water's is done on its whole colour, in waterColour.)
     if (!water) { lit = underWaterFog(lit, length(in.relative)); }
+    // One part of the light alone (roadmap L0), as it left the surface.
+    if (lobeView()) { lit = lightShown(direct, albedo * ambient); }
     s.alpha = 1.0 - (1.0 - t.albedo.a) * s.dotNV;
     // GL's ambient without its physically accurate reflections (switched
     // off by a constant): the albedo in the ambient light.
@@ -1419,6 +1618,7 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     s.bloom = m.emissive * 0.12 * albedo;
     // The brightest caustics glow (GL adds this to out_bloom with the sun).
     if (causticsPower > 1.2) { s.bloom += max(sun, vec3f(4.0)) * 0.0008; }
+    if (lobeView()) { s.bloom = vec3f(0.0); }
     s.F0 = F0;
     s.puddle = wet.puddle;
     s.crest = wet.crest + ringCrest;
@@ -1692,7 +1892,7 @@ fn horizonFogAmount(distance: f32) -> f32 {
 // GL's last step: the color toward the sky behind it, above water; then
 // the weather's fog.
 fn applyFog(in: VertexOutput, color: vec3f) -> vec3f {
-    if (u.fogParams.z != 0.0) { return color; }
+    if (u.fogParams.z != 0.0 || lobeView()) { return color; }
     let sky = textureLoad(skyColor, vec2i(in.position.xy), 0).rgb;
     let fogged = mix(sky, color, computeFog(length(in.relative), f32(in.blockPos.y) + in.inBlock.y));
     return applyWeatherFog(fogged, in.relative, in.normal, lightLevels(in.light).skyUnchanged);
@@ -2007,10 +2207,12 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> GBuffe
     // A blade's normal already faces the camera, whichever way its strip
     // winds.
     let s = shade(in, t, frontFacing || in.blade.x > 0.0);
-    var lit = reflectSurface(in, s).color;
+    var lit = s.color;
+    if (!lobeView()) { lit = reflectSurface(in, s).color; }
     if (in.blade.x > 0.0) { lit *= in.blade.y; }
     var out: GBuffer;
     out.color = vec4f(applyFog(in, lit), 1.0);
+    if (u.shellColour.w != 0.0 && shellGround(in)) { out.color = vec4f(shellLayerColour(0u, in.relative), 1.0); }
     out.position = vec4f((u.view * vec4f(in.relative, 1.0)).xyz, s.roughness);
     out.normal = packNormal(s.normal);
     out.bloom = vec4f(s.bloom, 0.0);
@@ -2065,6 +2267,13 @@ fn fs_blend(in: VertexOutput, @builtin(front_facing) frontFacing: bool) -> Blend
     if (t.albedo.a <= 0.0) { discard; }
 
     let s = shade(in, t, frontFacing);
+
+    // One part of the light alone (roadmap L0): glass and ice by their
+    // alpha as ever, water opaque (it has no colour of its own, so only the
+    // lights' glints on it show, in the specular view).
+    if (lobeView()) {
+        return blendOutput(in, s, vec4f(s.color, select(s.alpha, 1.0, isWater(in))));
+    }
 
     // Glass and ice: lit, with GL's alpha (more opaque at grazing angles).
     if (!isWater(in)) {

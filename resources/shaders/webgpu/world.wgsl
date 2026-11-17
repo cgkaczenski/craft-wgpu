@@ -86,6 +86,28 @@ struct Uniforms {
     // straight up, and rgb what it gains toward the horizon (skyToward).
     skyZenith: vec4f,
     skyHorizon: vec4f,
+    // For looking at the lighting (roadmap L0; lighting.wgsl's Lobes): x the
+    // part of the light shown alone (0 all of it, 1 the lights' diffuse, 2
+    // their specular, 3 the ambient), y the diffuse model (0 the game's, 1
+    // Lambert), z and w a roughness and a metallic for every block face and
+    // entity in place of their own (below 0: their own).
+    lightDebug: vec4f,
+    // Shells (roadmap S0; chunkFaces.wgsl's vs_shell), the demo's
+    // parameters. shellShape: x how many layers, the block's own top being
+    // layer 0 (0: off), y how far the last stands off the top, in blocks, z
+    // the exponent on a layer's height that places it, w how far from the
+    // camera they are drawn, in blocks. shellStrands: x strands across a
+    // block, y a strand's width at its root, z and w the least and most of
+    // a strand's height. shellPush: xyz the direction the layers are pushed
+    // in, w the exponent that says how much of it the lower layers take.
+    // shellColour: rgb linear, w 1 to colour each pixel by its layer.
+    // shellShade: x the exponent on the height that darkens the roots, y
+    // what is added to it, z how far the last layer is pushed, in blocks.
+    shellShape: vec4f,
+    shellStrands: vec4f,
+    shellPush: vec4f,
+    shellColour: vec4f,
+    shellShade: vec4f,
     // The rings on the water where something meets its surface
     // (waterRipples.cpp; chunkFaces.wgsl's surfaceRipples), two vectors
     // each: xyz its middle, from the camera, w its age in seconds; then x
@@ -144,6 +166,8 @@ fn weatherFogAmount(distance: f32) -> f32 {
 // light's warm tint. So the bands hold their brightness through the
 // fog, where a fog that stayed night-dark would swallow the outer ones.
 fn applyWeatherFog(color: vec3f, relative: vec3f, normal: vec3f, skyUnchanged: i32) -> vec3f {
+    // One part of the light shown alone (u.lightDebug.x) is shown without fog.
+    if (u.lightDebug.x != 0.0) { return color; }
     let open = clamp(f32(skyUnchanged - 12) / 3.0, 0.0, 1.0);
     let amount = weatherFogAmount(length(relative)) * max(open, 1.0 - u.indoors.x);
     if (amount <= 0.0) { return color; }

@@ -14,6 +14,9 @@
 //   shadow    the sun's cascaded shadow maps (milestone 13), on the sun term
 //             and on the sky part of the ambient: sunShadow
 //
+// Each light comes back as its two lobes, diffuse and specular (roadmap L0:
+// Lobes), so that either, or the ambient, can be shown alone: lightShown.
+//
 // The fog toward the sky (milestone 14), the reflections (milestone 17) and
 // the underwater darkening (milestone 18) are chunkFaces.wgsl's, as are the
 // water's moving normal and the caustics (18-parity), which reach the lights
@@ -219,17 +222,65 @@ fn diffuseOrenNayar2(color: vec3f, roughness: f32, L: vec3f, V: vec3f, N: vec3f)
     return color * (A + B * s / t);
 }
 
+// ---- Lobes (roadmap L0) ---------------------------------------------------
+
+// A light's two parts, kept apart so each can be looked at alone
+// (u.lightDebug.x; the client control panel's "Light Stuff", or
+// OURCRAFT_LIGHT_VIEW): what the surface scatters every way, in its own
+// colour, and what it mirrors, in the light's. The frame is their sum.
+struct Lobes {
+    diffuse: vec3f,
+    specular: vec3f,
+};
+
+fn lobesSum(a: Lobes, b: Lobes) -> Lobes {
+    return Lobes(a.diffuse + b.diffuse, a.specular + b.specular);
+}
+
+fn lobesTimes(l: Lobes, k: f32) -> Lobes {
+    return Lobes(l.diffuse * k, l.specular * k);
+}
+
+fn lobesTotal(l: Lobes) -> vec3f {
+    return l.diffuse + l.specular;
+}
+
+// Whether one part of the light is shown alone. Then the fog, the
+// reflections and the water's own mixing are left out, so that what is on
+// the screen is that part and nothing else.
+fn lobeView() -> bool {
+    return u.lightDebug.x != 0.0;
+}
+
+// The light a surface sends to the eye: the lights' lobes and the ambient
+// (already times the albedo), or the one part asked for.
+fn lightShown(direct: Lobes, ambient: vec3f) -> vec3f {
+    switch i32(u.lightDebug.x) {
+        case 1: { return direct.diffuse; }
+        case 2: { return direct.specular; }
+        case 3: { return ambient; }
+        default: { return direct.diffuse + direct.specular + ambient; }
+    }
+}
+
+// The diffuse model (u.lightDebug.y): the game's, or Lambert's (the same
+// in every direction) to compare it against.
+fn diffuseLobe(color: vec3f, roughness: f32, L: vec3f, V: vec3f, N: vec3f) -> vec3f {
+    if (u.lightDebug.y == 1.0) { return color / PI; }
+    return diffuseOrenNayar2(color, roughness, L, V, N);
+}
+
 // One light from direction L (toward the light), of color lightColor.
 fn computePointLightSource(L: vec3f, metallic: f32, roughness: f32, lightColor: vec3f,
-    V: vec3f, color: vec3f, N: vec3f, F0: vec3f) -> vec3f {
+    V: vec3f, color: vec3f, N: vec3f, F0: vec3f) -> Lobes {
     let dotNVclamped = clamp(dot(N, V), 0.0, 0.99);
     let H = normalize(L + V);
     let F = fresnelSchlick(max(dot(H, V), 0.0), F0);
     let specular = fSpecular(N, H, V, L, dotNVclamped, roughness, F);
     let kD = (vec3f(1.0) - F) * (1.0 - metallic); // what Fresnel leaves; metals have none
-    let diffuse = diffuseOrenNayar2(color, roughness, L, V, N);
-    let NdotL = max(dot(N, L), 0.0);
-    return (kD * diffuse + specular) * lightColor * NdotL;
+    let diffuse = diffuseLobe(color, roughness, L, V, N);
+    let light = lightColor * max(dot(N, L), 0.0);
+    return Lobes(kD * diffuse * light, specular * light);
 }
 
 // ---- Normal maps ----------------------------------------------------------
@@ -429,8 +480,8 @@ fn atenuationFunction(dist: f32) -> f32 {
 // and its light could reach this face's level by block steps (GL's test on
 // the Manhattan distance), so lights behind walls stay dark.
 fn pointLights(levels: LightLevels, blockPos: vec3i, inBlock: vec3f, metallic: f32, roughness: f32,
-    V: vec3f, albedo: vec3f, N: vec3f, F0: vec3f, caustics: vec3f) -> vec3f {
-    var color = vec3f(0.0);
+    V: vec3f, albedo: vec3f, N: vec3f, F0: vec3f, caustics: vec3f) -> Lobes {
+    var color = Lobes(vec3f(0.0), vec3f(0.0));
     if (levels.block == 0) { return color; }
     let count = u32(max(u.lightParams.y, 0));
     for (var i = 0u; i < count; i++) {
@@ -443,8 +494,8 @@ fn pointLights(levels: LightLevels, blockPos: vec3i, inBlock: vec3f, metallic: f
         let manhattan = f32(dot(abs(blockPos - light), vec3i(1)));
         if ((15.0 - manhattan) + 0.1 > f32(levels.block)) { continue; }
         L = normalize(L);
-        color += computePointLightSource(L, metallic, roughness, caustics, V, albedo, N, F0)
-            * atenuationFunction(lightDist) * ((f32(levels.block) / 15.0) + 1.0) / 2.0;
+        color = lobesSum(color, lobesTimes(computePointLightSource(L, metallic, roughness, caustics, V, albedo, N, F0),
+            atenuationFunction(lightDist) * ((f32(levels.block) / 15.0) + 1.0) / 2.0));
     }
     return color;
 }
@@ -452,8 +503,9 @@ fn pointLights(levels: LightLevels, blockPos: vec3i, inBlock: vec3f, metallic: f
 // The sun (or moon) on a face that sees the sky. `caustics` tints the
 // light, as on the point lights (1 out of water).
 fn sunLight(levels: LightLevels, metallic: f32, roughness: f32, V: vec3f, albedo: vec3f, N: vec3f,
-    F0: vec3f, ao: f32, shadow: f32, caustics: vec3f) -> vec3f {
-    if (levels.skyUnchanged <= 3) { return vec3f(0.0); }
+    F0: vec3f, ao: f32, shadow: f32, caustics: vec3f) -> Lobes {
+    let none = Lobes(vec3f(0.0), vec3f(0.0));
+    if (levels.skyUnchanged <= 3) { return none; }
     var color = u.sunLightColor.rgb * 1.9;
     // Less where little sky light reaches, and a little less at full light.
     color *= clamp(1.0 - (f32(15 - levels.skyUnchanged) / 9.0), 0.0, 1.0);
@@ -463,8 +515,9 @@ fn sunLight(levels: LightLevels, metallic: f32, roughness: f32, V: vec3f, albedo
     // Weaker low down (lowSunStrength), as the shadows fade.
     color *= mix(0.6, 1.0, lowSunStrength());
     let L = u.sunDirection.xyz;
-    if (dot(L, vec3f(0.0, 1.0, 0.0)) <= -0.2) { return vec3f(0.0); }
-    return computePointLightSource(L, metallic, roughness, color * caustics, V, albedo, N, F0) * shadow * sqrt(ao);
+    if (dot(L, vec3f(0.0, 1.0, 0.0)) <= -0.2) { return none; }
+    return lobesTimes(computePointLightSource(L, metallic, roughness, color * caustics, V, albedo, N, F0),
+        shadow * sqrt(ao));
 }
 
 // How much of the sun's (or moon's) shadows and direct light there is by
@@ -500,8 +553,21 @@ struct Material {
 
 fn material(texel: vec3f) -> Material {
     var m: Material;
-    m.roughness = clamp(pow(1.0 - texel.r, 2.0), 0.09, 0.99);
-    m.metallic = clamp(pow(texel.g, 0.5), 0.0, 0.98);
+    m.roughness = overrideRoughness(clamp(pow(1.0 - texel.r, 2.0), 0.09, 0.99));
+    m.metallic = overrideMetallic(clamp(pow(texel.g, 0.5), 0.0, 0.98));
     m.emissive = texel.b;
     return m;
+}
+
+// The panel's roughness and metallic for everything (u.lightDebug.zw), in
+// the material map's ranges; below 0, the surface's own. What the weather
+// does to a face (wet, snowed on) and water's own surface come after.
+fn overrideRoughness(own: f32) -> f32 {
+    if (u.lightDebug.z < 0.0) { return own; }
+    return clamp(u.lightDebug.z, 0.09, 0.99);
+}
+
+fn overrideMetallic(own: f32) -> f32 {
+    if (u.lightDebug.w < 0.0) { return own; }
+    return clamp(u.lightDebug.w, 0.0, 0.98);
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <rendering/postModifiers.h>
+#include <rendering/shellSettings.h>
 #include <unordered_map>
 
 // The WebGPU side of the 3D renderer, beside the OpenGL Renderer. Milestone 5
@@ -294,6 +295,14 @@ namespace wgpuWorld
 		// puddles).
 		float wetness = 0;
 		float rainOnGround = 0;
+		// For looking at the lighting (Renderer's lightView and the rest):
+		// the part of the light shown alone (0 all), the diffuse model (0
+		// the game's, 1 Lambert), and a roughness and a metallic for every
+		// block face and entity (below 0: their own).
+		int lightView = 0;
+		int diffuseModel = 0;
+		float roughnessOverride = -1;
+		float metallicOverride = -1;
 		// Grass blades (chunkFaces.wgsl's vs_blade): how far from the camera
 		// they reach, in blocks (0: none, the tall-grass sprites whole), how
 		// dense, 0..1, and the wind that bends them, 0..1.
@@ -301,6 +310,8 @@ namespace wgpuWorld
 		float grassDensity = 1;
 		float grassClumps = 1;          // the clumps of short grass between the tufts, 0 (none) to 1
 		float wind = 0.35f;
+		// Shells (roadmap S0; chunkFaces.wgsl's vs_shell).
+		ShellSettings shells;
 
 		// Milestone 15: the post chain's settings (toneMap.frag's uniforms,
 		// as the renderer computes them). Lift and gain already mapped

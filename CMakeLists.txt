@@ -192,3 +192,11 @@ endif()
 target_copy_webgpu_binaries("${CMAKE_PROJECT_NAME}")
 
 
+
+# Roadmap L0's energy check: how much light each lobe of the game's BRDF
+# sends back (tools/brdfEnergy). Not part of the game's build:
+#   cmake --build build --target brdfEnergy && build/brdfEnergy
+add_executable(brdfEnergy EXCLUDE_FROM_ALL "${CMAKE_CURRENT_SOURCE_DIR}/tools/brdfEnergy/brdfEnergy.cpp")
+if(NOT MSVC)
+	target_compile_options(brdfEnergy PRIVATE -O2)
+endif()
