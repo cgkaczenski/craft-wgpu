@@ -23,6 +23,8 @@
 #include <filesystem>
 #include <platformTools.h>
 #include <profiler.h>
+#include <cstdlib>
+#include <cstring>
 
 //todo add to a struct
 ENetHost *server = 0;
@@ -1111,6 +1113,14 @@ void enetServerFunction(std::string path)
 
 
 
+
+	// OURCRAFT_DEBUG_LEVEL=grass: the flat grass field, whatever the world file says.
+	// Chunks already saved keep their old blocks; a new world (debug-grass) is all grass.
+	if (const char *level = std::getenv("OURCRAFT_DEBUG_LEVEL"))
+	{
+		if (std::strcmp(level, "grass") == 0) { wg.isDebugGrass = true; }
+	}
+	if (wg.isDebugGrass) { std::cout << "Debug level: flat grass\n"; }
 
 	// OURCRAFT_WORLDGEN_MAP="x0,z0,x1,z1,file": a picture of this world's
 	// generation over those chunks (writeWorldGenMap), then quit. Nothing is

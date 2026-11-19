@@ -1576,6 +1576,12 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 	newUVData.clear();
 	newUVData.resize(newVertexUVSize);
 
+	// Same layout as the UV table. Zero everywhere but the grass bushes,
+	// whose second UV set addresses the rooibos atlas.
+	static std::vector<float> newAtlasData;
+	newAtlasData.clear();
+	newAtlasData.resize(newVertexUVSize, 0.f);
+
 
 	memcpy(newVertexData.data(), vertexData, sizeof(vertexData));
 	memcpy(newUVData.data(), vertexUV, sizeof(vertexUV));
@@ -1654,6 +1660,12 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 
 		memcpy(newUVData.data() + currentUvIndex, model.uvs.data(),
 			model.uvs.size() * sizeof(float));
+		const bool atlas = model.atlasUvs.size() == model.uvs.size() && !model.uvs.empty();
+		if (atlas)
+		{
+			memcpy(newAtlasData.data() + currentUvIndex, model.atlasUvs.data(),
+				model.atlasUvs.size() * sizeof(float));
+		}
 
 		if (!noRotate)
 		{
@@ -1663,6 +1675,15 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 				model.uvs.size() * sizeof(float));
 			memcpy(newUVData.data() + currentUvIndex + model.uvs.size() * 3, model.uvs.data(),
 				model.uvs.size() * sizeof(float));
+			if (atlas)
+			{
+				memcpy(newAtlasData.data() + currentUvIndex + model.atlasUvs.size(), model.atlasUvs.data(),
+					model.atlasUvs.size() * sizeof(float));
+				memcpy(newAtlasData.data() + currentUvIndex + model.atlasUvs.size() * 2, model.atlasUvs.data(),
+					model.atlasUvs.size() * sizeof(float));
+				memcpy(newAtlasData.data() + currentUvIndex + model.atlasUvs.size() * 3, model.atlasUvs.data(),
+					model.atlasUvs.size() * sizeof(float));
+			}
 		}
 
 
@@ -1693,7 +1714,11 @@ void Renderer::recreateBlockGeometryData(ModelsManager &modelsManager)
 			<< " orientations, more than the 8192 a face can address\n";
 	}
 
-	wgpuWorld::setBlockGeometry(newVertexData, newUVData);
+	wgpuWorld::setBlockGeometry(newVertexData, newUVData, newAtlasData);
+
+	// Tall grass up close draws this instead of the generated blades.
+	const BlockGeometryIndex &bush = blockGeometry[ModelsManager::grassBushNearModel];
+	wgpuWorld::setGrassBush(bush.startIndex, bush.componentCount);
 }
 
 void Renderer::reloadShaders()
@@ -1874,8 +1899,8 @@ namespace
 					const auto type = b.getType();
 					if (type == BlockTypes::grassBlock || type == BlockTypes::yellowGrass)
 					{
-						// A grass top open to the air: it may grow a clump
-						// of short grass (vs_blade decides).
+						// A grass top open to the air: short grass grows on
+						// it (vs_bush tiles the clump across the block).
 						Block &above = chunk.unsafeGet(x, y + 1, z);
 						if (above.air())
 						{

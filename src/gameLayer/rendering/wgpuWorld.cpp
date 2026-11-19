@@ -40,6 +40,7 @@
 #include <render/wgpuContext.h> // the frame capture, for the pass dump's final image
 #include <webgpu/webgpu.hpp>
 #include <stb_image_write/stb_image_write.h>
+#include <stb_image/stb_image.h>
 
 #include <glm/glm.hpp>
 #include <glm/ext/matrix_clip_space.hpp>
@@ -95,6 +96,7 @@ namespace
 		glm::vec4 heldLight;         // the held light: x its level (0 none), y reach, z bands, w dithered share
 		glm::vec4 wet;               // x how wet the ground is, y how hard it rains now (the puddles' rings)
 		glm::vec4 grass;             // x the blades' reach (0 off), y the wind, z the density, w a clump's blades (vs_blade)
+		glm::vec4 bush;              // x the near bush's first corner row, y its quads (vs_bush); y 0 keeps the blades. z is unused (far grass stays the sprite). w 1 when the atlas UVs are loaded
 		glm::vec4 horizonFog;        // x where the world has gone into the sky, y where the fog starts (blocks)
 		glm::vec4 skyZenith;         // rgb the sky straight up, as sky.wgsl draws it (the water mirrors it)
 		glm::vec4 skyHorizon;        // rgb what the sky gains toward the horizon
@@ -106,7 +108,7 @@ namespace
 		glm::vec4 shellShade;        // x the occlusion's attenuation, y its bias, z the push's strength
 		glm::vec4 ripples[64];       // the rings on the water, two each (Lighting's ripples); animation.w how many
 	};
-	static_assert(sizeof(Uniforms) == 1840, "uniform layout must match world.wgsl");
+	static_assert(sizeof(Uniforms) == 1856, "uniform layout must match world.wgsl");
 
 	// The PSX look's lines down the screen: the PlayStation's usual 240.
 	constexpr float psxLines = 240.f;
@@ -397,6 +399,13 @@ namespace
 		RenderPipeline bladeEqualPipeline = nullptr;
 		// The blades into the nearest shadow cascade (vs_bladeShadow).
 		RenderPipeline bladeShadowPipeline = nullptr;
+		// The low-poly bush in place of a tuft's blades (vs_bush).
+		RenderPipeline bushPipeline = nullptr;
+		RenderPipeline bushPrepassPipeline = nullptr;
+		RenderPipeline bushEqualPipeline = nullptr;
+		RenderPipeline bushShadowPipeline = nullptr;
+		int bushFirst = 0;
+		uint32_t bushQuads = 0;
 		// Shells (roadmap S0; vs_shell): layers over the same cells, with
 		// the blades' layout. Lit on its own, or depth first and lit where
 		// it is Equal, as the blades are.
@@ -719,6 +728,24 @@ namespace
 		Buffer blockGeometryBuffer = nullptr;
 		std::vector<float> blockUVs; // 4 corners x 2 floats per orientation
 		Buffer blockUVBuffer = nullptr;
+		std::vector<float> blockAtlasUVs; // the rooibos atlas UVs, same layout as blockUVs
+		Buffer blockAtlasUVBuffer = nullptr;
+		bool bushAtlas = false;
+		Texture rooibosAlbedo = nullptr;
+		TextureView rooibosAlbedoView = nullptr;
+		Texture rooibosNormal = nullptr;
+		TextureView rooibosNormalView = nullptr;
+		Texture rooibosMaterial = nullptr;
+		TextureView rooibosMaterialView = nullptr;
+		Sampler rooibosSampler = nullptr;
+		// The near card clump (grassCardBench), sampled when a bush vertex's
+		// blade.w is 2. Same sampler as the rooibos atlas.
+		Texture cardAlbedo = nullptr;
+		TextureView cardAlbedoView = nullptr;
+		Texture cardNormal = nullptr;
+		TextureView cardNormalView = nullptr;
+		Texture cardMaterial = nullptr;
+		TextureView cardMaterialView = nullptr;
 
 		// The loader's texture slots (BlocksLoader::gpuIds) and what is built
 		// from them: the texture array, its view, the slot -> layer table.
@@ -886,7 +913,7 @@ namespace
 	{
 		ErrorScope scope("world bind group layout");
 
-		constexpr uint32_t worldBindings = 17;
+		constexpr uint32_t worldBindings = 25;
 		BindGroupLayoutEntry entries[worldBindings];
 		entries[0] = Default;
 		entries[0].binding = 0;
@@ -961,6 +988,27 @@ namespace
 		}
 		entries[16] = entries[5];
 		entries[16].binding = 16;
+
+		// 17: the grass bushes' second UV set. 18-20: the rooibos atlas's
+		// albedo, normal and material. 21: its sampler. Far grass stays the
+		// sprite in the block texture array. 22-24: the near card clump.
+		entries[17] = entries[1];
+		entries[17].binding = 17;
+		entries[17].visibility = ShaderStage::Vertex;
+		entries[18] = entries[7];
+		entries[18].binding = 18;
+		entries[19] = entries[18];
+		entries[19].binding = 19;
+		entries[20] = entries[18];
+		entries[20].binding = 20;
+		entries[21] = entries[5];
+		entries[21].binding = 21;
+		entries[22] = entries[7];
+		entries[22].binding = 22;
+		entries[23] = entries[18];
+		entries[23].binding = 23;
+		entries[24] = entries[18];
+		entries[24].binding = 24;
 
 		BindGroupLayoutDescriptor layoutDesc = Default;
 		layoutDesc.label = StringView("world bind group layout");
@@ -1400,6 +1448,31 @@ namespace
 		blades.targets = ColorTargets::None;
 		w.bladeShadowPipeline = createFacePipeline(module, blades);
 
+		// Tall grass up close: the card clump instead of the blades. A card is
+		// one quad, so both sides are drawn, and the prepass cuts the empty
+		// texels (fs_depth) as a face does.
+		FacePipelineDesc bush;
+		bush.label = "world grass bush";
+		bush.layout = w.bladePipelineLayout;
+		bush.vertexEntry = "vs_bush";
+		bush.faceBuffer = false;
+		bush.cull = CullMode::None;
+		w.bushPipeline = createFacePipeline(module, bush);
+		bush.label = "world grass bush, depth Equal";
+		bush.depthCompare = CompareFunction::Equal;
+		bush.depthWrite = false;
+		w.bushEqualPipeline = createFacePipeline(module, bush);
+		bush.label = "world grass bush, depth prepass";
+		bush.depthCompare = CompareFunction::Less;
+		bush.depthWrite = true;
+		bush.fragmentEntry = "fs_depth";
+		bush.targets = ColorTargets::GBufferMasked;
+		w.bushPrepassPipeline = createFacePipeline(module, bush);
+		bush.label = "world grass bush, sun shadow cascade 0";
+		bush.vertexEntry = "vs_bushShadow";
+		bush.targets = ColorTargets::None;
+		w.bushShadowPipeline = createFacePipeline(module, bush);
+
 		// Shells: the same three, less the shadow. Both sides, as the demo
 		// (a layer is seen from below over a ledge).
 		FacePipelineDesc shells;
@@ -1469,6 +1542,7 @@ namespace
 		return w.pipeline && w.waterDepthPipeline && w.peelPipeline && w.finalPeelPipeline
 			&& w.finalPlainPipeline && w.decalPipeline && w.shadowPipelines[0] && w.shadowPipelines[1]
 			&& w.shadowPipelines[2] && w.bladePipeline && w.bladeEqualPipeline && w.bladePrepassPipeline && w.bladeShadowPipeline
+			&& w.bushPipeline && w.bushEqualPipeline && w.bushPrepassPipeline && w.bushShadowPipeline
 			&& w.shellPipeline && w.shellEqualPipeline && w.shellPrepassPipeline && !invalid;
 	}
 
@@ -2565,12 +2639,16 @@ namespace
 
 		if (w.blockGeometryBuffer) { w.blockGeometryBuffer.release(); w.blockGeometryBuffer = nullptr; }
 		if (w.blockUVBuffer) { w.blockUVBuffer.release(); w.blockUVBuffer = nullptr; }
+		if (w.blockAtlasUVBuffer) { w.blockAtlasUVBuffer.release(); w.blockAtlasUVBuffer = nullptr; }
+		if (w.blockAtlasUVs.size() < w.blockUVs.size()) { w.blockAtlasUVs.resize(w.blockUVs.size(), 0.f); }
 
 		w.blockGeometryBuffer = makeStorageBuffer(w.blockGeometry.data(),
 			w.blockGeometry.size() * sizeof(float), "world corner table");
 		w.blockUVBuffer = makeStorageBuffer(w.blockUVs.data(),
 			w.blockUVs.size() * sizeof(float), "world UV table");
-		if (!w.blockGeometryBuffer || !w.blockUVBuffer || scope.failed()) { return false; }
+		w.blockAtlasUVBuffer = makeStorageBuffer(w.blockAtlasUVs.data(),
+			w.blockAtlasUVs.size() * sizeof(float), "world bush atlas UVs");
+		if (!w.blockGeometryBuffer || !w.blockUVBuffer || !w.blockAtlasUVBuffer || scope.failed()) { return false; }
 
 		std::cout << "WebGPU world corner table: " << w.blockGeometry.size() / 12
 			<< " orientations, UV table " << w.blockUVs.size() / 8 << "\n";
@@ -2580,7 +2658,11 @@ namespace
 	// ---- Block textures --------------------------------------------------
 
 	constexpr uint32_t blockTextureSize = 128;
-	constexpr uint32_t blockTextureLevels = 5; // 128 down to 8: GL's GL_TEXTURE_MAX_LOD 4
+	// 128 down to 1. The sampler stops at level 4 (8x8: GL's
+	// GL_TEXTURE_MAX_LOD 4), so faces draw as before; the 1x1 level is each
+	// picture's mean, read with textureLoad (chunkFaces.wgsl's pictureMean).
+	constexpr uint32_t blockTextureLevels = 8;
+	constexpr float blockTextureMaxLod = 4.f;
 
 	bool ensureBlockTexturePipelines()
 	{
@@ -2759,7 +2841,7 @@ namespace
 		}
 		fillLayout.release();
 
-		// Levels 1-4: every layer at once, through 2D-array views of one
+		// Levels 1-7: every layer at once, through 2D-array views of one
 		// level each. WebGPU orders the dispatches; no barrier to write.
 		BindGroupLayout downsampleLayout = w.downsamplePipeline.getBindGroupLayout(0);
 		pass.setPipeline(w.downsamplePipeline);
@@ -2821,7 +2903,7 @@ namespace
 			samplerDesc.minFilter = FilterMode::Nearest;
 			samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
 			samplerDesc.lodMinClamp = 0.0f;
-			samplerDesc.lodMaxClamp = (float)(blockTextureLevels - 1);
+			samplerDesc.lodMaxClamp = blockTextureMaxLod;
 			samplerDesc.compare = CompareFunction::Undefined;
 			samplerDesc.maxAnisotropy = 1; // GL asked for 4; WebGPU allows it only with linear filters
 			w.sampler = wgpuDevice().createSampler(samplerDesc);
@@ -2844,6 +2926,7 @@ namespace
 		BufferUsage usage, const char *label, bool &remade);
 	bool ensureWhiteTexture();
 	Texture createTarget(const char *label, TextureFormat format, TextureUsage usage, int width, int height);
+	bool ensureRooibosTextures();
 	TextureView createTargetView(Texture texture, const char *label, TextureFormat format,
 		TextureAspect aspect, TextureUsage usage);
 
@@ -3003,7 +3086,7 @@ namespace
 		if (w.bindGroup) { w.bindGroup.release(); w.bindGroup = nullptr; }
 		if (w.shadowPassBindGroup) { w.shadowPassBindGroup.release(); w.shadowPassBindGroup = nullptr; }
 
-		constexpr uint32_t worldBindings = 17;
+		constexpr uint32_t worldBindings = 25;
 		BindGroupEntry entries[worldBindings];
 		for (uint32_t i = 0; i < worldBindings; i++) { entries[i] = Default; entries[i].binding = i; }
 		entries[0].buffer = w.uniformBuffer;
@@ -3033,6 +3116,16 @@ namespace
 			w.boundWaterViews[i] = waterViews[i];
 		}
 		entries[16].sampler = w.waterSampler;
+		if (!ensureRooibosTextures()) { return false; }
+		entries[17].buffer = w.blockAtlasUVBuffer;
+		entries[17].size = w.blockAtlasUVBuffer.getSize();
+		entries[18].textureView = w.rooibosAlbedoView;
+		entries[19].textureView = w.rooibosNormalView;
+		entries[20].textureView = w.rooibosMaterialView;
+		entries[21].sampler = w.rooibosSampler;
+		entries[22].textureView = w.cardAlbedoView;
+		entries[23].textureView = w.cardNormalView;
+		entries[24].textureView = w.cardMaterialView;
 
 		BindGroupDescriptor groupDesc = Default;
 		groupDesc.label = StringView("world bind group");
@@ -3079,6 +3172,80 @@ namespace
 		viewDesc.aspect = aspect;
 		viewDesc.usage = usage;
 		return texture.createView(viewDesc);
+	}
+
+	// The rooibos atlas: albedo (with the cut-out in alpha), the normal and
+	// the material map. The grass sprites stay in the block texture array.
+	bool ensureRooibosTextures()
+	{
+		if (w.rooibosAlbedoView && w.rooibosSampler && w.cardAlbedoView) { return true; }
+		if (!w.rooibosSampler)
+		{
+			SamplerDescriptor samplerDesc = Default;
+			samplerDesc.label = StringView("world rooibos sampler");
+			samplerDesc.addressModeU = AddressMode::ClampToEdge;
+			samplerDesc.addressModeV = AddressMode::ClampToEdge;
+			samplerDesc.addressModeW = AddressMode::ClampToEdge;
+			samplerDesc.magFilter = FilterMode::Linear;
+			samplerDesc.minFilter = FilterMode::Linear;
+			samplerDesc.mipmapFilter = MipmapFilterMode::Nearest;
+			samplerDesc.lodMinClamp = 0.f;
+			samplerDesc.lodMaxClamp = 0.f;
+			samplerDesc.compare = CompareFunction::Undefined;
+			samplerDesc.maxAnisotropy = 1;
+			w.rooibosSampler = wgpuDevice().createSampler(samplerDesc);
+			if (!w.rooibosSampler) { return false; }
+		}
+
+		auto load = [](const char *file, const char *label, Texture &texture, TextureView &view) -> bool
+		{
+			if (view) { return true; }
+			int width = 0, height = 0, channels = 0;
+			stbi_set_flip_vertically_on_load(true);
+			unsigned char *pixels = stbi_load(file, &width, &height, &channels, 4);
+			if (!pixels || width <= 0 || height <= 0)
+			{
+				std::cout << "Error loading: " << file << "\n";
+				if (pixels) { stbi_image_free(pixels); }
+				return false;
+			}
+			texture = createTarget(label, TextureFormat::RGBA8Unorm,
+				TextureUsage::TextureBinding | TextureUsage::CopyDst, width, height);
+			if (!texture)
+			{
+				stbi_image_free(pixels);
+				return false;
+			}
+			TexelCopyTextureInfo destination = Default;
+			destination.texture = texture;
+			destination.mipLevel = 0;
+			destination.origin = { 0, 0, 0 };
+			destination.aspect = TextureAspect::All;
+			TexelCopyBufferLayout layout = Default;
+			layout.offset = 0;
+			layout.bytesPerRow = (uint32_t)width * 4;
+			layout.rowsPerImage = (uint32_t)height;
+			Extent3D size = { (uint32_t)width, (uint32_t)height, 1 };
+			wgpuQueue().writeTexture(destination, pixels, (size_t)width * height * 4, layout, size);
+			stbi_image_free(pixels);
+			view = createTargetView(texture, label, TextureFormat::RGBA8Unorm,
+				TextureAspect::All, TextureUsage::TextureBinding);
+			return (bool)view;
+		};
+
+		const std::string dir = RESOURCES_PATH "assets/textures/";
+		return load((dir + "rooibosBush_albedo.png").c_str(), "world rooibos albedo",
+				w.rooibosAlbedo, w.rooibosAlbedoView)
+			&& load((dir + "rooibosBush_normal.png").c_str(), "world rooibos normal",
+				w.rooibosNormal, w.rooibosNormalView)
+			&& load((dir + "rooibosBush_material.png").c_str(), "world rooibos material",
+				w.rooibosMaterial, w.rooibosMaterialView)
+			&& load((dir + "grassCardBench_albedo.png").c_str(), "world grass card albedo",
+				w.cardAlbedo, w.cardAlbedoView)
+			&& load((dir + "grassCardBench_normal.png").c_str(), "world grass card normal",
+				w.cardNormal, w.cardNormalView)
+			&& load((dir + "grassCardBench_material.png").c_str(), "world grass card material",
+				w.cardMaterial, w.cardMaterialView);
 	}
 
 	void releaseTargets()
@@ -5166,6 +5333,7 @@ namespace
 			&w.rayMaskPipeline, &w.rayBlurPipeline, &w.warpPipeline, &w.precipitationPipeline,
 			&w.weatherDrawPipeline, &w.snowPipeline,
 			&w.bladePipeline, &w.bladeEqualPipeline, &w.bladePrepassPipeline, &w.bladeShadowPipeline,
+			&w.bushPipeline, &w.bushEqualPipeline, &w.bushPrepassPipeline, &w.bushShadowPipeline,
 			&w.shellPipeline, &w.shellEqualPipeline, &w.shellPrepassPipeline };
 		for (RenderPipeline *pipeline : pipelines) { onPipeline(*pipeline); }
 		for (RenderPipeline &pipeline : w.shadowPipelines) { onPipeline(pipeline); }
@@ -5213,10 +5381,17 @@ namespace
 	}
 }
 
-void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<float> &uvData)
+void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<float> &uvData,
+	const std::vector<float> &atlasUVs)
 {
 	w.blockGeometry = vertexData;
 	w.blockUVs = uvData;
+	w.blockAtlasUVs = atlasUVs;
+	w.bushAtlas = false;
+	for (float value : w.blockAtlasUVs)
+	{
+		if (value != 0.f) { w.bushAtlas = true; break; }
+	}
 	w.blockGeometryDirty = true;
 }
 
@@ -5477,6 +5652,9 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 	uniforms.heldLight = glm::vec4((float)glm::clamp(lighting.heldLight, 0, 15), 12.f, 5.f, 0.45f);
 	w.frameHeldLight = uniforms.heldLight;
 	w.grassRadius = w.grassCells ? std::max(lighting.grassRadius, 0.f) : 0.f;
+	// Far grass is the sprite. The near card clump ignores this and samples
+	// its own atlas (mixRooibos, blade.w 2).
+	uniforms.bush = glm::vec4((float)w.bushFirst, (float)w.bushQuads, 0.f, w.bushAtlas ? 1.f : 0.f);
 	uniforms.grass = glm::vec4(w.grassRadius, glm::clamp(lighting.wind, 0.f, 1.f),
 		glm::clamp(lighting.grassDensity, 0.f, 1.f), grassClumpBlades * glm::clamp(lighting.grassClumps, 0.f, 1.f));
 	// Shells: over the blades' cells, so off without them. The layers past
@@ -5770,14 +5948,41 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			// as the opaque pass draws them.
 			if (i == 0 && w.bladeShadowPipeline && w.grassBindGroup && w.grassCells && w.grassRadius > 0.f)
 			{
-				shadowPass.setPipeline(w.bladeShadowPipeline);
-				shadowPass.setBindGroup(0, w.shadowPassBindGroup, 0, nullptr);
-				shadowPass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
-				shadowPass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
-				for (const GrassGroup &g : w.grassGroupsNow)
+				bool bladesBound = false, bushBound = false;
+				for (int g = 0; g < grassGroups; g++)
 				{
-					if (!g.cells || !g.bladesPerCell) { continue; }
-					shadowPass.draw((2 * g.segments + 3) * g.bladesPerCell, g.cells, 0, g.firstCell);
+					const GrassGroup &group = w.grassGroupsNow[g];
+					if (!group.cells) { continue; }
+					if (w.bushQuads && w.bushShadowPipeline)
+					{
+						if (!bushBound)
+						{
+							shadowPass.setPipeline(w.bushShadowPipeline);
+							shadowPass.setBindGroup(0, w.shadowPassBindGroup, 0, nullptr);
+							shadowPass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
+							shadowPass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
+							bushBound = true;
+						}
+						for (uint32_t q = 0; q < w.bushQuads; q++)
+						{
+							// clumpTiles copies of each cell (chunkFaces.wgsl's
+							// bushVertex). A tuft group discards all but the first.
+							shadowPass.draw(4, group.cells * grassClumpTiles, q * 4,
+								group.firstCell * grassClumpTiles);
+						}
+					}
+					else if (group.bladesPerCell)
+					{
+						if (!bladesBound)
+						{
+							shadowPass.setPipeline(w.bladeShadowPipeline);
+							shadowPass.setBindGroup(0, w.shadowPassBindGroup, 0, nullptr);
+							shadowPass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
+							shadowPass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
+							bladesBound = true;
+						}
+						shadowPass.draw((2 * group.segments + 3) * group.bladesPerCell, group.cells, 0, group.firstCell);
+					}
 				}
 			}
 			shadowPass.end();
@@ -5830,16 +6035,45 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		// cell; its blades are one strip, each blade's first and last vertex
 		// doubled to join it to the next (vs_blade).
 		const bool blades = w.bladePipeline && w.grassBindGroup && w.grassCells && w.grassRadius > 0.f;
-		auto drawBlades = [&](RenderPipeline pipeline)
+		// Up close the grass is the low-poly bush (one strip per card), tufts
+		// and the short clumps both. No bush loaded: the generated blades stay.
+		auto drawBlades = [&](RenderPipeline bladePipe, RenderPipeline bushPipe)
 		{
-			pass.setPipeline(pipeline);
-			pass.setBindGroup(0, w.bindGroup, 0, nullptr);
-			pass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
-			pass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
-			for (const GrassGroup &g : w.grassGroupsNow)
+			bool bladesBound = false, bushBound = false;
+			for (int g = 0; g < grassGroups; g++)
 			{
-				if (!g.cells || !g.bladesPerCell) { continue; }
-				pass.draw((2 * g.segments + 3) * g.bladesPerCell, g.cells, 0, g.firstCell);
+				const GrassGroup &group = w.grassGroupsNow[g];
+				if (!group.cells) { continue; }
+				if (w.bushQuads && bushPipe)
+				{
+					if (!bushBound)
+					{
+						pass.setPipeline(bushPipe);
+						pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+						pass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
+						pass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
+						bushBound = true;
+					}
+					for (uint32_t q = 0; q < w.bushQuads; q++)
+					{
+						// clumpTiles copies of each cell (chunkFaces.wgsl's
+						// bushVertex). A tuft group discards all but the first.
+						pass.draw(4, group.cells * grassClumpTiles, q * 4,
+							group.firstCell * grassClumpTiles);
+					}
+				}
+				else if (group.bladesPerCell && bladePipe)
+				{
+					if (!bladesBound)
+					{
+						pass.setPipeline(bladePipe);
+						pass.setBindGroup(0, w.bindGroup, 0, nullptr);
+						pass.setBindGroup(1, w.peelBindGroup, 0, nullptr);
+						pass.setBindGroup(2, w.grassBindGroup, 0, nullptr);
+						bladesBound = true;
+					}
+					pass.draw((2 * group.segments + 3) * group.bladesPerCell, group.cells, 0, group.firstCell);
+				}
 			}
 		};
 		// Shells: an instance is a cell again, and its layers one strip, a
@@ -5868,7 +6102,7 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 			if (bladesInPrepass)
 			{
 				DebugGroup group(pass, "grass blades: depth prepass");
-				drawBlades(w.bladePrepassPipeline);
+				drawBlades(w.bladePrepassPipeline, w.bushPrepassPipeline);
 				if (shells)
 				{
 					DebugGroup group(pass, "shells: depth prepass");
@@ -5882,7 +6116,8 @@ void render(Camera &camera, const std::vector<Chunk *> &visibleChunks, const std
 		if (blades)
 		{
 			DebugGroup group(pass, bladesInPrepass ? "grass blades (depth Equal)" : "grass blades (depth Less)");
-			drawBlades(bladesInPrepass ? w.bladeEqualPipeline : w.bladePipeline);
+			drawBlades(bladesInPrepass ? w.bladeEqualPipeline : w.bladePipeline,
+				bladesInPrepass ? w.bushEqualPipeline : w.bushPipeline);
 		}
 		if (shells)
 		{
@@ -6443,6 +6678,12 @@ void setSnow(const SnowLayer &snow)
 	w.snowPending = true;
 }
 
+void setGrassBush(int firstRow, int quads)
+{
+	w.bushFirst = firstRow;
+	w.bushQuads = quads > 0 ? (uint32_t)quads : 0;
+}
+
 void setGrassCells(const std::vector<glm::ivec4> &cells, const GrassGroup groups[grassGroups])
 {
 	if (!w.initialized) { return; }
@@ -6803,6 +7044,10 @@ void shutdown()
 	if (w.bladeEqualPipeline) { w.bladeEqualPipeline.release(); w.bladeEqualPipeline = nullptr; }
 	if (w.bladePrepassPipeline) { w.bladePrepassPipeline.release(); w.bladePrepassPipeline = nullptr; }
 	if (w.bladeShadowPipeline) { w.bladeShadowPipeline.release(); w.bladeShadowPipeline = nullptr; }
+	if (w.bushPipeline) { w.bushPipeline.release(); w.bushPipeline = nullptr; }
+	if (w.bushEqualPipeline) { w.bushEqualPipeline.release(); w.bushEqualPipeline = nullptr; }
+	if (w.bushPrepassPipeline) { w.bushPrepassPipeline.release(); w.bushPrepassPipeline = nullptr; }
+	if (w.bushShadowPipeline) { w.bushShadowPipeline.release(); w.bushShadowPipeline = nullptr; }
 	if (w.shellPipeline) { w.shellPipeline.release(); w.shellPipeline = nullptr; }
 	if (w.shellEqualPipeline) { w.shellEqualPipeline.release(); w.shellEqualPipeline = nullptr; }
 	if (w.shellPrepassPipeline) { w.shellPrepassPipeline.release(); w.shellPrepassPipeline = nullptr; }
@@ -6894,6 +7139,20 @@ void shutdown()
 	if (w.uniformBuffer) { w.uniformBuffer.release(); w.uniformBuffer = nullptr; }
 	if (w.blockGeometryBuffer) { w.blockGeometryBuffer.release(); w.blockGeometryBuffer = nullptr; }
 	if (w.blockUVBuffer) { w.blockUVBuffer.release(); w.blockUVBuffer = nullptr; }
+	if (w.blockAtlasUVBuffer) { w.blockAtlasUVBuffer.release(); w.blockAtlasUVBuffer = nullptr; }
+	if (w.rooibosAlbedoView) { w.rooibosAlbedoView.release(); w.rooibosAlbedoView = nullptr; }
+	if (w.rooibosAlbedo) { w.rooibosAlbedo.destroy(); w.rooibosAlbedo.release(); w.rooibosAlbedo = nullptr; }
+	if (w.rooibosNormalView) { w.rooibosNormalView.release(); w.rooibosNormalView = nullptr; }
+	if (w.rooibosNormal) { w.rooibosNormal.destroy(); w.rooibosNormal.release(); w.rooibosNormal = nullptr; }
+	if (w.rooibosMaterialView) { w.rooibosMaterialView.release(); w.rooibosMaterialView = nullptr; }
+	if (w.rooibosMaterial) { w.rooibosMaterial.destroy(); w.rooibosMaterial.release(); w.rooibosMaterial = nullptr; }
+	if (w.rooibosSampler) { w.rooibosSampler.release(); w.rooibosSampler = nullptr; }
+	if (w.cardAlbedoView) { w.cardAlbedoView.release(); w.cardAlbedoView = nullptr; }
+	if (w.cardAlbedo) { w.cardAlbedo.destroy(); w.cardAlbedo.release(); w.cardAlbedo = nullptr; }
+	if (w.cardNormalView) { w.cardNormalView.release(); w.cardNormalView = nullptr; }
+	if (w.cardNormal) { w.cardNormal.destroy(); w.cardNormal.release(); w.cardNormal = nullptr; }
+	if (w.cardMaterialView) { w.cardMaterialView.release(); w.cardMaterialView = nullptr; }
+	if (w.cardMaterial) { w.cardMaterial.destroy(); w.cardMaterial.release(); w.cardMaterial = nullptr; }
 	if (w.textureLayerBuffer) { w.textureLayerBuffer.release(); w.textureLayerBuffer = nullptr; }
 	if (w.textureArrayView) { w.textureArrayView.release(); w.textureArrayView = nullptr; }
 	if (w.textureArray) { w.textureArray.destroy(); w.textureArray.release(); w.textureArray = nullptr; }

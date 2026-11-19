@@ -1335,7 +1335,7 @@ void displayWorldSelectorMenu(ProgramData &programData)
 
 	static char seed[12] = {};
 	static char name[20] = {};
-	static int currentIndex = 0; //0 normal, 1 super flat
+	static int currentIndex = 0; //0 normal, 1 super flat, 2 debug grass
 	static WorldGeneratorSettings settings;
 	static gl2d::Texture worldPreviewTexture;
 	static WorldGenerator wg;
@@ -1505,6 +1505,7 @@ void displayWorldSelectorMenu(ProgramData &programData)
 						std::ofstream f(finalName + "/worldGenSettings.wgenerator");
 						settings.seed = finalSeed;
 						settings.isSuperFlat = (currentIndex == 1);
+						settings.isDebugGrass = (currentIndex == 2);
 
 						settings.sanitize();
 						f << settings.saveSettings();
@@ -1539,7 +1540,7 @@ void displayWorldSelectorMenu(ProgramData &programData)
 
 					auto buttonBox = glui::Box().xLeft().yBottom().xDimensionPercentage(1.f).yDimensionPixels(150.f)();
 					glui::toggleOptions(renderer, buttonBox, "World type: ", Colors_White,
-						"Normal|Super Flat", &currentIndex, true, programData.ui.font,
+						"Normal|Super Flat|Debug grass", &currentIndex, true, programData.ui.font,
 						programData.ui.buttonTexture, Colors_Gray, crt::mouseOnPicture(),
 						platform::isLMouseHeld(), platform::isLMouseReleased());
 

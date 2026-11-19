@@ -880,6 +880,223 @@ later.
   here is lit by `computePointLightSource`.
 - **A draw or an object per shell**, and counts past 16 or so.
 
+### Grass: closing the gaps between the clumps
+
+Started 2026-11-18 from bug snapshot `2026-11-18_15-57-05` (the
+`debug-grass` world, a tuft on every block): the bright checkered grass top
+showed between the near bush's clumps, and the regular grid of clumps left
+straight lanes of ground. The focus for now is **green grass at noon**; the
+list below waits until that looks right.
+
+**What is in.** In
+[`chunkFaces.wgsl`](../resources/shaders/webgpu/chunkFaces.wgsl):
+- The ground under **green** grass takes the roots' colour
+  (`grassRootColour`, a dark olive), keeping its own texels' light and dark
+  against the picture's mean (`grassGroundTint`). Under a tuft at every
+  distance; on a bare top while the short grass is drawn there. Only where
+  the top's picture is green (`pictureGreen`, green over red and blue in the
+  mean: the grass top 2.1, the snowy top 0.8, dirt 0.5); yellow grass and
+  snow keep their own tops.
+- The mean is true: the block texture array now has mips down to 1x1
+  (`blockTextureLevels` 8 in `wgpuWorld.cpp`), read by `textureLoad`
+  (`pictureMean`). The sampler still stops at level 4, so faces draw as
+  before. (The first version read the middle texel of the 8x8 level, 1/64
+  of the picture: 1.21 times the mean for the grass top, 0.30 for the snowy
+  top.)
+- The near bush's and far cards' feet fade to that same colour over the
+  bottom `grassRootHeight` (0.32 blocks) (`grassRootFade`), only on the
+  plain tuft's sprite (`grassSpriteGreen`, by slot: the snow tuft's picture
+  is as green on average as the plain one, so its colour can't tell them
+  apart).
+- A tuft sits up to 0.1 off the block's middle and 1.0 to 1.25 times as
+  wide, each its own way, by one hash: the near bush (`bushVertex`) and the
+  far cards (`faceVertex`) alike, so rows aren't straight past the reach and
+  a tuft doesn't jump at the hand-off. The short grass's jitter went from
+  0.03 to 0.12 (±0.06).
+- Not needed: bending the cards' normals up. `sunFacing` already lights
+  both kinds of card by an up normal (both carry `plantSpriteFlag`).
+
+Checked at noon in two views: the snapshot's, and `test2` at (179, 70, -26)
+looking down, where the yellow grass top shows untinted between the cards.
+A review of the first version found the tint on every grass top in every
+world (dark green squares under `test2`'s yellow tufts), the false mean and
+the far cards' straight rows; all three are fixed above.
+
+**Later:**
+- **Distance.** Look at a tuft field from far: the far cards on the tinted
+  ground and the hand-off from the near bush. The light band toward the
+  horizon in the snapshot's view is the far cards, not ground (the ground
+  under them is tinted): the sprite's colour against the card atlas's. It
+  is the hardest line in that view now. The near bush keeps a 0.075 shift
+  (`clumpModelCentre`) the far cards don't have.
+- **Yellow and snow tufts up close.** The near bush and the short grass are
+  the green card atlas whatever the cell's sprite, so a yellow lawn turns
+  green in a ring at the grass's reach (older than this work). Either a
+  yellow and a snowy card atlas, or the atlas tinted toward the sprite's
+  mean. Then those tufts get a root colour and a ground tint of their own.
+- **Other light.** Night, rain (wet ground and puddles over the tint), and
+  point lights on the tinted ground and the faded feet.
+- **Short grass on bare tops.** One view (`test2`, looking down) shows no
+  lines of ground at block edges with the larger jitter; not looked at
+  otherwise.
+- **The empty lane.** Before the change a one-block lane ran from under the
+  camera to the horizon along -X with no grass in it; after it, bushes
+  stand in it. Not explained. What is known: the blocks were always there
+  (all 8,408 saved chunks of `debug-grass` are byte for byte the same,
+  including those saved two minutes before the snapshot), so it was the
+  drawing; and the jitter did not hide it (a neighbour's bush reaches about
+  0.7 blocks from its middle, too little to cover a row). The snapshot was
+  from the 15:47 build; `wgpuWorld.h` changed at 16:06 and the game was
+  rebuilt at 16:10, so the fix may be in that change rather than this one.
+- **Tuning.** The root colour is picked by eye, not taken from the card
+  atlas; the fade's strength (0.9), the tuft's jitter and width, and the
+  green test's 1.15 to 1.6, are constants. The fade's height is 0.32 blocks
+  whatever the card's height: short-grass copies are 0.23 to 0.78 blocks
+  tall, so the shortest never reach their own colour. Scale it by the
+  copy's height. Panel sliders, or the colour measured from the cards'
+  lower rows.
+- **Any turn, not right angles.** The corner table stores the bush turned
+  four ways so the wind stays one direction. A free turn needs the sway
+  applied after the turn, in the world's frame.
+- **Filler, if gaps remain.** S1's turf under the clumps, or a few short,
+  wide cards at the roots. Only after the colour work, since filler of a
+  different colour shows as much as the ground did.
+- **Cost.** The tint reads the ground picture's 1x1 mip once per ground
+  fragment under grass. The mips below 8x8 add about 0.1% to the block array's
+  memory. Not timed.
+
+Each of these becomes a switch or a slider in the grass test bench (G1).
+
+### Grass test bench: techniques and their costs
+
+Ideas; nothing is built. Drafted 2026-11-18. The `debug-grass` world becomes
+a lab, not a level: one flat field, fixed camera bookmarks, noon held, the
+wind under control, and every grass technique a switch in a panel, so that a
+look and its cost can be compared side by side. The aim is to learn what
+each technique buys and what it costs, toward grass as convincing as Ghost
+of Tsushima's or Breath of the Wild's, worked out from their published
+techniques, with this game's own models and pictures. Nothing of either
+game's is copied.
+
+**Pixel pictures on realistic shapes.** They can go together: the look of
+grass is mostly its shape, light, density and motion, and those survive a
+coarse picture. The rule is the blocks' texel density, 16 texels a block
+across every model, sampled nearest; a 1024² atlas next to 16-texel dirt
+reads as pasted in. Detail goes into the geometry and the light. Lighting
+snapped to the texel grid (as `bladeGroundShaded`'s dither is) keeps the two
+from clashing. The bench keeps both kinds of picture as a switch, to see it.
+
+**The switches,** each on its own so they can be mixed:
+- Geometry: none, the card bush, the generated blades (`vs_blade`), curved
+  blades made on the GPU (G3), shells (S0); and per band (near, middle,
+  far), which of them.
+- Picture: pixel (16 texels a block), the card atlas, none (a colour from
+  root to tip).
+- Light: the up normal, the blade's own, a mix; rounded blade normals; light
+  through the blade (L6); a sheen; darkening by height; the ground tint;
+  grass casting shadows; grass shadowing itself.
+- Field: density, reach, clumping, colour variation (dry blades), jitter,
+  the hand-off distances.
+- Wind: off, each blade's own sway, gusts rolling across the field.
+
+| # | Milestone | Depends on | Type |
+|---|---|---|---|
+| G0 | The bench: GPU timing, bookmarks, presets, a contact sheet | | Learning |
+| G1 | What exists, as switches | G0 | Learning |
+| G2 | Pixel blades at the blocks' texel density | G1 | Mixed |
+| G3 | Curved blades made on the GPU, clumped | G1 | Learning |
+| G4 | Colour from root to tip, gusts, light through | G3, L6 helps | Learning |
+| G5 | Bands: a technique per distance | G2 or G3 | Mixed |
+
+#### G0. The bench
+
+**Here:** the measuring, before any technique, or every comparison after it
+is a guess.
+
+- **GPU time per pass, in the panel.** There are no GPU timestamps today,
+  and the frame time is held to vsync (even with `PresentMode::Immediate`,
+  a light scene reads 13.34 ms on this Mac). WebGPU's timestamp queries
+  (feature `TimestampQuery`, a query set, `timestampWrites` on a pass,
+  resolved and read back with `serviceReadback`). Apple's GPUs time whole
+  passes, not draws inside one, and the grass draws share the opaque pass:
+  either the grass gets a pass of its own (loading what the pass before
+  left) while the bench is on, or its cost is the opaque pass with it less
+  without it. Decide by trying the first.
+- **Counts:** the grass's triangles, instances and drawn fragments (an
+  atomic, as the sun's count is), next to the times.
+- **Bookmarks:** a few fixed views on the field (eye height looking level,
+  looking down, the horizon), a key or a menu to jump between them, and the
+  time of day and the wind held (`OURCRAFT_DAY_TIME`, a still wind).
+- **Presets:** every switch saved by name in a file beside the world
+  ("Cards", "Pixel blades", "Curved blades", ...), loaded from the panel or
+  `OURCRAFT_GRASS_PRESET`.
+- **The contact sheet:** a scripted run renders every preset from every
+  bookmark into one picture, each tile with its GPU time and counts under
+  it.
+
+**Done when:** the card bush's time on and off can be read in the panel and
+the difference is steady to a tenth of a millisecond; one command makes a
+contact sheet of two presets.
+
+#### G1. What exists, as switches
+
+The card bush, the generated blades, the shells, the ground tint, the root
+fade, the jitter and the far cards, each switched on its own and its band
+chosen, through G0's presets. Some of these are tied together now (the bush
+replaces the blades when it is loaded; the shells need the blades' cells):
+untie them.
+
+**Done when:** a contact sheet of each technique alone, with its time,
+is in this section.
+
+#### G2. Pixel blades at the blocks' texel density
+
+Blades shaped as realistic blades (a taper, a bend, a twist) but coloured a
+texel at a time from the grass's 16-texel picture, as `vs_blade` takes
+one texel now. Their light snapped to the texel grid, as a switch.
+
+**Done when:** at eye height the field reads as grass and as part of the
+block world at once; the contact sheet against the card atlas is here.
+
+#### G3. Curved blades made on the GPU, clumped
+
+The technique Sucker Punch described for Ghost of Tsushima (GDC 2021,
+"Procedural Grass in Ghost of Tsushima"): each blade a curve (Bézier) made
+on the GPU from a seed, many to a block, grouped into clumps that share a
+lean and a height; fewer vertices per blade with distance; a normal rounded
+across the blade so a flat strip lights as a curved one. In WGSL, made by a
+compute pass into a buffer the draw reads, or worked out in the vertex
+stage as `vs_blade` does: try both, it is a cost question.
+
+**Done when:** a field of them at eye height, its time against the card
+bush at the same density of cover.
+
+#### G4. Colour from root to tip, gusts, light through
+
+The look Breath of the Wild is known for: little or no picture, a colour
+running from a dark root to a light tip, large waves of wind rolling over the
+field that brighten the blades they bend, and the sun through the blades when
+looking toward it (L6). Mostly shader terms on G3's blades.
+
+**Done when:** gusts are seen to travel across the field from a bookmark;
+looking toward the sun the tips glow; the time each term adds is here.
+
+#### G5. Bands: a technique per distance
+
+Near, middle and far each take their own technique and density (curved
+blades near, cards or pixel blades in the middle, the ground tint and far
+cards beyond), and the hand-offs dissolve as `spriteDissolved` does now.
+
+**Done when:** walking, no band's edge is seen; a preset's time is below the
+near technique's alone at full reach.
+
+#### Not taking
+
+- **Either game's assets or look copied whole.** The techniques are
+  published; the models, pictures and colours stay this game's.
+- **Grass in the game's settings menu** before the bench has picked what
+  works: the bench's panel is for trying, not for players.
+
 ### Volumes: ideas from Acerola's CS2 smoke
 
 Ideas; nothing is built. Drafted 2026-11-16 from

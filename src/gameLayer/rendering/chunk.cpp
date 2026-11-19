@@ -2195,6 +2195,57 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 
 	};
 
+	// Tall grass far from the camera: grassBushFar.glb, the offset cards, with
+	// the same pictures as the crossed sprite (its own, or snow or yellow
+	// where it stands). Flag bit 2 still hands it to the near bush up close.
+	auto blockBakeLogicForGrassBushFar = [&](int x, int y, int z,
+		std::vector<int> *currentVector, Block &b)
+	{
+		Block *sides[26] = {};
+		getNeighboursLogic(x, y, z, sides, 0);
+
+		bool ocluded = 1;
+		for (int i = 0; i < 6; i++)
+		{
+			if (sides[i] != nullptr && !sides[i]->isOpaque())
+			{
+				ocluded = 0;
+				break;
+			}
+		}
+		if (ocluded) { return; }
+
+		glm::ivec3 position = {x + this->data.x * CHUNK_SIZE, y,
+			z + this->data.z * CHUNK_SIZE};
+		auto color = b.getColor();
+
+		short texture = getGpuIdIndexForBlock(b.getType(), 0);
+		if (sides[BOTTOM] && sides[BOTTOM]->getType() == BlockTypes::snow_dirt)
+		{
+			texture = SNOW_GRASS_TEXTURE_INDEX * 4;
+		}
+		else if (sides[BOTTOM] && sides[BOTTOM]->getType() == BlockTypes::yellowGrass)
+		{
+			texture = YELLOW_GRASS_TEXTURE_INDEX * 4;
+		}
+
+		const Renderer::BlockGeometryIndex &geometry = renderer.blockGeometry[ModelsManager::grassBushFarModel];
+		for (int i = 0; i < geometry.componentCount; i++)
+		{
+			pushFaceShapeTextureAndColor(*currentVector, (short)(i + geometry.startIndex), texture, color);
+			if (dontUpdateLightSystem)
+			{
+				pushFlagsLightAndPosition(*currentVector, position, 0, 0, 15, 0, 0);
+			}
+			else
+			{
+				pushFlagsLightAndPosition(*currentVector, position,
+					0, 0, b.getSkyLight(), b.getLight(), 0);
+			}
+			(*currentVector)[currentVector->size() - 2] |= (1 << 26);
+		}
+	};
+
 	auto blockBakeLogicForTorches = [&](int x, int y, int z,
 		std::vector<int> *currentVector, Block &b)
 	{
@@ -2436,7 +2487,11 @@ bool Chunk::bakeAndDontSendDataToOpenGl(Chunk *left,
 								blockBakeLogicForSlabs(x, y, z, &opaqueGeometry, b);
 							}
 							else
-							if (b.isGrassMesh() || b.isCrossMesh())
+							if (b.getType() == BlockTypes::grass)
+							{
+								blockBakeLogicForGrassBushFar(x, y, z, &opaqueGeometry, b);
+							}
+							else if (b.isGrassMesh() || b.isCrossMesh())
 							{
 								blockBakeLogicForGrassMesh(x, y, z, &opaqueGeometry, b);
 							}

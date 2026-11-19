@@ -82,6 +82,18 @@
 // Nearest, nearest mip, repeat, max LOD 4: the GL texture parameters, less
 // the 4x anisotropy WebGPU only allows with linear filtering.
 @group(0) @binding(5) var blockSampler: sampler;
+// The grass bushes' second UV set. Far grass stays the face's own
+// sprite. The near card clump samples the card atlas with these UVs.
+@group(0) @binding(17) var<storage, read> bushAtlasUV: array<f32>;
+@group(0) @binding(18) var rooibosAlbedo: texture_2d<f32>;
+@group(0) @binding(19) var rooibosNormal: texture_2d<f32>;
+@group(0) @binding(20) var rooibosMaterial: texture_2d<f32>;
+@group(0) @binding(21) var rooibosSampler: sampler;
+// The near card clump (grassCardBench.glb). blade.w 2 samples these instead
+// of the rooibos atlas. The sampler is the rooibos one.
+@group(0) @binding(22) var cardAlbedo: texture_2d<f32>;
+@group(0) @binding(23) var cardNormal: texture_2d<f32>;
+@group(0) @binding(24) var cardMaterial: texture_2d<f32>;
 
 // 18-parity: the water's textures (GL's u_dudv, u_dudvNormal, u_caustics:
 // waterDUDV.png, normal.png, caustics), tiled across the world by the
@@ -164,6 +176,8 @@ struct VertexOutput {
     // to under 1, y which layer it is, zw the place on the block's top, 0..1
     // each way (the demo's uv). 0 for everything else.
     @location(14) shell: vec4f,
+    // Where a grass-bush card sits on the rooibos atlas. 0 for every other face.
+    @location(15) atlasUV: vec2f,
 };
 
 // The texture coordinates to read with: affine in the PSX look.
@@ -224,9 +238,9 @@ const tallGrassFlag = 4u;
 // tuftAboveFlag (past the flags byte, as topOfCubeFlag is).
 const bladeGroundFlag = 8u;
 const tuftAboveFlag = 512u;
-// A plant's crossed sprite (tall grass, a flower, a cobweb: orientations
-// 6-9), set here, past the flags byte: it takes the sun as the ground does
-// (sunFacing).
+// A plant's crossed sprite (a flower, a cobweb: orientations 6-9) or the
+// tall-grass tuft, set here, past the flags byte: it takes the sun as the
+// ground does (sunFacing).
 const plantSpriteFlag = 1024u;
 
 // A texture across span x span blocks: which of its slices this block's face
@@ -470,8 +484,26 @@ fn waveCoordinate(p: vec2f) -> vec2f {
 // block, moved by the animation (u.animation.x, GL's u_timeGrass) as GL
 // moves it. `facePosition` is the block's position, as floats. `surface`
 // is water's surface, its corners' heights (waterCornerDrop), 0 for a source.
-fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, surface: u32) -> vec3f {
+fn animatedCorner(orientation: i32, corner: u32, facePosition: vec3f, surface: u32, tuft: bool) -> vec3f {
     let t = u.animation.x;
+    if (tuft) {
+        // The far grass bush (grassBushFar.glb). Its cards are not the crossed
+        // sprite's rows, so a corner sways when it is off the ground.
+        var shape = cornerShape(orientation, corner);
+        let mask = select(0.0, 1.0, shape.y > -0.2);
+        let dir = normalize(vec2f(0.5, 1.0));
+        let dir2 = normalize(vec2f(0.9, 1.0));
+        let speed = 2.0;
+        let frequency = 2.5;
+        let amplitude = 0.15;
+        let offset = biasUp(cos((facePosition.x * dir.x + facePosition.z * dir.y - t * speed) * frequency))
+            * amplitude;
+        let offset2 = biasUp2(sin((facePosition.x * dir2.x + facePosition.z * dir2.y - t * speed) * frequency))
+            * amplitude;
+        shape.x += mask * (offset * dir.x + offset2 * dir.x);
+        shape.z += mask * (offset * dir.y + offset2 * dir.y);
+        return shape;
+    }
     if (orientation >= 22 && orientation < 36) {
         // Water: its surface corners down 0.08, then the long waves
         // (GL moved them by two sines).
@@ -554,7 +586,19 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
 
     let corner = stripToCorner[vertexIndex];
     let facePosition = vec3f(blockPosition);
-    var shape = animatedCorner(orientation, corner, facePosition, surface);
+    // Tall grass is the tuft model, not orientations 6-9. Flowers and cobwebs
+    // still use those rows.
+    let tuft = (flags & tallGrassFlag) != 0u;
+    var shape = animatedCorner(orientation, corner, facePosition, surface, tuft);
+    if (tuft) {
+        // Off the block's middle and wider by the same hash as its near bush
+        // (bushVertex), so the rows aren't straight past the bush's reach
+        // and a tuft doesn't move at the hand-off.
+        let vary = bladeHash(blockPosition, 6011u);
+        let widen = mix(1.0, 1.25, vary.w);
+        shape = vec3f(shape.x * widen, shape.y, shape.z * widen)
+            + vec3f((vary.x - 0.5) * 0.2, 0.0, (vary.y - 0.5) * 0.2);
+    }
 
     // A tall-grass sprite where blades grow instead: toward the camera it
     // loses its texels one by one (spriteDissolved) while its tuft's blades
@@ -580,6 +624,7 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
 
     var ambientMultiplier = 1.0;
     if (orientation >= 0 && orientation < 16 && !water) { ambientMultiplier = vertexColor[orientation]; }
+    else if (tuft) { ambientMultiplier = vertexColor[6]; }
 
     // defaultShader.vert's normals: the table for cube faces and still
     // water's six, and for every other shape (grass, leaves, flowing water,
@@ -590,8 +635,8 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     else if (orientation == 24) { normal = waterSurfaceNormal(surface); }
     else if (orientation >= 22 && orientation < 28) { normal = faceNormals[orientation - 22]; }
     else {
-        let p2 = animatedCorner(orientation, (corner + 1u) % 4u, facePosition, surface);
-        let p3 = animatedCorner(orientation, (corner + 2u) % 4u, facePosition, surface);
+        let p2 = animatedCorner(orientation, (corner + 1u) % 4u, facePosition, surface, tuft);
+        let p3 = animatedCorner(orientation, (corner + 2u) % 4u, facePosition, surface, tuft);
         normal = normalize(cross(p3 - p2, shape - p2));
     }
 
@@ -606,6 +651,7 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     // come through here, so they still land on the same depth.
     out.position = psxSnap(out.position);
     out.uv = vec2f(vertexUV[uvBase], vertexUV[uvBase + 1u]);
+    out.atlasUV = vec2f(bushAtlasUV[uvBase], bushAtlasUV[uvBase + 1u]);
     out.affineUV = out.uv;
     // A block's four slots: albedo, normal map, material map, parallax.
     out.layer = spannedLayer(textureLayers[textureIndex], orientation, blockPosition);
@@ -615,12 +661,15 @@ fn faceVertex(vertexIndex: u32, face: FaceInput, forShadow: bool) -> VertexOutpu
     out.relative = relative;
     out.normal = normal;
     out.flags = flags | select(0u, topOfCubeFlag, orientation == 2)
-        | select(0u, plantSpriteFlag, orientation >= 6 && orientation < 10);
+        | select(0u, plantSpriteFlag, tuft || (orientation >= 6 && orientation < 10));
     out.blockPos = blockPosition;
     out.inBlock = shape;
     out.light = light;
     out.colors = colors;
-    out.blade = vec4f(0.0, dissolve, 0.0, 0.0);
+    // blade.w 1: a far grass card. It keeps the sprite (mixRooibos). z:
+    // whether its feet fade to the roots' colour (grassSpriteGreen).
+    out.blade = vec4f(0.0, dissolve, select(0.0, 1.0, tuft && grassSpriteGreen(textureIndex)),
+        select(0.0, 1.0, tuft));
     return out;
 }
 
@@ -631,8 +680,8 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> VertexOu
 
 // ---- Grass blades -----------------------------------------------------------
 // Real blades of grass near the camera: tufts where tall grass grows (whose
-// sprites give way to them here, faceVertex), and here and there a small
-// clump of short grass on a grass block's bare top. One instance per
+// sprites give way to them here, faceVertex), and short grass on every bare
+// grass top. One instance per
 // cell, a block the blades stand in (Renderer's grassCellsInView), packed as:
 //   xyz  the block, in world blocks (the blades stand on its floor, y - 0.5)
 //   w    bits 0-7 the light byte, 8-18 the texture index of the tall
@@ -736,10 +785,10 @@ fn spriteDissolved(in: VertexOutput) -> bool {
 }
 
 // The ground under the blades: how much of it their roots and the shade of
-// them cover, 0..1, where a tuft stands (most of its block) and where a
-// clump does (vs_blade's own clump, worked out the same way), a little
-// more in the lush patches. Shown as a dither (bladeGroundShaded), so it is
-// whole texels, darker or not, as the held light's bands are.
+// them cover, 0..1, where a tuft stands (most of its block) and where short
+// grass does (the whole top, out to where the next block's grass meets it),
+// a little more in the lush patches. Shown as a dither (bladeGroundShaded),
+// so it is whole texels, darker or not, as the held light's bands are.
 fn bladeGroundCover(in: VertexOutput) -> f32 {
     if ((in.flags & bladeGroundFlag) == 0u || u.grass.x <= 0.0 || u.grass.z <= 0.0) { return 0.0; }
     // The blades' cell: the block above this top.
@@ -754,14 +803,9 @@ fn bladeGroundCover(in: VertexOutput) -> f32 {
     if ((in.flags & tuftAboveFlag) != 0u) {
         cover = 0.85 * (1.0 - smoothstep(0.12, 0.55, length(at)));
     } else if (u.grass.w > 0.0) {
-        let clump = bladeHash(cell, 6007u);
-        if (clump.z <= mix(0.12, 0.7, cellLush)) {
-            let clumpSize = mix(0.6, 1.0, clump.w);
-            let centre = (clump.xy - 0.5) * 0.55;
-            let reach = 0.32 * clumpSize;
-            cover = 0.75 * (1.0 - smoothstep(reach * 0.3, reach, length(at - centre)))
-                * min(u.grass.w / 16.0, 1.0);
-        }
+        // Out to the edges of the top. The corner of the block is where four
+        // grass tops meet, so the shade holds there too.
+        cover = mix(0.7, 0.88, cellLush) * (1.0 - smoothstep(0.72, 1.05, length(at)));
     }
     return clamp(cover * mix(0.8, 1.0, cellLush), 0.0, 1.0) * shown * min(u.grass.z * 1.5, 1.0);
 }
@@ -778,6 +822,79 @@ fn bladeGroundShaded(in: VertexOutput) -> bool {
 
 // How dark a shaded texel of the ground under the blades is.
 const bladeGroundShade = 0.5;
+
+// The colour grass roots and the ground between them share (linear): a dark
+// olive, about the near card clump's own green in its shade. The ground
+// under grass takes it (grassGroundTint) and the cards fade to it at their
+// foot (grassRootFade), so where the eye sees between two clumps it meets
+// what the clumps' roots are, not the grass block's bright top.
+const grassRootColour = vec3f(0.040, 0.052, 0.014);
+// The colour the near card clump shows (linear): the mean of the texels its
+// quads cover on grassCardBench_albedo. Far cards keep the tall-grass
+// sprite, which is a brighter green, so the same light draws a bright band
+// of them at the horizon. The sprite stays (the card atlas has no mips and
+// would shimmer there); farGrassColour scales it onto this colour.
+const cardColour = vec3f(0.0992, 0.0988, 0.0315);
+// How high up a card, in blocks, it has faded from the root colour to its own.
+const grassRootHeight = 0.32;
+
+// How much of the ground's colour gives way to grassRootColour, 0..1: all of
+// it under a tuft (whose cards are drawn at every distance, near bush or far
+// cards), and on a bare top while the short grass is drawn on it, less as
+// that grass gives way to nothing toward the edge of its reach.
+fn grassGroundTint(in: VertexOutput) -> f32 {
+    if ((in.flags & bladeGroundFlag) == 0u) { return 0.0; }
+    if ((in.flags & tuftAboveFlag) != 0u) { return 1.0; }
+    if (u.grass.x <= 0.0 || u.grass.w <= 0.0 || u.grass.z <= 0.0) { return 0.0; }
+    let cell = in.blockPos + vec3i(0, 1, 0);
+    let cellRelative = vec3f(cell - u.positionInt.xyz) - u.positionFloat.xyz;
+    return 1.0 - bladeSpriteShare(length(cellRelative.xz));
+}
+
+// A picture's mean colour: its 1x1 mip (wgpuWorld's blockTextureLevels),
+// read past the sampler's level clamp. sRGB, as stored.
+fn pictureMean(layer: u32) -> vec4f {
+    let last = i32(textureNumLevels(blockTextures)) - 1;
+    return textureLoad(blockTextures, vec2i(0), i32(layer), last);
+}
+
+// How green a (linear) mean colour is, 0..1: 1 for the plain grass top
+// (green over red and blue about 2.1), 0 for the snowy top (0.8) and dirt
+// (0.5). The ground tint is for green grass only; the others keep their own
+// colours.
+fn pictureGreen(mean: vec3f) -> f32 {
+    return smoothstep(1.15, 1.6, mean.g / max(max(mean.r, mean.b), 0.001));
+}
+
+// A far green card (blade.w 1, blade.z from grassSpriteGreen) recoloured to
+// cardColour. The 1x1 mip averages the clear texels in as black; dividing
+// by its alpha puts the mean back on the opaque ones, and the sprite's own
+// light and dark stay. Yellow and snow tufts, and a painted one, keep the
+// sprite. A generated blade's w is which blade it is, so blade.x stays out.
+fn farGrassColour(in: VertexOutput, albedo: vec3f) -> vec3f {
+    if (in.blade.x > 0.0 || in.blade.w < 0.5 || in.blade.w >= 1.5 || in.blade.z <= 0.0
+        || in.colors != 0u) { return albedo; }
+    let pic = pictureMean(in.layer);
+    let coverage = max(pic.a, 0.02);
+    let mean = max(toLinear(pic.rgb / coverage), vec3f(0.004));
+    return albedo * clamp(cardColour / mean, vec3f(0.15), vec3f(8.0));
+}
+
+// A grass card's foot (the near bush, blade.w 2, or the far cards, w 1):
+// how far it has faded to grassRootColour, 1 at the ground.
+// Only the plain green tuft's (blade.z, from grassSpriteGreen).
+fn grassRootFade(in: VertexOutput) -> f32 {
+    if (in.blade.x > 0.0 || in.blade.w < 1.0) { return 0.0; }
+    return in.blade.z * (1.0 - smoothstep(0.0, grassRootHeight, in.inBlock.y + 0.5));
+}
+
+// Whether a tall-grass sprite slot is the plain green one: not the snow or
+// yellow grass's (blocksLoader.h's SNOW_GRASS_TEXTURE_INDEX and
+// YELLOW_GRASS_TEXTURE_INDEX, four slots each). By slot, not by colour: the
+// snow tuft's picture is as green on average as the plain one.
+fn grassSpriteGreen(textureIndex: u32) -> bool {
+    return textureIndex != 82u * 4u && textureIndex != 97u * 4u;
+}
 
 // A blade's colour: the sprite's picture read up the blade's own column, the
 // row at the blade's height in the block, so a tuft is dark low down and
@@ -816,6 +933,144 @@ fn vs_bladeShadow(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_ind
     return out;
 }
 
+// One corner of the bush, scaled about the card's foot (y = -0.5) so a
+// shorter copy still stands on the ground. Width and height scale apart:
+// short grass is widened to cover its share of the block and kept short.
+fn bushCorner(row: i32, corner: u32, facePosition: vec3f, scaleXZ: f32, scaleY: f32) -> vec3f {
+    let raw = animatedCorner(row, corner, facePosition, 0u, true);
+    return vec3f(raw.x * scaleXZ, (raw.y + 0.5) * scaleY - 0.5, raw.z * scaleXZ);
+}
+
+// Copies of the near clump across a bare grass top (wgpuWorld's
+// grassClumpTiles: keep them alike). The draw passes that many instances
+// per cell, tufts included; a tuft keeps the first and drops the rest.
+// 4x4. The outer copies are centred on the block's edges (±0.5), so the
+// copy on the next grass block lands on the same edge and the two overlap
+// there. A 3x3 left a thin line of ground on that edge: the clumps sat
+// inside the block and only their tips crossed.
+// The model's roots sit about (0.075, 0) off its origin. The corner table
+// stores the bush turned by right angles, (x, z) -> (z, -x) each time, so
+// the shift turns with it. Otherwise three of the four turns sit off their
+// square and the edge opens up again.
+const clumpTilesAxis = 4u;
+const clumpTiles = 16u;
+const clumpModelCentre = vec2f(0.075, 0.002);
+
+fn clumpModelCentreFor(turn: u32) -> vec2f {
+    let c = clumpModelCentre;
+    if (turn == 1u) { return vec2f(c.y, -c.x); }
+    if (turn == 2u) { return vec2f(-c.x, -c.y); }
+    if (turn == 3u) { return vec2f(-c.y, c.x); }
+    return c;
+}
+
+fn clumpTileOffset(tile: u32, scaleXZ: f32, jitter: vec2f, turn: u32) -> vec2f {
+    let tx = f32(tile % clumpTilesAxis);
+    let tz = f32(tile / clumpTilesAxis);
+    // -0.5, -1/6, 1/6, 0.5. The outer two are the block's edges.
+    let grid = (vec2f(tx, tz) - 1.5) / 3.0;
+    return grid + jitter - clumpModelCentreFor(turn) * scaleXZ;
+}
+
+// The near bush (grassCardBench.glb) in place of the grass blades: one of
+// its quads, a 4-vertex strip, placed on the cell. A tall-grass tuft gets
+// the whole bush. Short grass gets sixteen copies, the outer ones on the
+// block's edges so they overlap the next grass block's and the seam between
+// the two is grass, not ground. Its picture is the tuft's
+// own sprite (the card UVs), and it gives way to that tuft's far cards by
+// the same distance the blades did (spriteDissolved). `forShadow` puts it
+// in the nearest cascade, and thins it there as the tuft's shadow takes over.
+fn bushVertex(vertexIndex: u32, instance: u32, forShadow: bool) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = bladeHidden;
+
+    let quads = u32(u.bush.y);
+    let quad = vertexIndex / 4u;
+    if (quads == 0u || quad >= quads) { return out; }
+    let corner = stripToCorner[vertexIndex % 4u];
+
+    // One cell, clumpTiles copies. The group's first instance is its first
+    // cell times that, so dividing lands back on the cell.
+    let cellIndex = instance / clumpTiles;
+    let tile = instance % clumpTiles;
+    let cell = grassCells[cellIndex];
+    let packed = u32(cell.w);
+    let tuft = ((packed >> 19u) & 1u) != 0u;
+    // One of the four right-angle turns, the same one every frame. Each copy
+    // of a clump takes its own. The centre shift below uses this same turn.
+    let turn = u32(bladeHash(cell.xyz, 17u + tile).x * 4.0);
+    var scaleXZ = 1.0;
+    var scaleY = 1.0;
+    var offset = vec2f(0.0);
+    if (tuft) {
+        if (tile != 0u) { return out; }
+        // A little off the block's middle and a little wider, each tuft its
+        // own way, so tufts in a row don't leave straight lanes between them.
+        let vary = bladeHash(cell.xyz, 6011u);
+        scaleXZ = mix(1.0, 1.25, vary.w);
+        offset = (vary.xy - 0.5) * 0.2 - clumpModelCentreFor(turn) * scaleXZ;
+    } else {
+        if (u.grass.w <= 0.0) { return out; }
+        // Height stays short of a tuft. The width is about the model's own:
+        // the edge copies, not a bigger scale, are what close the seam.
+        let cellLush = smoothstep(0.25, 0.75, bladePatch(vec2f(cell.xz)));
+        let vary = bladeHash(cell.xyz, 6007u + tile);
+        scaleXZ = mix(1.2, 1.35, vary.w);
+        scaleY = mix(0.48, 0.74, vary.z) * mix(0.92, 1.05, cellLush);
+        offset = clumpTileOffset(tile, scaleXZ, (vary.xy - 0.5) * 0.12, turn);
+    }
+
+    let cellRelative = vec3f(cell.xyz - u.positionInt.xyz) - u.positionFloat.xyz;
+    let away = length(cellRelative.xz);
+    if (u.grass.x <= 0.0 || away >= u.grass.x) { return out; }
+    var gone = bladeSpriteShare(away);
+    if (forShadow) { gone = max(gone, 1.0 - bladeShadowShare(away)); }
+    if (gone >= 1.0) { return out; }
+
+    let row = i32(u.bush.x) + i32(turn) * i32(quads) + i32(quad);
+    let facePosition = vec3f(cell.xyz);
+    let shape = bushCorner(row, corner, facePosition, scaleXZ, scaleY);
+    let stood = shape + vec3f(offset.x, 0.0, offset.y);
+    let relative = cellRelative + stood;
+    let p2 = bushCorner(row, (corner + 1u) % 4u, facePosition, scaleXZ, scaleY);
+    let p3 = bushCorner(row, (corner + 2u) % 4u, facePosition, scaleXZ, scaleY);
+    let normal = normalize(cross(p3 - p2, shape - p2));
+
+    let textureIndex = (packed >> 8u) & 0x7FFu;
+    let uvBase = u32(row) * 8u + corner * 2u;
+    let placed = vec4f(relative, 1.0);
+    out.position = select(psxSnap(u.viewProjection * placed), u.shadowMatrices[0] * placed, forShadow);
+    out.uv = vec2f(vertexUV[uvBase], vertexUV[uvBase + 1u]);
+    out.atlasUV = vec2f(bushAtlasUV[uvBase], bushAtlasUV[uvBase + 1u]);
+    out.affineUV = out.uv;
+    out.layer = textureLayers[textureIndex] & layerMask;
+    out.normalLayer = textureLayers[textureIndex + 1u] & layerMask;
+    out.materialLayer = textureLayers[textureIndex + 2u] & layerMask;
+    out.ambientMultiplier = vertexColor[6];
+    out.relative = relative;
+    out.normal = normal;
+    out.flags = plantSpriteFlag;
+    out.blockPos = cell.xyz;
+    out.inBlock = stood;
+    out.light = packed & 0xFFu;
+    out.colors = 0u;
+    // A face (blade.x 0), dissolved toward the far bush by spriteDissolved.
+    // z: whether its feet fade to the roots' colour (grassSpriteGreen).
+    // w 2: mixRooibos samples the card atlas on its own.
+    out.blade = vec4f(0.0, gone, select(0.0, 1.0, grassSpriteGreen(textureIndex)), 2.0);
+    return out;
+}
+
+@vertex
+fn vs_bush(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    return bushVertex(vertexIndex, instance, false);
+}
+
+@vertex
+fn vs_bushShadow(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instance: u32) -> VertexOutput {
+    return bushVertex(vertexIndex, instance, true);
+}
+
 // How much of a tuft's shadow, in the nearest cascade, is its blades' (the
 // rest its sprite's), by how far the cell is from the camera: all of it
 // near, none by where that cascade starts to mix with the next
@@ -852,20 +1107,18 @@ fn bladeVertex(vertexIndex: u32, instance: u32, forShadow: bool) -> VertexOutput
     let r2 = bladeHash(cell.xyz, seed + 977u);
     let cellShift = bladeHash(cell.xyz, select(4099u, 5003u, tuft));
 
-    // The patches: lusher grass here, poorer there. For the cell as a whole
-    // (whether it has a clump) and, below, for each blade.
-    let cellLush = smoothstep(0.25, 0.75, bladePatch(vec2f(cell.xz)));
-    // A clump: on some of the bare grass blocks, more of them in the lush
-    // patches; its own place in the block and its own size.
+    // Short grass on every bare top (the bush is the same). Its size only
+    // varies the height; the blades themselves reach the edges of the block.
     let clump = bladeHash(cell.xyz, 6007u);
-    if (!tuft && clump.z > mix(0.12, 0.7, cellLush)) { return out; }
-    let clumpSize = mix(0.6, 1.0, clump.w);
+    if (!tuft && u.grass.w <= 0.0) { return out; }
+    let clumpSize = mix(0.85, 1.0, clump.w);
 
     // Where in the block it stands: the next point of a sequence that fills
-    // its patch evenly however many of them show; about the middle for a
-    // tuft, about the clump's own middle for a clump.
+    // its patch evenly however many of them show. A tuft stays about the
+    // middle. A clump's blades cover the top, a little past the edge so the
+    // next block's meet them.
     let spot = fract(cellShift.xy + f32(number) * vec2f(0.7548776662, 0.5698402910)) - 0.5;
-    let jitter = select((clump.xy - 0.5) * 0.55 + spot * (0.22 + 0.2 * r.x) * clumpSize,
+    let jitter = select(spot * mix(1.04, 1.18, r.x),
         spot * (0.7 + 0.25 * r.x), tuft);
     let cellRelative = vec3f(cell.xyz - u.positionInt.xyz) - u.positionFloat.xyz;
     let base = cellRelative + vec3f(jitter.x, -0.5, jitter.y);
@@ -882,7 +1135,7 @@ fn bladeVertex(vertexIndex: u32, instance: u32, forShadow: bool) -> VertexOutput
     // block is, so it changes as one: wholly gone, no blade.
     let cellAway = length(cellRelative.xz);
     let gone = bladeSpriteShare(cellAway);
-    let count = u.grass.z * select(u.grass.w * clumpSize, bladeTuftCount, tuft);
+    let count = u.grass.z * select(u.grass.w, bladeTuftCount, tuft);
     if (f32(number) >= count || gone >= 1.0) { return out; }
 
     // One texel of the tall grass's picture, its own: the next of a few
@@ -1171,10 +1424,35 @@ fn vs_shadow(@builtin(vertex_index) vertexIndex: u32, face: FaceInput) -> Vertex
     return out;
 }
 
+// Far grass (blade.w 1) keeps the sprite already sampled. The near card
+// clump (blade.w 2) samples the card atlas on its own. textureSampleLevel
+// keeps those reads out of the derivative path.
+struct RooibosTexel {
+    albedo: vec4f,
+    normalMap: vec3f,
+    material: vec3f,
+};
+
+fn mixRooibos(in: VertexOutput, albedo: vec4f, normalMap: vec3f, material: vec3f) -> RooibosTexel {
+    var r: RooibosTexel;
+    r.albedo = albedo;
+    r.normalMap = normalMap;
+    r.material = material;
+    // blade.x is a generated blade, whose w means which blade it is.
+    // Far grass (blade.w 1) stays the sprite passed in.
+    if (in.blade.x > 0.0 || in.blade.w < 2.0 || u.bush.w <= 0.0) { return r; }
+    let uv = in.atlasUV;
+    r.albedo = textureSampleLevel(cardAlbedo, rooibosSampler, uv, 0.0);
+    r.normalMap = textureSampleLevel(cardNormal, rooibosSampler, uv, 0.0).rgb;
+    r.material = textureSampleLevel(cardMaterial, rooibosSampler, uv, 0.0).rgb;
+    return r;
+}
+
 // The depth prepass (zpass.frag): no color, only the alpha test.
 @fragment
 fn fs_depth(in: VertexOutput) {
-    let albedo = textureSample(blockTextures, blockSampler, faceUV(in), in.layer);
+    let sampled = textureSample(blockTextures, blockSampler, faceUV(in), in.layer);
+    let albedo = mixRooibos(in, sampled, vec3f(0.5, 0.5, 1.0), vec3f(1.0, 0.0, 0.0)).albedo;
     if (albedo.a <= 0.0 || spriteDissolved(in)) { discard; }
 }
 
@@ -1272,6 +1550,10 @@ fn readTexels(in: VertexOutput) -> Texels {
     t.albedo = textureSample(blockTextures, blockSampler, uv, in.layer);
     t.normalMap = textureSample(blockTextures, blockSampler, uv, in.normalLayer).rgb;
     t.material = textureSample(blockTextures, blockSampler, uv, in.materialLayer).rgb;
+    let rooibos = mixRooibos(in, t.albedo, t.normalMap, t.material);
+    t.albedo = rooibos.albedo;
+    t.normalMap = rooibos.normalMap;
+    t.material = rooibos.material;
     t.ao = textureSample(aoTexture, aoSampler, aoCoordinate(in.flags, uv)).r;
     t.water.p = vec2f(-f32(in.blockPos.z), -f32(in.blockPos.x)) + uv;
     t.water.dx = dpdx(t.water.p);
@@ -1489,6 +1771,22 @@ fn shade(in: VertexOutput, t: Texels, frontFacing: bool) -> Shaded {
     }
     // (On water those bits say which way it runs, not a paint.)
     if (!water) { albedo = paintAlbedo(albedo, in.colors); }
+    // Far green cards: the sprite, brought to the near cards' colour so the
+    // horizon is not a brighter band of a different green.
+    if (!water) { albedo = farGrassColour(in, albedo); }
+    // The ground under grass, recoloured to the roots' colour. Its own
+    // texels' light and dark stay: each is scaled by how it stands to the
+    // picture's mean (its last mip), so the top still reads as texels.
+    var groundTint = grassGroundTint(in);
+    if (groundTint > 0.0) {
+        let mean = toLinear(pictureMean(in.layer).rgb);
+        groundTint *= pictureGreen(mean);
+        let luma = vec3f(0.2126, 0.7152, 0.0722);
+        let pattern = clamp(dot(albedo, luma) / max(dot(mean, luma), 0.001), 0.6, 1.6);
+        albedo = mix(albedo, grassRootColour * pattern, groundTint);
+    }
+    let rootFade = grassRootFade(in);
+    if (rootFade > 0.0) { albedo = mix(albedo, grassRootColour, rootFade * 0.9); }
     if (bladeGroundShaded(in)) { albedo *= bladeGroundShade; }
     // Under the shells the top is their layer 0: their colour, at the root.
     if (in.shell.x == 0.0 && shellGround(in)) { albedo = u.shellColour.rgb * shellOcclusion(0.0); }

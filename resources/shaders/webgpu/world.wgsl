@@ -75,6 +75,13 @@ struct Uniforms {
     // y the wind, 0..1, z how dense, 0..1, w a clump of short grass's
     // blades next to the camera (0: no clumps).
     grass: vec4f,
+    // The low-poly bush drawn in place of the grass blades
+    // (chunkFaces.wgsl's vs_bush, grassBushNear.glb). x its first row in the
+    // corner table, y how many quads one turn of it is (the other three
+    // turns follow, a right angle apart). y 0: no bush, the blades stay.
+    // z is unused: far grass stays the sprite. w 1 when the atlas UVs
+    // are loaded. The near cards sample their own atlas.
+    bush: vec4f,
     // The horizon fog (chunkFaces.wgsl's computeFog): x how far from the
     // camera the world has gone wholly into the sky, in blocks, y where the
     // fog starts. x follows the nearest chunk not drawn yet, so the fog

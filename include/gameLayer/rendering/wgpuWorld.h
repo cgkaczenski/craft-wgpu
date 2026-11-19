@@ -177,6 +177,11 @@ namespace wgpuWorld
 	constexpr uint32_t grassTuftSegments[grassBands] = {4, 3, 2};
 	constexpr float grassClumpBlades = 16.f;
 	constexpr uint32_t grassClumpSegments = 3;
+	// Copies of the near card clump across a bare grass top. The outer ones
+	// sit on the block's edges, so the next grass block's copy meets them
+	// (chunkFaces.wgsl's clumpTiles: keep them alike). A tuft stays one
+	// bush; the shader drops the extra copies.
+	constexpr uint32_t grassClumpTiles = 16;
 	struct GrassGroup
 	{
 		uint32_t firstCell = 0, cells = 0;
@@ -185,10 +190,19 @@ namespace wgpuWorld
 	};
 	void setGrassCells(const std::vector<glm::ivec4> &cells, const GrassGroup groups[grassGroups]);
 
+	// The card clump (grassCardBench.glb) drawn up close in place of the
+	// grass blades (chunkFaces.wgsl's vs_bush). `firstRow` is its first
+	// corner-table row, `quads` how many quads one turn of it is. quads 0
+	// leaves the blades.
+	void setGrassBush(int firstRow, int quads);
+
 	// The corner table (4 corners x 3 floats per face orientation) and the UV
 	// table (4 corners x 2 floats) that Renderer::recreateBlockGeometryData
 	// builds for OpenGL's u_vertexData and vertexUV.
-	void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<float> &uvData);
+	// `atlasUVs` matches `uvData`'s layout (4 corners x 2 floats per row) and
+	// is zero except on the grass bushes, where it addresses the rooibos atlas.
+	void setBlockGeometry(const std::vector<float> &vertexData, const std::vector<float> &uvData,
+		const std::vector<float> &atlasUVs);
 
 	// BlocksLoader::gpuIds, the texture slots a face's texture index picks
 	// (4 per block), each a wgpu2d texture id. The world copies those

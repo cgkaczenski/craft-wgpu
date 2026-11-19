@@ -144,8 +144,8 @@ struct Renderer
 	// how far from the camera they reach, in blocks, and how dense, 0..1.
 	float grassRadius = 22.f;
 	float grassDensity = 1.f;
-	// The clumps of short grass on the grass blocks between the tufts: how
-	// full they are, 0 (none) to 1.
+	// The short grass on bare grass tops, between the tufts: how full it is,
+	// 0 (none) to 1. At 1 it covers the block, out to the next grass block.
 	float grassClumps = 1.f;
 	// Shells (roadmap S0): the shell-texturing demo on the grass tops, for
 	// looking at. The panel's "Shells", or OURCRAFT_SHELLS=<layers>,

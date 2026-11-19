@@ -148,6 +148,10 @@ struct BlockModel
 {
 	std::vector<float> vertices;
 	std::vector<float> uvs;
+	// A second UV set on the grass bushes: where a card sits on the rooibos
+	// atlas. Empty for every other model. The first UV set still addresses
+	// the grass sprite, so the two pictures can be mixed.
+	std::vector<float> atlasUvs;
 
 	glm::vec3 minPos = {};
 	glm::vec3 maxPos = {};
@@ -225,6 +229,8 @@ struct ModelsManager
 		fenceBack,
 		fenceLeft,
 		fenceRight,
+		grassBushFarModel,  // the few cards baked into a chunk, seen from a distance
+		grassBushNearModel, // the card clump drawn up close, where the far cards give way
 
 		BLOCK_MODELS_COUNT
 

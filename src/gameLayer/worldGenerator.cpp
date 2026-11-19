@@ -437,9 +437,28 @@ static int pickChunkBiome(WorldGenerator &wg, BiomesManager &biomesManager, int 
 	return currentBiomeIndex;
 }
 
+// Dirt under a grass block, with a grass plant on every column. The same in
+// every chunk, so the field runs in every direction.
+static void generateDebugGrass(ChunkData &c)
+{
+	c.clear();
+	c.biome = BiomesManager::plains;
+	constexpr int surface = 8;
+	for (int x = 0; x < CHUNK_SIZE; x++)
+		for (int z = 0; z < CHUNK_SIZE; z++)
+		{
+			for (int y = 0; y < surface; y++)
+			{
+				c.unsafeGet(x, y, z).setType(BlockTypes::dirt);
+			}
+			c.unsafeGet(x, surface, z).setType(BlockTypes::grassBlock);
+			c.unsafeGet(x, surface + 1, z).setType(BlockTypes::grass);
+		}
+}
+
 void computeChunkBiome(ChunkData &c, WorldGenerator &wg, BiomesManager &biomesManager)
 {
-	if (wg.isSuperFlat) { c.biome = BiomesManager::plains; return; }
+	if (wg.isSuperFlat || wg.isDebugGrass) { c.biome = BiomesManager::plains; return; }
 
 	float interpolateValues[16 * 16] = {};
 	float borderingFactor[16 * 16] = {};
@@ -463,6 +482,12 @@ void generateChunk(ChunkData& c, WorldGenerator &wg, StructuresManager &structur
 {
 	//PL::Profiler profiler;
 	//profiler.start();
+
+	if (wg.isDebugGrass)
+	{
+		generateDebugGrass(c);
+		return;
+	}
 
 	if (wg.isSuperFlat)
 	{

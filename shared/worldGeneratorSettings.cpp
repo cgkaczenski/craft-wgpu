@@ -254,6 +254,7 @@ void WorldGenerator::applySettings(WorldGeneratorSettings &s)
 	alternativePatchesOfBlocks->SetCellularNoiseLookupType(FastNoiseSIMD::NoiseType::Simplex);
 
 	isSuperFlat = s.isSuperFlat;
+	isDebugGrass = s.isDebugGrass;
 }
 
 
@@ -546,7 +547,11 @@ std::string WorldGeneratorSettings::saveSettings()
 
 	rez += "seed: "; rez += std::to_string(seed); rez += ";\n";
 
-	if (isSuperFlat)
+	if (isDebugGrass)
+	{
+		rez += "debugGrass: 1;\n";
+	}
+	else if (isSuperFlat)
 	{
 		rez += "superFlat: 1;\n";
 	}
@@ -1128,6 +1133,13 @@ bool WorldGeneratorSettings::loadSettings(const char *data)
 					if (isEof()) { return 0; }
 					if (!isNumber()) { return 0; }
 					isSuperFlat = consumeNumber();
+					if (!consume(Token{TokenSymbol, "", ';', 0})) { return 0; }
+				}else if (s == "debugGrass")
+				{
+					if (!consume(Token{TokenSymbol, "", ':', 0})) { return 0; }
+					if (isEof()) { return 0; }
+					if (!isNumber()) { return 0; }
+					isDebugGrass = consumeNumber();
 					if (!consume(Token{TokenSymbol, "", ';', 0})) { return 0; }
 				}
 				else if (s == "continentalnessNoise")

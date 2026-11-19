@@ -482,14 +482,22 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 
 		const aiScene *scene = importer.ReadFile(path, flags);
 
-		if (scene && scene->mRootNode->mNumChildren)
+		// A file with one object keeps that mesh on the root. The others put
+		// an empty root over their pieces. Read both, or a one-piece model
+		// (the grass tuft) loads as nothing.
+		if (scene && scene->mRootNode &&
+			(scene->mRootNode->mNumMeshes || scene->mRootNode->mNumChildren))
 		{
 			blockModel.maxPos = glm::vec3{-10000,-10000,-10000};
 			blockModel.minPos = glm::vec3{10000,10000,10000};
 
-			for (unsigned int i = 0; i < scene->mRootNode->mNumChildren; ++i)
+			const unsigned nodeCount = scene->mRootNode->mNumChildren
+				+ (scene->mRootNode->mNumMeshes ? 1u : 0u);
+			for (unsigned int i = 0; i < nodeCount; ++i)
 			{
-				const aiNode *node = scene->mRootNode->mChildren[i];
+				const aiNode *node = (scene->mRootNode->mNumMeshes && i == 0)
+					? scene->mRootNode
+					: scene->mRootNode->mChildren[i - (scene->mRootNode->mNumMeshes ? 1u : 0u)];
 				aiMatrix4x4 transform = node->mTransformation;
 
 				for (int m = 0; m < node->mNumMeshes; m++)
@@ -693,6 +701,17 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 							blockModel.uvs.push_back(mesh->mTextureCoords[0][q.d].x);
 							blockModel.uvs.push_back(mesh->mTextureCoords[0][q.d].y);
 
+							if (mesh->mTextureCoords[1])
+							{
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.a].x);
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.a].y);
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.b].x);
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.b].y);
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.c].x);
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.c].y);
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.d].x);
+								blockModel.atlasUvs.push_back(mesh->mTextureCoords[1][q.d].y);
+							}
 						}
 					}
 				}
@@ -760,16 +779,76 @@ void ModelsManager::loadAllModels(std::string path, bool reportErrors)
 		"fence_back.glb",
 		"fence_left.glb",
 		"fence_right.glb",
+		"grassBushFar.glb",
+		"grassCardBench.glb",
 	};
 
 	static_assert(sizeof(blockModelsNames) / sizeof(blockModelsNames[0]) == BLOCK_MODELS_COUNT);
 	
 
+	// The face renderer culls back faces, and the far bush's cards are one sided
+	// in the file. Each card's other side is the same quad, wound the other way
+	// (corners 0,3,2,1), so the grass picture shows from both directions.
+	auto addCardBacks = [](BlockModel &model)
+	{
+		const size_t quads = model.vertices.size() / 12;
+		if (quads == 0) { return; }
+		std::vector<float> vertices = model.vertices;
+		std::vector<float> uvs = model.uvs;
+		const bool atlas = model.atlasUvs.size() == uvs.size() && !uvs.empty();
+		std::vector<float> atlasUvs = atlas ? model.atlasUvs : std::vector<float>{};
+		const int order[4] = {0, 3, 2, 1};
+		for (size_t q = 0; q < quads; q++)
+		{
+			for (int k = 0; k < 4; k++)
+			{
+				const int s = order[k];
+				model.vertices.push_back(vertices[q * 12 + s * 3 + 0]);
+				model.vertices.push_back(vertices[q * 12 + s * 3 + 1]);
+				model.vertices.push_back(vertices[q * 12 + s * 3 + 2]);
+				if (!uvs.empty())
+				{
+					model.uvs.push_back(uvs[q * 8 + s * 2 + 0]);
+					model.uvs.push_back(uvs[q * 8 + s * 2 + 1]);
+				}
+				if (atlas)
+				{
+					model.atlasUvs.push_back(atlasUvs[q * 8 + s * 2 + 0]);
+					model.atlasUvs.push_back(atlasUvs[q * 8 + s * 2 + 1]);
+				}
+			}
+		}
+	};
+
 	for (int i = 0; i < BLOCK_MODELS_COUNT; i++)
 	{
 
 		if (!blockModels[i].vertices.size())
+		{
 			loadBlockModel((path + blockModelsNames[i]).c_str(), blockModels[i]);
+			if (i == grassBushFarModel)
+			{
+				addCardBacks(blockModels[i]);
+				if (blockModels[i].vertices.empty())
+				{
+					std::cout << "Error loading: " << path << "grassBushFar.glb\n";
+				}
+			}
+			// One quad per card. With none of them kept, the grass up close stays
+			// the generated blades.
+			if (i == grassBushNearModel)
+			{
+				const size_t quads = blockModels[i].vertices.size() / 12;
+				if (quads == 0)
+				{
+					std::cout << "Error loading: " << path << "grassCardBench.glb\n";
+				}
+				else
+				{
+					std::cout << "Near grass cards: " << quads << " quads\n";
+				}
+			}
+		}
 
 	}
 

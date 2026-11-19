@@ -51,6 +51,8 @@ struct WorldGeneratorSettings
 	NoiseSetting iceNoise;
 
 	bool isSuperFlat = 0;
+	// A test field: dirt, a grass block, and grass on top, flat in every direction.
+	bool isDebugGrass = 0;
 
 	//todo remove
 	Spline peaksAndValiesContributionSpline;
@@ -186,6 +188,7 @@ struct WorldGenerator
 
 	FastNoiseSIMD *alternativePatchesOfBlocks;
 	bool isSuperFlat = 0;
+	bool isDebugGrass = 0;
 
 
 	void init();
